@@ -14,6 +14,7 @@
 | 2026-09-25 | apply | 完成 Task 2 AgentScope 2.0.3 编译探针 | Harness/Model/Tool/Sub-Agent/RuntimeContext/MCP 共 4 项测试通过 |
 | 2026-09-25 | apply | 完成 Task 3 领域模型与 Gateway 契约 | 16 个生产类；领域契约与 ArchUnit 共 4 项测试通过 |
 | 2026-09-25 | apply | 完成 Task 4 Session 路由、命令与审计存储 | domain/app/infra 回归共 14 项测试通过；审计无 history loader |
+| 2026-09-25 | apply | 完成 Task 5 邮箱、共享工作区与事件日志 | Python golden、三态并发、权限/逃逸、事件 seq 与损坏行恢复测试通过；Task 5 命令共 32 项测试 |
 
 ## 技术决策
 
@@ -42,6 +43,7 @@
 | workspace 原样复制不可运行 | CrewAI Skill/工具名与 AgentScope 语义不同，classpath 不可长期写 | 转换 Skill/Sub-Agent 并初始化到外部 workspace | 是 |
 | 迁移模块遗漏 | 仅按核心链路拆任务，没有逐文件盘点 | 新增完整迁移矩阵 | 是 |
 | 测试无法证明跨语言等价 | 原计划主要是 Java 单元测试 | 增加 Python golden contract、集成和 4 E2E | 是 |
+| Mockito 5 inline mock maker 在当前 JDK 无法自附加 | 当前运行环境拒绝 Byte Buddy 动态 attach | Task 5 新测试使用确定性 fake；App 测试配置 `mock-maker-subclass` 后全量回归通过 | 否 |
 
 ## 知识发现
 

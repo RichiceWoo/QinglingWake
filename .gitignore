@@ -21,7 +21,7 @@ credentials/
 # 运行时数据、日志与外部工作区
 data/
 logs/
-workspace/
+/workspace/
 *.log
 *.pid
 

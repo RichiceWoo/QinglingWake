@@ -20,25 +20,28 @@ public interface MailboxRepository {
     /**
      * 原子读取 unread 邮件并转为 in_progress。
      *
+     * @param projectId 所属项目标识
      * @param role 目标角色
      * @return 状态切换后的快照
      */
-    List<MailMessage> claimUnread(String role);
+    List<MailMessage> claimUnread(String projectId, String role);
 
     /**
      * 将指定 in_progress 邮件标记为 done。
      *
+     * @param projectId 所属项目标识
      * @param role 邮箱角色
      * @param messageId 邮件标识
      */
-    void markDone(String role, String messageId);
+    void markDone(String projectId, String role, String messageId);
 
     /**
      * 把超过处理时限的邮件恢复为 unread。
      *
+     * @param projectId 所属项目标识
      * @param role 邮箱角色
      * @param timeout 处理超时时间
      * @return 恢复数量
      */
-    int resetStale(String role, Duration timeout);
+    int resetStale(String projectId, String role, Duration timeout);
 }

@@ -8,6 +8,13 @@ import java.util.List;
 public interface WorkspaceRepository {
 
     /**
+     * 幂等初始化项目目录、四角色邮箱和事件文件。
+     *
+     * @param projectId 项目标识
+     */
+    void initializeProject(String projectId);
+
+    /**
      * 读取项目内共享文本文件。
      *
      * @param projectId 项目标识

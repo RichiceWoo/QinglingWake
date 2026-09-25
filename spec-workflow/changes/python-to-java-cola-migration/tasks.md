@@ -87,7 +87,7 @@
 - **验收标准**：Python golden fixtures 可被 Java 读取；Java 输出满足相同 JSON 契约。
 - **验证命令**：`mvn -pl qingling-team-domain,qingling-team-infra -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 6：Human checkpoint、分类与自评
 

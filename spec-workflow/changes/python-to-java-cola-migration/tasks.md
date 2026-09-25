@@ -135,7 +135,7 @@
 - **验收标准**：初始化重复执行不覆盖运行数据；当前实际扫描到的 35 个源 `SKILL.md` 逐项有迁移结果，后续新增 Skill 也由清单检查发现；四角色均可发现预期 Skill。
 - **验证命令**：`mvn -pl qingling-team-infra,qingling-team-starter -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 9：AgentScope Tools 与角色 ToolKit
 

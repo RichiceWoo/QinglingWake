@@ -115,7 +115,7 @@
 - **验收标准**：发邮件后 1 秒内产生目标角色 wake；at + heartbeat 不重复执行；清理规则和权限文件初始化可测试。
 - **验证命令**：`mvn -pl qingling-team-app,qingling-team-infra -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 8：workspace 模板转换与外部初始化
 

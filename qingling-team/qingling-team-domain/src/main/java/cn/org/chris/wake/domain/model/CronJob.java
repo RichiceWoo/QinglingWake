@@ -25,7 +25,7 @@ public record CronJob(
         /** 最近一次调度状态。 */ State state,
         /** 创建时间，单位毫秒。 */ long createdAtMs,
         /** 更新时间，单位毫秒。 */ long updatedAtMs,
-        /** 是否在成功执行后删除。 */ boolean deleteAfterRun
+        /** 是否在本次执行结束后删除，不区分成功或失败。 */ boolean deleteAfterRun
 ) {
     /**
      * 校验任务的必需字段。

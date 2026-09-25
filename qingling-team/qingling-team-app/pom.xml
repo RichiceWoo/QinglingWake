@@ -16,5 +16,9 @@
             <artifactId>qingling-team-domain</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <dependency>
+            <groupId>com.cronutils</groupId>
+            <artifactId>cron-utils</artifactId>
+        </dependency>
     </dependencies>
 </project>

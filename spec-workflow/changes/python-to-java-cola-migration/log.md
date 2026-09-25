@@ -16,6 +16,7 @@
 | 2026-09-25 | apply | 完成 Task 4 Session 路由、命令与审计存储 | domain/app/infra 回归共 14 项测试通过；审计无 history loader |
 | 2026-09-25 | apply | 完成 Task 5 邮箱、共享工作区与事件日志 | Python golden、三态并发、权限/逃逸、事件 seq 与损坏行恢复测试通过；Task 5 命令共 32 项测试 |
 | 2026-09-25 | apply | 完成 Task 6 Human checkpoint、分类与自评 | callback/id/latest pending 分类优先级、JSONL resolve marker、五维 HALF_UP 自评及 Python golden 通过；对应命令共 57 项测试 |
+| 2026-09-26 | apply | 完成 Task 7 Cron、wake、heartbeat 与 Cleanup | at/every/cron、时区、mtime+size 热重载、并发 wake 去重、四角色错峰、同角色 heartbeat 抑制、data root 防逃逸及凭证权限通过；对应命令共 72 项测试 |
 
 ## 技术决策
 
@@ -46,6 +47,7 @@
 | 测试无法证明跨语言等价 | 原计划主要是 Java 单元测试 | 增加 Python golden contract、集成和 4 E2E | 是 |
 | Mockito 5 inline mock maker 在当前 JDK 无法自附加 | 当前运行环境拒绝 Byte Buddy 动态 attach | Task 5 新测试使用确定性 fake；App 测试配置 `mock-maker-subclass` 后全量回归通过 | 否 |
 | self_score 结构化输出与 raw 同时存在 | Python 只要 `json_output` 声明了 `self_score` 就不再回退 raw | Java 提取器保持相同优先级，避免用 raw 掩盖结构化分数错误 | 否 |
+| 同角色 AT wake 与 heartbeat 同时到期 | 两个 Cron job 都投递会让同一角色重复执行 | Cron tick 优先投递业务 wake，同时推进 heartbeat 的下次时间但不重复投递 | 否 |
 
 ## 知识发现
 
@@ -67,6 +69,7 @@
 | 测试 | 原文主要覆盖 domain/app 单测 | 用户选择 5A | 增加契约、IT-01～06 和 4 E2E |
 | `Mono.toFuture()` 探针 | Spec 要求从 Agent 调用边界验证 | 使用无外部调用的 `Mono<Msg>` 固化转换类型，正式 gateway 继续以真实 `agent.call(...).toFuture()` 验证 | 避免探针请求真实模型 |
 | Session 索引表示 | domain 只暴露当前活跃 `SessionRoute` | infra 在兼容 JSON 中保留每个 routing key 的历史 `sessions` 数组 | Harness 管模型 state；索引历史仅用于路由元数据兼容 |
+| wake 去重原子性 | Python `schedule_wake` 的查重与 `create_job` 分属两次文件锁 | Java Repository 在一次跨线程/跨进程文件锁内完成查重和追加 | 消除并发 send_mail 产生重复 wake 的窗口 |
 
 ## 代码质量备忘
 

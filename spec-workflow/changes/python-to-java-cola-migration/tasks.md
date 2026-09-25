@@ -101,7 +101,7 @@
 - **验收标准**：源 `test_feishu_bridge.py` 与 `test_self_score.py` 的场景全部有 Java 对应测试。
 - **验证命令**：`mvn -pl qingling-team-domain,qingling-team-app,qingling-team-infra -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 7：Cron、wake、heartbeat 与 Cleanup
 

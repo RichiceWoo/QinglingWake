@@ -1,0 +1,11 @@
+{
+  "self_score": 0.85,
+  "breakdown": {
+    "completeness": 1.0,
+    "self_review": 0.9,
+    "hard_constraints": 1.0,
+    "clarity": 0.6,
+    "timeliness": 0.8
+  },
+  "rationale": "Python self_score fixture"
+}

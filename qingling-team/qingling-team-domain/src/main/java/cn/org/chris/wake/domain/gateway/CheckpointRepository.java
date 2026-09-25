@@ -28,6 +28,13 @@ public interface CheckpointRepository {
     boolean resolve(String checkpointId, Instant resolvedAt);
 
     /**
+     * 查询全部尚未解决的 checkpoint。
+     *
+     * @return 按文件注册顺序排列的 pending 列表
+     */
+    List<PendingCheckpoint> findPending();
+
+    /**
      * 查询指定路由当前尚未解决的 checkpoint。
      *
      * @param routingKey 业务路由键

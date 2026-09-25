@@ -211,3 +211,5 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 | 2026-09-25 | `mvn test` | 通过（全 6 模块，14 tests） | Reactor Summary 全部 SUCCESS |
 | 2026-09-25 | `mvn -pl qingling-team-domain,qingling-team-infra -am test` | 通过（32 tests） | Task 5 Python golden、邮箱三态/并发/stale、Workspace 权限与逃逸防护、事件 seq/损坏行恢复 |
 | 2026-09-25 | `mvn test` | 通过（全 6 模块，36 tests） | Task 1～5 全量回归；Reactor Summary 全部 SUCCESS |
+| 2026-09-25 | `mvn -pl qingling-team-domain,qingling-team-app,qingling-team-infra -am test` | 通过（57 tests） | Task 6 Python golden、checkpoint 注册/查询/幂等 resolve/并发、输入分类优先级、五维 self-score 计算与提取 |
+| 2026-09-25 | `mvn test` | 通过（全 6 模块，57 tests） | Task 1～6 全量回归；Reactor Summary 全部 SUCCESS |

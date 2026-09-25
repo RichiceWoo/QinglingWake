@@ -1,0 +1,2 @@
+{"checkpoint_id":"ckpt-12345678","routing_key":"p2p:abc123","project_id":"p1","kind":"checkpoint_request","question":"确认吗？","created_at_ms":1700000000000,"resolved_at_ms":null}
+{"checkpoint_id":"ckpt-12345678","resolved_at_ms":1700000001000}

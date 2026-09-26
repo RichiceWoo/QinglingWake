@@ -174,7 +174,7 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：四角色可构建；task skill 能启动声明式 Sub-Agent；MCP 注册状态可观测；无真实模型 smoke 通过。
 - **验证命令**：`mvn -pl qingling-team-infra -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 11：Runner 完整执行链
 
@@ -188,7 +188,7 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：同 key 串行、不同 key 并行；team wake 不对外回复；附件路径进入 session workspace；失败记录 metrics 且队列继续消费。
 - **验证命令**：`mvn -pl qingling-team-app -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 12：飞书 Listener、Sender 与 Downloader
 

@@ -222,6 +222,13 @@
 | Task 2 AgentScope 编译探针 | 已完成 | infra 下两个 probe test | 4 项测试通过，未调用真实模型或 MCP |
 | Task 3 领域模型与 Gateway | 已完成 | domain model/gateway 与架构测试 | domain 生产代码无 Spring/AgentScope/Reactor/JDBC 依赖 |
 | Task 4 Session 路由与审计 | 已完成 | app session 服务、infra 文件 Repository | routing index 保留 Python JSON 结构；审计端口只写且不会回灌模型 |
+| Task 5 邮箱、共享工作区与事件 | 已完成 | domain 服务、infra 文件 Repository | 三态并发、权限与路径逃逸、事件 seq 和 Python golden 契约通过 |
+| Task 6 Human checkpoint、分类与自评 | 已完成 | domain 分类/自评、app checkpoint、infra JSONL | 分类优先级、幂等 resolve 与五维评分契约通过 |
+| Task 7 Cron、wake、heartbeat 与 Cleanup | 已完成 | app 调度/清理、infra 文件实现 | 热重载、去重、错峰和 data root 防护通过 |
+| Task 8 workspace 模板转换 | 已完成 | starter workspace-template、infra 初始化器 | 35 个源 Skill 全量映射；managed/seed 幂等升级通过 |
+| Task 9 AgentScope Tools 与 Toolkit | 已完成 | infra agentscope/tool | Manager 8 件、其他角色 5 件团队工具；辅助工具最小暴露 |
+| Task 10 HarnessAgent、Sub-Agent 与 MCP | 已完成 | infra agentscope 四个核心类及测试 | 四角色无真实模型/MCP smoke、RuntimeContext、Mono→Future 和脱敏 MCP 状态通过；共 76 项测试 |
+| Task 11 Runner 完整执行链 | 已完成 | app runner 四个核心组件、RunnerMetrics 与 session 审计扩展 | 同 key 串行、跨 key 并行、team 零外发、附件、Loading/降级、失败恢复通过；共 56 项测试 |
 
 ## 12. 审查结论
 

@@ -3,10 +3,12 @@ package cn.org.chris.wake.app.session;
 import cn.org.chris.wake.domain.gateway.AgentGateway;
 import cn.org.chris.wake.domain.gateway.ConversationAuditRepository;
 import cn.org.chris.wake.domain.gateway.SessionRouteRepository;
+import cn.org.chris.wake.domain.model.ConversationAuditEntry;
 import cn.org.chris.wake.domain.model.SessionRoute;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -104,6 +106,41 @@ public final class SessionRoutingService {
         );
         routeRepository.save(updated);
         return updated;
+    }
+
+    /**
+     * 原子追加一轮 user/assistant 审计，并把当前会话消息计数增加二。
+     *
+     * @param routingKey 业务路由键
+     * @param sessionId 本轮实际使用的 AgentScope sessionId
+     * @param userContent 传给 Agent 的本轮正文
+     * @param assistantContent Agent 最终回复
+     * @param sourceMessageId 来源消息标识
+     */
+    public synchronized void recordTurn(
+            String routingKey,
+            String sessionId,
+            String userContent,
+            String assistantContent,
+            String sourceMessageId
+    ) {
+        SessionRoute current = getOrCreate(routingKey);
+        if (!current.activeSessionId().equals(sessionId)) {
+            throw new IllegalStateException("审计 sessionId 已不是当前活跃会话: " + sessionId);
+        }
+        long timestampMs = clock.millis();
+        auditRepository.append(sessionId, List.of(
+                new ConversationAuditEntry("user", userContent, timestampMs, sourceMessageId),
+                new ConversationAuditEntry("assistant", assistantContent, timestampMs, null)
+        ));
+        SessionRoute updated = new SessionRoute(
+                current.routingKey(),
+                current.activeSessionId(),
+                current.createdAt(),
+                current.verbose(),
+                Math.addExact(current.messageCount(), 2)
+        );
+        routeRepository.save(updated);
     }
 
     /**

@@ -19,6 +19,8 @@
 | 2026-09-26 | apply | 完成 Task 7 Cron、wake、heartbeat 与 Cleanup | at/every/cron、时区、mtime+size 热重载、并发 wake 去重、四角色错峰、同角色 heartbeat 抑制、data root 防逃逸及凭证权限通过；对应命令共 72 项测试 |
 | 2026-09-26 | apply | 完成 Task 8 workspace 模板转换与外部初始化 | 35 个源 Skill 全量映射为 29 个 reference Skill 与 6 个 task Skill/Sub-Agent；四角色 AgentScope 发现、seed/升级/改动保护、清单漂移和符号链接防护通过；对应命令共 80 项测试 |
 | 2026-09-26 | apply | 完成 Task 9 AgentScope Tools 与角色 Toolkit | 8 个团队工具、Intermediate/图片/百度搜索工具完成；Manager 8 件、其他角色 5 件团队工具，辅助工具按 Skill 最小暴露，Python 参数 schema 与业务闭环通过；对应命令共 70 项测试 |
+| 2026-09-26 | apply | 完成 Task 10 四角色 HarnessAgent、Sub-Agent 与 MCP | 四角色 workspace/Skill/声明式 Sub-Agent/Toolkit 构建通过；Gateway 以 RuntimeContext 传递路由并在 adapter 内 Mono→Future；MCP 状态脱敏可观测；无真实模型/MCP smoke 与回归共 76 项测试通过 |
+| 2026-09-26 | apply | 完成 Task 11 Runner 完整执行链 | routing key 串行与跨 key 并行、wake 去重、Slash、session 附件、Loading、Agent、审计、卡片降级和 team 零外发完成；失败指标与队列恢复通过；对应命令共 56 项测试 |
 
 ## 技术决策
 
@@ -32,6 +34,10 @@
 | Workspace/Skills | 转换为 AgentScope 外部可写 workspace；保留原 Python 交付行为 | 原样复制 / 全部改成生成 Java | 用户选择 3A；运行平台 Java 化且业务能力等价 |
 | 模板升级 | `managed` 文件按上次模板 SHA-256 安全升级；`MEMORY.md` 使用 `seed` 永不覆盖 | 每次覆盖 / 所有文件只写一次 | 可发布模板修订，同时保护运行记忆、用户定制与清单外数据 |
 | Toolkit 权限 | 公共团队工具按角色绑定；Manager 追加 3 件；图片/搜索按 Skill 显式启用 | 所有角色注册全部工具 | 减少模型误调用和额外文件、网络权限，保持 Manager 8 件/其他角色 5 件契约 |
+| Harness 状态目录 | 每个角色写入其外部 workspace 的 `.agentscope/state` | AgentScope 默认用户主目录 | 会话状态随部署 workspace 管理，满足可写目录约束并避免容器/沙箱无主目录写权限 |
+| 代码执行入口 | 关闭 Harness 本地 Shell Tool，RD/QA 仅使用 AIO-Sandbox MCP | 同时开放宿主 Shell 与 MCP | 保持 Python 产物执行能力，同时避免模型绕过隔离沙箱 |
+| Runner 串行化 | 每个 routing key 使用可恢复的 CompletableFuture 尾链，不同 key 由执行器并行 | 全局锁 / 每 key 常驻线程 | 保证同会话顺序且无需常驻 worker；单次异常只传给自身 Future，尾链恢复后继续消费 |
+| Runner 失败语义 | 记录脱敏指标、外部路由尝试错误提示，并让当前 dispatch Future 异常完成 | Python worker 完全吞掉异常 | Cron 可记录真实失败状态，同时不阻断相同 routing key 的后续消息 |
 | 迁移范围 | 完整迁移矩阵 | 核心版 / 延期未声明 | 用户选择 4A；所有源模块必须有明确去向 |
 | 测试策略 | 单元 + 契约 + 集成 + 4 条真实 E2E | 只做单测 / 全部 7 条 E2E | 用户选择 5A；成本与等价信心平衡 |
 | 飞书 SDK | oapi-sdk-java | 自封装 HTTP | 官方 SDK 维护，WebSocket 支持完整 |
@@ -54,6 +60,8 @@
 | 同角色 AT wake 与 heartbeat 同时到期 | 两个 Cron job 都投递会让同一角色重复执行 | Cron tick 优先投递业务 wake，同时推进 heartbeat 的下次时间但不重复投递 | 否 |
 | Task 8 规范将 `sandbox_execute_bash` 举作旧工具名 | AIO-Sandbox 当前 MCP 仍实际暴露同名工具，机械改名会导致声明不可调用 | 保留真实 MCP 工具名；移除 `skill_loader`、mailbox CLI、CrewAI/Sub-Crew 等旧胶水 | 是 |
 | AgentScope `enableTools` 会先注册对象内全部 `@Tool` 方法 | 同一 `ImageAndSearchTools` 中有图片和搜索两个方法，仅启用其一时另一工具仍进入注册表 | 注册后显式移除未被当前 Skill 授权的工具，并以 Toolkit 名称集合测试固化 | 否 |
+| Harness 默认状态目录在用户主目录 | AgentScope 默认创建 `~/.agentscope/state/{agent}`，受限运行环境可能不可写且与外部 workspace 生命周期分离 | TeamAgentFactory 显式注入角色 workspace 下的 `JsonFileAgentStateStore` | 是 |
+| 异常 CompletableFuture 会毒化串行尾链 | 若直接将业务 Future 作为下一任务前置条件，单次 Agent 失败会使后续同 key 任务全部跳过 | 对外结果保留原异常，内部队列尾部用 `handle` 转为正常完成，并以测试覆盖“失败时已排队的下一项” | 是 |
 
 ## 知识发现
 
@@ -79,6 +87,7 @@
 | Workspace 模板文件归属 | Spec 只要求幂等初始化，未定义模板版本升级时如何处理已有文件 | 清单区分 `managed`/`seed`，状态文件记录上次模板摘要；只升级未被用户修改的 managed 文件 | 同时满足模板可升级与运行数据不可覆盖 |
 | 图片工具名称 | Python 工具名 `Add image to content Local` 含空格 | Java AgentScope 工具名改为 `add_image_to_content_local`，参数 `image_url` 与行为保持兼容 | 满足模型函数名安全格式；避免后续模型 API 拒绝非法名称 |
 | infra 调用邮件唤醒 | Task 9 工具需要调用 app 层 `WakeScheduler`，但 COLA 依赖禁止 infra → app | `CommonTeamTools.MailWakeScheduler` 窄接口由 starter 后续以方法引用注入 | 保持模块依赖方向，Task 16 装配时绑定 `WakeScheduler::scheduleMailWake` |
+| Runner 异常返回 | Python worker 记录错误后吞掉异常 | Java 当前消息 Future 保留异常，串行队列内部吸收异常后继续 | 让 Cron `last_status` 可感知失败；外部消息仍尝试发送统一错误提示 |
 
 ## 代码质量备忘
 

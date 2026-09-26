@@ -44,6 +44,30 @@ class FileSessionPersistenceTest {
     }
 
     /**
+     * 列表查询只返回每个 routing key 的 active session，clearAll 原子写回空对象。
+     *
+     * @throws Exception 测试文件读取失败
+     */
+    @Test
+    void shouldListActiveRoutesAndClearIndex() throws Exception {
+        FileSessionRouteRepository repository = new FileSessionRouteRepository(
+                dataDirectory, new ObjectMapper()
+        );
+        repository.save(new SessionRoute("p2p:u1", "s-first", Instant.EPOCH, false, 0));
+        repository.save(new SessionRoute("p2p:u1", "s-second", Instant.ofEpochSecond(1), true, 2));
+        repository.save(new SessionRoute("p2p:u2", "s-third", Instant.ofEpochSecond(2), false, 4));
+
+        assertThat(repository.findAll())
+                .extracting(SessionRoute::activeSessionId)
+                .containsExactlyInAnyOrder("s-second", "s-third");
+
+        repository.clearAll();
+
+        assertThat(repository.findAll()).isEmpty();
+        assertThat(Files.readString(dataDirectory.resolve("sessions/index.json"))).contains("{");
+    }
+
+    /**
      * 审计 append 应写出完整 meta 和两条消息行，并保持来源消息字段兼容。
      *
      * @throws Exception 测试文件读取失败

@@ -7,6 +7,7 @@ import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,6 +38,15 @@ public final class TeamAgentFactory {
     /** 按角色显式启用的辅助 Skill 能力。 */
     private final Map<String, Set<String>> activeSkillsByRole;
 
+    /** 单个 HarnessAgent 允许的最大 ReAct 迭代次数。 */
+    private final int maxIterations;
+
+    /** Harness workspace 上下文允许的最大 token 数。 */
+    private final int maxContextTokens;
+
+    /** 异步工具和 MCP 调用等待上限。 */
+    private final Duration asyncToolTimeout;
+
     /**
      * 创建只启用团队工具、workspace Skill 和声明式 Sub-Agent 的默认工厂。
      *
@@ -51,7 +61,7 @@ public final class TeamAgentFactory {
             RoleSubagentFactory subagentFactory,
             McpSandboxConfiguration sandboxConfiguration
     ) {
-        this(model, toolkitFactory, subagentFactory, sandboxConfiguration, Map.of());
+        this(model, toolkitFactory, subagentFactory, sandboxConfiguration, Map.of(), 30, 30_000, Duration.ofSeconds(300));
     }
 
     /**
@@ -70,6 +80,23 @@ public final class TeamAgentFactory {
             McpSandboxConfiguration sandboxConfiguration,
             Map<String, Set<String>> activeSkillsByRole
     ) {
+        this(model, toolkitFactory, subagentFactory, sandboxConfiguration, activeSkillsByRole,
+                30, 30_000, Duration.ofSeconds(300));
+    }
+
+    /**
+     * 创建由配置控制迭代、上下文和异步工具超时的团队 Agent 工厂。
+     */
+    public TeamAgentFactory(
+            Model model,
+            RoleToolkitFactory toolkitFactory,
+            RoleSubagentFactory subagentFactory,
+            McpSandboxConfiguration sandboxConfiguration,
+            Map<String, Set<String>> activeSkillsByRole,
+            int maxIterations,
+            int maxContextTokens,
+            Duration asyncToolTimeout
+    ) {
         this.model = Objects.requireNonNull(model, "model 不能为空");
         this.toolkitFactory = Objects.requireNonNull(toolkitFactory, "toolkitFactory 不能为空");
         this.subagentFactory = Objects.requireNonNull(subagentFactory, "subagentFactory 不能为空");
@@ -77,6 +104,12 @@ public final class TeamAgentFactory {
                 sandboxConfiguration, "sandboxConfiguration 不能为空"
         );
         this.activeSkillsByRole = copySkills(activeSkillsByRole);
+        if (maxIterations <= 0 || maxContextTokens <= 0) {
+            throw new IllegalArgumentException("Agent 迭代次数和上下文 token 必须大于零");
+        }
+        this.maxIterations = maxIterations;
+        this.maxContextTokens = maxContextTokens;
+        this.asyncToolTimeout = requirePositive(asyncToolTimeout);
     }
 
     /**
@@ -97,6 +130,9 @@ public final class TeamAgentFactory {
                 .workspace(roleWorkspace)
                 .stateStore(new JsonFileAgentStateStore(roleWorkspace.resolve(".agentscope/state")))
                 .subagents(subagents)
+                .maxIters(maxIterations)
+                .maxContextTokens(maxContextTokens)
+                .asyncToolTimeout(asyncToolTimeout)
                 .disableDynamicSubagents()
                 .disableShellTool();
         return sandboxConfiguration.applyTo(builder).build();
@@ -154,5 +190,14 @@ public final class TeamAgentFactory {
             case "qa" -> "质量工程师，负责测试设计、执行与缺陷反馈";
             default -> throw new IllegalArgumentException("未知团队角色: " + role);
         };
+    }
+
+    /** 校验异步工具超时为正数。 */
+    private static Duration requirePositive(Duration timeout) {
+        Objects.requireNonNull(timeout, "asyncToolTimeout 不能为空");
+        if (timeout.isZero() || timeout.isNegative()) {
+            throw new IllegalArgumentException("asyncToolTimeout 必须大于零");
+        }
+        return timeout;
     }
 }

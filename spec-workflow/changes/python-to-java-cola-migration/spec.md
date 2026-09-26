@@ -228,9 +228,12 @@
 | Task 8 workspace 模板转换 | 已完成 | starter workspace-template、infra 初始化器 | 35 个源 Skill 全量映射；managed/seed 幂等升级通过 |
 | Task 9 AgentScope Tools 与 Toolkit | 已完成 | infra agentscope/tool | Manager 8 件、其他角色 5 件团队工具；辅助工具最小暴露 |
 | Task 10 HarnessAgent、Sub-Agent 与 MCP | 已完成 | infra agentscope 四个核心类及测试 | 四角色无真实模型/MCP smoke、RuntimeContext、Mono→Future 和脱敏 MCP 状态通过；共 76 项测试 |
-| Task 11 Runner 完整执行链 | 已完成 | app runner 四个核心组件、RunnerMetrics 与 session 审计扩展 | 同 key 串行、跨 key 并行、team 零外发、附件、Loading/降级、失败恢复通过；共 56 项测试 |
+| Task 11 Runner 完整执行链 | 已完成 | app runner 四个核心组件、MetricsGateway 与 session 审计扩展 | 同 key 串行、跨 key 并行、team 零外发、附件、Loading/降级、失败恢复通过；共 56 项测试 |
 | Task 12 飞书 Listener、Sender 与 Downloader | 已完成 | adapter feishu、infra feishu、domain 附件下载端口 | oapi-sdk-java 2.7.3 Channel/OpenAPI；text/post/image/file 转换、p2p/群白名单/Bot 入群、thread、Loading/PATCH、1/2/4 秒重试、下载与脱敏通过；对应命令共 109 项测试 |
 | Task 13 pgvector 记忆索引 | 已完成 | infra memory、可选 DDL、AgentScope Gateway 索引旁路、Maven pgvector-it profile | 摘要/标签、两份 1024 维向量、稳定 ID、幂等写入、空 DSN 跳过及失败降级通过；默认命令共 92 项测试，完整 verify 成功，Docker 不可用时 IT 明确跳过 |
+| Task 14 TestAPI 与 CaptureSender | 已完成 | adapter api/dto、CaptureSender、session 全量清理端口与文件实现 | Python golden 字段/default、400/422/超时、附件复制、Loading/文本捕获和 DELETE 路由/审计/AgentScope state 清理通过；对应命令共 70 项测试，全项目 133 项回归通过 |
+| Task 15 日志查询、Metrics 与结构化日志 | 已完成 | app LogQueryService、infra JSONL/Metrics、starter CLI/metrics/logback | stats/tasks/steps/l1/all-agents Python 契约、7 类 Prometheus 指标、50MB×5 滚动 JSONL 与凭据掩码通过；对应命令共 137 项测试 |
+| Task 16 Starter、配置与生命周期装配 | 已完成 | starter Application/Properties/RuntimeConfiguration、YAML 模板、生命周期与路由 Sender | 无飞书 Spring 容器启动、配置 fail-fast、四角色 heartbeat/Cron、Runner 排空与反向关闭通过；对应命令共 140 项测试，未调用真实模型 |
 
 ## 12. 审查结论
 

@@ -12,6 +12,8 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -106,5 +108,22 @@ class SessionRoutingServiceTest {
 
         verify(agentGateway).clearSession("manager", "u1", "s-old");
         verify(routeRepository).delete("p2p:u1");
+    }
+
+    /**
+     * TestAPI 全量清理应移除文件数据，并清除可定位用户的 AgentScope state。
+     */
+    @Test
+    void shouldClearAllTestRoutesAuditsAndKnownAgentStates() {
+        when(routeRepository.findAll()).thenReturn(List.of(
+                new SessionRoute("p2p:u1", "s-one", Instant.EPOCH, false, 2),
+                new SessionRoute("p2p:legacy", "s-legacy", Instant.EPOCH, false, 0)
+        ));
+
+        service.clearAll(Map.of("p2p:u1", "u1"));
+
+        verify(agentGateway).clearSession("manager", "u1", "s-one");
+        verify(routeRepository).clearAll();
+        verify(auditRepository).clearAll();
     }
 }

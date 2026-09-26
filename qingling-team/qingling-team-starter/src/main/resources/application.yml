@@ -1,0 +1,63 @@
+spring:
+  application:
+    name: qingling-team
+  config:
+    import: optional:file:./config.yaml
+
+qingling:
+  workspace:
+    id: qingling-team
+    name: Qingling Team
+    root: ${QINGLING_WORKSPACE_ROOT:./workspace}
+  data-dir: ${QINGLING_DATA_DIR:./data}
+  feishu:
+    enabled: ${QINGLING_FEISHU_ENABLED:false}
+    app-id: ${FEISHU_APP_ID:}
+    app-secret: ${FEISHU_APP_SECRET:}
+    allowed-chats: []
+  agent:
+    model: ${QINGLING_AGENT_MODEL:qwen3.6-max-preview}
+    sub-agent-model: ${QINGLING_SUB_AGENT_MODEL:qwen3.6-max-preview}
+    max-iterations: 30
+    max-input-tokens: 30000
+    sub-agent-max-iterations: 20
+    timeout: 300s
+    api-key: ${DASHSCOPE_API_KEY:${QWEN_API_KEY:}}
+  sandbox:
+    enabled: ${QINGLING_SANDBOX_ENABLED:true}
+    url: ${QINGLING_SANDBOX_URL:http://localhost:8029/mcp}
+    workspace-dir: /workspace
+    timeout: 120s
+    initialization-timeout: 30s
+    max-retries: 2
+    enabled-tools: []
+    headers: {}
+  memory:
+    context-dir: ${QINGLING_CONTEXT_DIR:./data/ctx}
+    db-dsn: ${QINGLING_MEMORY_DB_DSN:}
+  team:
+    roles: [manager, pm, rd, qa]
+  debug:
+    test-api-enabled: ${QINGLING_TEST_API_ENABLED:false}
+    reply-timeout: 300s
+  metrics:
+    enabled: ${QINGLING_METRICS_ENABLED:true}
+  cleanup:
+    enabled: true
+    run-on-startup: true
+    session-retention-days: 365
+    rules:
+      workspace/sessions/*/tmp: 1
+      workspace/sessions/*/uploads: 7
+      workspace/sessions/*/outputs: 30
+      traces: 30
+  cron:
+    tick-interval: 1s
+    heartbeat-interval: 30s
+    heartbeat-stagger-seconds: [0, 7, 14, 21]
+  search:
+    baidu-api-key: ${BAIDU_APPBUILDER_API_KEY:}
+
+management:
+  endpoints:
+    enabled-by-default: false

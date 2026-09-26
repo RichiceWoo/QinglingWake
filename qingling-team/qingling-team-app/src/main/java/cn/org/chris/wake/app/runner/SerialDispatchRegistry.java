@@ -5,6 +5,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -87,6 +90,31 @@ public final class SerialDispatchRegistry {
     public int pendingCount(String routingKey) {
         AtomicInteger count = pendingCounts.get(routingKey);
         return count == null ? 0 : count.get();
+    }
+
+    /**
+     * 等待调用时已经进入队列的全部路由尾部完成，新入站应在调用前停止。
+     *
+     * @param timeout 最长排空时间
+     * @return 全部完成为 true，超时为 false
+     */
+    public boolean awaitDrained(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout 不能为空");
+        if (timeout.isNegative() || timeout.isZero()) {
+            throw new IllegalArgumentException("timeout 必须大于零");
+        }
+        CompletableFuture<?>[] snapshot = tails.values().toArray(CompletableFuture[]::new);
+        try {
+            CompletableFuture.allOf(snapshot).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            return true;
+        } catch (TimeoutException timeoutFailure) {
+            return false;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (java.util.concurrent.ExecutionException impossible) {
+            return true;
+        }
     }
 
     /**

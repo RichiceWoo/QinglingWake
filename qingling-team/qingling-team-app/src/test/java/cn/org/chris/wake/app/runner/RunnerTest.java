@@ -3,6 +3,7 @@ package cn.org.chris.wake.app.runner;
 import cn.org.chris.wake.app.session.SessionRoutingService;
 import cn.org.chris.wake.app.session.SlashCommandService;
 import cn.org.chris.wake.domain.gateway.AgentGateway;
+import cn.org.chris.wake.domain.gateway.MetricsGateway;
 import cn.org.chris.wake.domain.gateway.ConversationAuditRepository;
 import cn.org.chris.wake.domain.gateway.SenderGateway;
 import cn.org.chris.wake.domain.gateway.SessionRouteRepository;
@@ -272,6 +273,16 @@ class RunnerTest {
         }
 
         /**
+         * 返回全部当前路由快照。
+         *
+         * @return 路由快照列表
+         */
+        @Override
+        public List<SessionRoute> findAll() {
+            return List.copyOf(routes.values());
+        }
+
+        /**
          * 保存最新路由。
          *
          * @param route 最新路由快照
@@ -289,6 +300,14 @@ class RunnerTest {
         @Override
         public void delete(String routingKey) {
             routes.remove(routingKey);
+        }
+
+        /**
+         * 清空全部内存路由。
+         */
+        @Override
+        public void clearAll() {
+            routes.clear();
         }
     }
 
@@ -444,7 +463,7 @@ class RunnerTest {
     /**
      * 捕获 Runner 指标标签而不依赖 Micrometer。
      */
-    private static final class CapturingMetrics implements RunnerMetrics {
+    private static final class CapturingMetrics implements MetricsGateway {
 
         /** 按发生顺序保存失败组件和类型。 */
         private final List<String> failures = new ArrayList<>();
@@ -460,6 +479,18 @@ class RunnerTest {
             // 仅失败指标属于本组测试断言范围。
         }
 
+        /** 本测试不记录飞书事件。 */
+        @Override
+        public void recordFeishuEvent(String eventType, String chatType) {
+            // 飞书指标由 adapter/infra 测试覆盖。
+        }
+
+        /** 本测试不记录 HTTP 请求。 */
+        @Override
+        public void recordHttpRequest(String path, String method, int statusCode, double durationSeconds) {
+            // HTTP 指标由 adapter/infra 测试覆盖。
+        }
+
         /**
          * 本测试不持久化瞬时队列深度。
          *
@@ -469,6 +500,14 @@ class RunnerTest {
         @Override
         public void recordQueueDepth(String routingType, int queueDepth) {
             // 队列顺序由独立 SerialDispatchRegistryTest 验证。
+        }
+
+        /**
+         * 本测试不持久化瞬时活跃 worker 数。
+         */
+        @Override
+        public void recordWorkerDelta(String routingType, int delta) {
+            // Gauge 数值由 MetricsRecorderTest 单独验证。
         }
 
         /**

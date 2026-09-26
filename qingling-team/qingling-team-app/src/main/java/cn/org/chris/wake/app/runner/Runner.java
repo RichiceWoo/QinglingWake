@@ -5,6 +5,7 @@ import cn.org.chris.wake.app.session.SlashCommandResult;
 import cn.org.chris.wake.app.session.SlashCommandService;
 import cn.org.chris.wake.domain.gateway.AgentGateway;
 import cn.org.chris.wake.domain.gateway.CronDispatchGateway;
+import cn.org.chris.wake.domain.gateway.MetricsGateway;
 import cn.org.chris.wake.domain.gateway.SenderGateway;
 import cn.org.chris.wake.domain.model.AgentReply;
 import cn.org.chris.wake.domain.model.AgentRequest;
@@ -50,7 +51,7 @@ public final class Runner implements CronDispatchGateway {
     private final RoutingKeyResolver routingKeyResolver;
 
     /** 不依赖具体指标库的 Runner 观测端口。 */
-    private final RunnerMetrics metrics;
+    private final MetricsGateway metrics;
 
     /** 正在等待或执行的 wake 路由，用于抑制重复 heartbeat/new_mail。 */
     private final Set<String> inFlightWakeRoutes = ConcurrentHashMap.newKeySet();
@@ -75,7 +76,7 @@ public final class Runner implements CronDispatchGateway {
             InboundAttachmentService attachmentService,
             SerialDispatchRegistry dispatchRegistry,
             RoutingKeyResolver routingKeyResolver,
-            RunnerMetrics metrics
+            MetricsGateway metrics
     ) {
         this.sessionRoutingService = Objects.requireNonNull(
                 sessionRoutingService, "sessionRoutingService 不能为空"
@@ -105,7 +106,7 @@ public final class Runner implements CronDispatchGateway {
             return CompletableFuture.completedFuture(null);
         }
         CompletableFuture<Void> result = dispatchRegistry.submit(
-                inbound.routingKey(), () -> processWithFailureHandling(inbound)
+                inbound.routingKey(), () -> processObserved(inbound, routingType)
         );
         metrics.recordQueueDepth(routingType, dispatchRegistry.pendingCount(inbound.routingKey()));
         result.whenComplete((unused, failure) -> {
@@ -115,6 +116,20 @@ public final class Runner implements CronDispatchGateway {
             metrics.recordQueueDepth(routingType, dispatchRegistry.pendingCount(inbound.routingKey()));
         });
         return result;
+    }
+
+    /**
+     * 在实际开始和结束处理时维护活跃 worker 指标，并覆盖同步抛错路径。
+     */
+    private CompletableFuture<Void> processObserved(InboundMessage inbound, String routingType) {
+        metrics.recordWorkerDelta(routingType, 1);
+        try {
+            return processWithFailureHandling(inbound)
+                    .whenComplete((unused, failure) -> metrics.recordWorkerDelta(routingType, -1));
+        } catch (RuntimeException failure) {
+            metrics.recordWorkerDelta(routingType, -1);
+            throw failure;
+        }
     }
 
     /**

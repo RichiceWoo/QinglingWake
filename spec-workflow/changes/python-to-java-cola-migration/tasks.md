@@ -227,7 +227,7 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：Python/Java HTTP golden contract 一致；`--no-feishu` 下可独立运行。
 - **验证命令**：`mvn -pl qingling-team-adapter -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 15：日志查询、Metrics 与结构化日志
 
@@ -240,7 +240,7 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：CLI JSON 输出契约与 Python fixture 一致；`/metrics` 暴露 Runner、飞书、HTTP、错误等指标；日志不含密钥。
 - **验证命令**：`mvn -pl qingling-team-starter -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 16：Starter、配置与生命周期装配
 
@@ -255,7 +255,7 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：无飞书模式启动；缺少必要模型密钥时给出脱敏错误；配置项覆盖 Spec 第 6 节。
 - **验证命令**：`mvn -pl qingling-team-starter -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 17：跨语言契约与无 LLM 集成测试
 

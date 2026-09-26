@@ -76,6 +76,23 @@ public final class FileSessionRouteRepository implements SessionRouteRepository 
     }
 
     /**
+     * 读取每个 routing key 的当前 active session，忽略没有有效 active 条目的损坏路由。
+     *
+     * @return 当前活跃路由的不可变列表
+     */
+    @Override
+    public List<SessionRoute> findAll() {
+        try {
+            Map<String, Object> index = readIndex();
+            List<SessionRoute> routes = new ArrayList<>();
+            index.forEach((routingKey, rawRouting) -> activeRoute(routingKey, asMap(rawRouting)).ifPresent(routes::add));
+            return List.copyOf(routes);
+        } catch (IOException exception) {
+            throw persistenceFailure("读取全部 session 路由失败", exception);
+        }
+    }
+
+    /**
      * 在文件锁内追加新 session 或更新当前 session，并原子替换 index。
      *
      * @param route 最新路由快照
@@ -117,6 +134,33 @@ public final class FileSessionRouteRepository implements SessionRouteRepository 
     @Override
     public void delete(String routingKey) {
         withWriteLock(index -> index.remove(routingKey));
+    }
+
+    /**
+     * 在文件锁内把路由索引原子替换为空对象。
+     */
+    @Override
+    public void clearAll() {
+        withWriteLock(Map::clear);
+    }
+
+    /**
+     * 从单个 routing JSON 对象中解析当前 active session。
+     *
+     * @param routingKey 业务路由键
+     * @param routing routing JSON 对象
+     * @return 可解析的当前活跃路由
+     */
+    private static Optional<SessionRoute> activeRoute(String routingKey, Map<String, Object> routing) {
+        if (routing == null) {
+            return Optional.empty();
+        }
+        String activeId = String.valueOf(routing.get("active_session_id"));
+        return asList(routing.get("sessions")).stream()
+                .map(FileSessionRouteRepository::asMap)
+                .filter(session -> session != null && activeId.equals(session.get("id")))
+                .findFirst()
+                .map(session -> toRoute(routingKey, session));
     }
 
     /**

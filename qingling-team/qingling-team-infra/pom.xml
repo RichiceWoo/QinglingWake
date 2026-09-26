@@ -33,6 +33,10 @@
             <artifactId>jackson-datatype-jsr310</artifactId>
         </dependency>
         <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <dependency>
             <groupId>com.larksuite.oapi</groupId>
             <artifactId>oapi-sdk</artifactId>
         </dependency>

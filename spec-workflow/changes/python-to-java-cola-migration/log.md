@@ -23,6 +23,9 @@
 | 2026-09-26 | apply | 完成 Task 11 Runner 完整执行链 | routing key 串行与跨 key 并行、wake 去重、Slash、session 附件、Loading、Agent、审计、卡片降级和 team 零外发完成；失败指标与队列恢复通过；对应命令共 56 项测试 |
 | 2026-09-26 | apply | 完成 Task 12 飞书 Listener、Sender 与 Downloader | 官方 oapi-sdk-java 2.7.3 Channel/OpenAPI 接入；p2p/群白名单/Bot 入群、text/post/image/file、thread root、Loading/PATCH、1/2/4 秒重试、资源下载与脱敏通过；对应命令共 109 项测试 |
 | 2026-09-26 | apply | 完成 Task 13 pgvector 记忆索引 | DashScope 摘要/标签、两份 1024 维向量、稳定幂等 ID、事务写入、空 DSN 跳过和旁路失败隔离完成；默认命令共 92 项测试；`pgvector-it` 完整 verify 成功，当前环境无 Docker，真实容器用例明确跳过 |
+| 2026-09-26 | apply | 完成 Task 14 TestAPI 与 CaptureSender | Spring MVC 消息/会话端点、Python golden、默认 msgId/senderId、附件复制、300 秒可配置超时、400/422、CaptureSender 和会话/审计/AgentScope state 清理完成；对应命令 70 项、全项目 133 项测试通过 |
+| 2026-09-26 | apply | 完成 Task 15 日志查询、Metrics 与结构化日志 | stats/tasks/steps/l1/all-agents JSONL 容错查询、Python CLI 契约、Runner/飞书/HTTP/错误 Prometheus 指标、`/metrics`、50MB×5 JSONL 滚动和凭据掩码完成；对应命令共 137 项测试通过 |
+| 2026-09-26 | apply | 完成 Task 16 Starter、配置与生命周期装配 | Spring Boot 入口、Spec 第 6 节类型安全配置、显式 Bean 装配、无飞书启动、模型密钥脱敏 fail-fast、heartbeat/Cron 与入站→Runner→后台→AgentScope 反向关闭完成；对应命令共 140 项测试通过，离线测试未调用真实模型 |
 
 ## 技术决策
 
@@ -40,6 +43,7 @@
 | 代码执行入口 | 关闭 Harness 本地 Shell Tool，RD/QA 仅使用 AIO-Sandbox MCP | 同时开放宿主 Shell 与 MCP | 保持 Python 产物执行能力，同时避免模型绕过隔离沙箱 |
 | Runner 串行化 | 每个 routing key 使用可恢复的 CompletableFuture 尾链，不同 key 由执行器并行 | 全局锁 / 每 key 常驻线程 | 保证同会话顺序且无需常驻 worker；单次异常只传给自身 Future，尾链恢复后继续消费 |
 | Runner 失败语义 | 记录脱敏指标、外部路由尝试错误提示，并让当前 dispatch Future 异常完成 | Python worker 完全吞掉异常 | Cron 可记录真实失败状态，同时不阻断相同 routing key 的后续消息 |
+| Metrics 分层 | domain `MetricsGateway` 统一观测端口，infra 用 Micrometer 实现 | infra 直接依赖 app 的 Runner/HTTP 指标接口 | 保持 COLA 依赖方向，同时让 Runner、飞书和 TestAPI 共享七类 Python 兼容指标 |
 | 迁移范围 | 完整迁移矩阵 | 核心版 / 延期未声明 | 用户选择 4A；所有源模块必须有明确去向 |
 | 测试策略 | 单元 + 契约 + 集成 + 4 条真实 E2E | 只做单测 / 全部 7 条 E2E | 用户选择 5A；成本与等价信心平衡 |
 | 飞书 SDK | oapi-sdk-java | 自封装 HTTP | 官方 SDK 维护，WebSocket 支持完整 |
@@ -68,6 +72,7 @@
 | 飞书 Java SDK 同时提供底层 OpenAPI 与高层 Channel | 直接用底层 EventDispatcher 需要自行维护事件归一化、策略和重连 | 入站采用 Channel 归一化消息及重连事件，出站/下载采用 OpenAPI 请求模型；adapter 仍保留群白名单二次校验 | 是 |
 | infra 单测首次触发 Mockito inline mock maker 自附加失败 | 当前 JDK/沙箱不允许 Byte Buddy 动态 attach | 与 app 模块保持一致，在 infra 测试资源中显式使用 `mock-maker-subclass`；默认回归通过 | 否 |
 | 当前环境没有可用 Docker daemon | Testcontainers 无法启动 `pgvector/pgvector:pg16` | 集成用例使用 `disabledWithoutDocker=true`，profile 仍编译并执行到明确 skipped；有 Docker 的 CI/本机将自动运行真实 upsert 验证 | 否 |
+| MockMvc 中文响应按默认字符集读取会产生乱码 | MockHttpServletResponse 的无参字符串读取不保证按响应 JSON 的 UTF-8 字节解码 | golden 测试显式使用 UTF-8 解码后交给 Jackson 比较，避免假失败 | 否 |
 
 ## 知识发现
 

@@ -213,3 +213,4 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 | 2026-09-25 | `mvn test` | 通过（全 6 模块，36 tests） | Task 1～5 全量回归；Reactor Summary 全部 SUCCESS |
 | 2026-09-25 | `mvn -pl qingling-team-domain,qingling-team-app,qingling-team-infra -am test` | 通过（57 tests） | Task 6 Python golden、checkpoint 注册/查询/幂等 resolve/并发、输入分类优先级、五维 self-score 计算与提取 |
 | 2026-09-25 | `mvn test` | 通过（全 6 模块，57 tests） | Task 1～6 全量回归；Reactor Summary 全部 SUCCESS |
+| 2026-09-26 | `mvn -pl qingling-team-starter -am test` | 通过（全 6 模块，140 tests） | Task 16 无飞书启动、缺失模型密钥脱敏 fail-fast、配置映射、四角色 heartbeat/Cron、Runner 排空与运行时关闭；Reactor Summary 全部 SUCCESS，未调用真实模型 |

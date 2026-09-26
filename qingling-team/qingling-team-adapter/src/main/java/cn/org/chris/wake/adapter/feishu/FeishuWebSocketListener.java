@@ -1,5 +1,6 @@
 package cn.org.chris.wake.adapter.feishu;
 
+import cn.org.chris.wake.domain.gateway.MetricsGateway;
 import cn.org.chris.wake.domain.gateway.CronDispatchGateway;
 import com.lark.oapi.channel.ChannelEventHandler;
 import com.lark.oapi.channel.ChannelSubscription;
@@ -37,6 +38,9 @@ public final class FeishuWebSocketListener implements AutoCloseable {
     /** Bot 入群后的可选业务回调，参数依次为 chatId 与群名称。 */
     private final BiConsumer<String, String> botAddedHandler;
 
+    /** 飞书事件和错误指标端口。 */
+    private final MetricsGateway metrics;
+
     /** 当前 WebSocket 连接状态，供运行期健康检查读取。 */
     private final AtomicReference<ConnectionState> state = new AtomicReference<>(ConnectionState.STOPPED);
 
@@ -54,10 +58,24 @@ public final class FeishuWebSocketListener implements AutoCloseable {
             CronDispatchGateway dispatcher,
             BiConsumer<String, String> botAddedHandler
     ) {
+        this(channel, converter, dispatcher, botAddedHandler, MetricsGateway.noop());
+    }
+
+    /**
+     * 使用可替换 Channel 和指标端口创建监听器。
+     */
+    public FeishuWebSocketListener(
+            ChannelPort channel,
+            FeishuEventConverter converter,
+            CronDispatchGateway dispatcher,
+            BiConsumer<String, String> botAddedHandler,
+            MetricsGateway metrics
+    ) {
         this.channel = Objects.requireNonNull(channel, "channel 不能为空");
         this.converter = Objects.requireNonNull(converter, "converter 不能为空");
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher 不能为空");
         this.botAddedHandler = botAddedHandler == null ? (chatId, name) -> { } : botAddedHandler;
+        this.metrics = Objects.requireNonNull(metrics, "metrics 不能为空");
         registerHandlers();
     }
 
@@ -78,6 +96,20 @@ public final class FeishuWebSocketListener implements AutoCloseable {
             CronDispatchGateway dispatcher,
             BiConsumer<String, String> botAddedHandler
     ) {
+        return create(appId, appSecret, allowedChats, dispatcher, botAddedHandler, MetricsGateway.noop());
+    }
+
+    /**
+     * 使用官方 SDK 和指定指标端口创建 WebSocket 监听器。
+     */
+    public static FeishuWebSocketListener create(
+            String appId,
+            String appSecret,
+            Set<String> allowedChats,
+            CronDispatchGateway dispatcher,
+            BiConsumer<String, String> botAddedHandler,
+            MetricsGateway metrics
+    ) {
         requireCredential(appId, "appId");
         requireCredential(appSecret, "appSecret");
         Set<String> whitelist = allowedChats == null ? Set.of() : Set.copyOf(allowedChats);
@@ -96,7 +128,8 @@ public final class FeishuWebSocketListener implements AutoCloseable {
                 new SdkChannelPort(channel),
                 new FeishuEventConverter(whitelist),
                 dispatcher,
-                botAddedHandler
+                botAddedHandler,
+                metrics
         );
     }
 
@@ -112,6 +145,7 @@ public final class FeishuWebSocketListener implements AutoCloseable {
                 state.set(ConnectionState.CONNECTED);
             } else {
                 state.set(ConnectionState.FAILED);
+                metrics.recordFailure("feishu", failure.getClass().getSimpleName());
                 LOGGER.log(Level.WARNING, "飞书 WebSocket 连接失败，异常类型={0}", failure.getClass().getSimpleName());
             }
         });
@@ -147,9 +181,11 @@ public final class FeishuWebSocketListener implements AutoCloseable {
      * 转换并异步投递消息，失败日志只保留异常类型。
      */
     private void handleMessage(NormalizedMessage message) {
+        metrics.recordFeishuEvent("message", message == null ? null : message.getChatType());
         converter.convert(message).ifPresent(inbound -> dispatcher.dispatch(inbound)
                 .whenComplete((unused, failure) -> {
                     if (failure != null) {
+                        metrics.recordFailure("feishu", failure.getClass().getSimpleName());
                         LOGGER.log(Level.WARNING, "飞书消息投递失败，异常类型={0}", failure.getClass().getSimpleName());
                     }
                 }));
@@ -159,6 +195,7 @@ public final class FeishuWebSocketListener implements AutoCloseable {
      * 对白名单内群聊触发 Bot 入群业务回调。
      */
     private void handleBotAdded(BotAddedEvent event) {
+        metrics.recordFeishuEvent("botAdded", "group");
         if (event != null && converter.isBotAddedAllowed(event.getChatId())) {
             botAddedHandler.accept(event.getChatId(), event.getChatName());
         }

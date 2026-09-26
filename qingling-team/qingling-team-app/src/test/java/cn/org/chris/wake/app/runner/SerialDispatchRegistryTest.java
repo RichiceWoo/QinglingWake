@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -68,5 +69,23 @@ class SerialDispatchRegistryTest {
         assertThat(next.join()).isEqualTo("ok");
         assertThat(executed).containsExactly("failed", "next");
         assertThat(registry.pendingCount("team:rd")).isZero();
+    }
+
+    /**
+     * 验证优雅停止可等待调用时已经入队的异步任务完成。
+     */
+    @Test
+    void shouldAwaitQueuedTasksDuringGracefulShutdown() {
+        SerialDispatchRegistry registry = new SerialDispatchRegistry(Runnable::run);
+        CompletableFuture<Void> gate = new CompletableFuture<>();
+        registry.submit("p2p:user", () -> gate);
+
+        CompletableFuture<Boolean> drained = CompletableFuture.supplyAsync(
+                () -> registry.awaitDrained(Duration.ofSeconds(2))
+        );
+        gate.complete(null);
+
+        assertThat(drained.join()).isTrue();
+        assertThat(registry.pendingCount("p2p:user")).isZero();
     }
 }

@@ -9,6 +9,7 @@ import cn.org.chris.wake.domain.model.SessionRoute;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -155,6 +156,23 @@ public final class SessionRoutingService {
                 agentGateway.clearSession(role, userId, route.activeSessionId())
         );
         routeRepository.delete(routingKey);
+    }
+
+    /**
+     * 清理 TestAPI 创建的全部路由、审计和可定位的 Manager AgentScope state。
+     *
+     * @param routeUserIds routing key 到测试 senderId 的映射；缺失映射的旧路由仍清理文件数据
+     */
+    public synchronized void clearAll(Map<String, String> routeUserIds) {
+        Map<String, String> users = routeUserIds == null ? Map.of() : Map.copyOf(routeUserIds);
+        for (SessionRoute route : routeRepository.findAll()) {
+            String userId = users.get(route.routingKey());
+            if (userId != null && !userId.isBlank()) {
+                agentGateway.clearSession("manager", userId, route.activeSessionId());
+            }
+        }
+        routeRepository.clearAll();
+        auditRepository.clearAll();
     }
 
     /**

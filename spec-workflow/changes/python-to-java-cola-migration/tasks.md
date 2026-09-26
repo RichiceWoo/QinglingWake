@@ -264,7 +264,7 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：所有 P0 契约/集成场景通过；fixture 生成方式和来源 commit/目录有记录。
 - **验证命令**：`mvn -Pcontract-it verify`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 18：四条真实 E2E
 

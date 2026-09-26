@@ -183,9 +183,9 @@ Spring Boot `no-feishu` 模式启动；TestAPI 通过 CaptureSender 完成一轮
 
 ## 9. 执行计划与命令
 
-- [ ] 固化 Python golden fixtures。
-- [ ] 实现 P0 单元与架构测试。
-- [ ] 实现契约测试和 IT-01～IT-06。
+- [x] 固化 Python golden fixtures。
+- [x] 实现 P0 单元与架构测试。
+- [x] 实现契约测试和 IT-01～IT-06。
 - [ ] 运行默认 `mvn verify`。
 - [ ] 运行可选 pgvector profile。
 - [ ] 运行四条真实 E2E 并保存证据。
@@ -214,3 +214,4 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 | 2026-09-25 | `mvn -pl qingling-team-domain,qingling-team-app,qingling-team-infra -am test` | 通过（57 tests） | Task 6 Python golden、checkpoint 注册/查询/幂等 resolve/并发、输入分类优先级、五维 self-score 计算与提取 |
 | 2026-09-25 | `mvn test` | 通过（全 6 模块，57 tests） | Task 1～6 全量回归；Reactor Summary 全部 SUCCESS |
 | 2026-09-26 | `mvn -pl qingling-team-starter -am test` | 通过（全 6 模块，140 tests） | Task 16 无飞书启动、缺失模型密钥脱敏 fail-fast、配置映射、四角色 heartbeat/Cron、Runner 排空与运行时关闭；Reactor Summary 全部 SUCCESS，未调用真实模型 |
+| 2026-09-26 | `mvn -Pcontract-it verify` | 通过（140 unit + 10 contract/IT） | Python fixture 含 11 个源文件 SHA-256；路由、Session、邮箱、事件、tasks、checkpoint、self_score、TestAPI、workspace 权限、自动唤醒、四角色 Skill 发现及 IT-01～IT-06 全部通过；无真实 LLM、飞书或网络调用 |

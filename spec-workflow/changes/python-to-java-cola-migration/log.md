@@ -26,6 +26,7 @@
 | 2026-09-26 | apply | 完成 Task 14 TestAPI 与 CaptureSender | Spring MVC 消息/会话端点、Python golden、默认 msgId/senderId、附件复制、300 秒可配置超时、400/422、CaptureSender 和会话/审计/AgentScope state 清理完成；对应命令 70 项、全项目 133 项测试通过 |
 | 2026-09-26 | apply | 完成 Task 15 日志查询、Metrics 与结构化日志 | stats/tasks/steps/l1/all-agents JSONL 容错查询、Python CLI 契约、Runner/飞书/HTTP/错误 Prometheus 指标、`/metrics`、50MB×5 JSONL 滚动和凭据掩码完成；对应命令共 137 项测试通过 |
 | 2026-09-26 | apply | 完成 Task 16 Starter、配置与生命周期装配 | Spring Boot 入口、Spec 第 6 节类型安全配置、显式 Bean 装配、无飞书启动、模型密钥脱敏 fail-fast、heartbeat/Cron 与入站→Runner→后台→AgentScope 反向关闭完成；对应命令共 140 项测试通过，离线测试未调用真实模型 |
+| 2026-09-26 | apply | 完成 Task 17 跨语言契约与无 LLM 集成测试 | Python 只读快照生成确定性 fixture；源目录无 `.git`，以 11 个关键源文件 SHA-256 替代 commit 追溯；路由、Session、邮箱、事件、tasks、checkpoint、self_score、TestAPI、workspace 权限、自动唤醒及四角色 Skill 发现通过；`mvn -Pcontract-it verify` 共 140 项单测与 10 项契约/集成测试成功 |
 
 ## 技术决策
 

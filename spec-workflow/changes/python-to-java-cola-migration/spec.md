@@ -234,6 +234,7 @@
 | Task 14 TestAPI 与 CaptureSender | 已完成 | adapter api/dto、CaptureSender、session 全量清理端口与文件实现 | Python golden 字段/default、400/422/超时、附件复制、Loading/文本捕获和 DELETE 路由/审计/AgentScope state 清理通过；对应命令共 70 项测试，全项目 133 项回归通过 |
 | Task 15 日志查询、Metrics 与结构化日志 | 已完成 | app LogQueryService、infra JSONL/Metrics、starter CLI/metrics/logback | stats/tasks/steps/l1/all-agents Python 契约、7 类 Prometheus 指标、50MB×5 滚动 JSONL 与凭据掩码通过；对应命令共 137 项测试 |
 | Task 16 Starter、配置与生命周期装配 | 已完成 | starter Application/Properties/RuntimeConfiguration、YAML 模板、生命周期与路由 Sender | 无飞书 Spring 容器启动、配置 fail-fast、四角色 heartbeat/Cron、Runner 排空与反向关闭通过；对应命令共 140 项测试，未调用真实模型 |
+| Task 17 跨语言契约与无 LLM 集成测试 | 已完成 | `contract-fixtures/generate_contract_fixture.py`、starter contract fixtures/IT、Maven `contract-it` profile | Python 源快照无 `.git`，以目录及 11 个源文件 SHA-256 追溯；140 项单测与 10 项契约/集成测试通过，未调用真实 LLM、飞书或网络 |
 
 ## 12. 审查结论
 

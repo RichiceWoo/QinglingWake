@@ -1,0 +1,182 @@
+{
+  "_meta": {
+    "sha256": {
+      "xiaopaw_team/api/schemas.py": "8cd1c031206479361f863b5f41f6a0ee141d72160ff97510abbec78e3e1422c3",
+      "xiaopaw_team/cron/tasks_store.py": "2da83780ae716de6bd0767783034d503b3e1d4cacc7959b9be6d04faa6efe92e",
+      "xiaopaw_team/feishu/session_key.py": "33312b591f27cf4d96d4168bd099610d1401e56109d1875844d20ebfb0f6adf6",
+      "xiaopaw_team/models.py": "bd03a5fb6acd072aad84b3ebd88ce69644b10b101b3d1e131dc67b9bba31c017",
+      "xiaopaw_team/session/manager.py": "82875fb5e15249a67fee9b329a7b3d81bd182a03d8a01b9c79090f6e5944a632",
+      "xiaopaw_team/session/models.py": "2670e21489ce95db1b82035558753fcdcda7883fbb2b740f4feaa2431a1423da",
+      "xiaopaw_team/tools/event_log.py": "108e25b9430284a6264c59b664b93e64dac606077607145473dca151e491c02c",
+      "xiaopaw_team/tools/feishu_bridge.py": "8a6030e787ad5e370394bea3527312089cb5efc65a800cfba28daa2699ea7c23",
+      "xiaopaw_team/tools/log_query.py": "bc91fbf3b305acac8fa9ea19f9141c274c06f2bd6b48b31dd7ddb66b7bf2a77b",
+      "xiaopaw_team/tools/mailbox.py": "b1bacba9a3b534d359e2ae74e3e46980c5a7aed93f3f7ce4e2dcce1023b3ad1d",
+      "xiaopaw_team/tools/self_score.py": "385223911a191b2b1a58a71dcc4638df7ebd6952097d3cd154e5fb2749dd7731"
+    },
+    "source_commit": null,
+    "source_directory": "/Users/qingling/workspace/IdeaProjects/kid0317/xiaopaw-team-main",
+    "source_note": "源目录是无 .git 元数据的只读快照，以关键文件 SHA-256 标识版本"
+  },
+  "inbound_message": {
+    "attachment": {
+      "file_key": "file-key-1",
+      "file_name": "需求.txt",
+      "msg_type": "file"
+    },
+    "content": "请评审附件",
+    "is_cron": false,
+    "meta": {
+      "source": "feishu"
+    },
+    "msg_id": "om_message",
+    "root_id": "om_root",
+    "routing_key": "thread:oc_group:omt_thread",
+    "sender_id": "ou_user",
+    "ts": 1795000000000
+  },
+  "routing": [
+    {
+      "chat_id": "oc_group",
+      "chat_type": "p2p",
+      "expected": "p2p:ou_user",
+      "sender_id": "ou_user",
+      "thread_id": null
+    },
+    {
+      "chat_id": "oc_group",
+      "chat_type": "group",
+      "expected": "group:oc_group",
+      "sender_id": "ou_user",
+      "thread_id": null
+    },
+    {
+      "chat_id": "oc_group",
+      "chat_type": "group",
+      "expected": "thread:oc_group:omt_thread",
+      "sender_id": "ou_user",
+      "thread_id": "omt_thread"
+    }
+  ],
+  "self_score": {
+    "breakdown": {
+      "clarity": 0.7,
+      "completeness": 0.9,
+      "hard_constraints": 1.0,
+      "self_review": 0.8,
+      "timeliness": 0.9
+    },
+    "expected": 0.86
+  },
+  "session_index": {
+    "p2p:ou_contract": {
+      "active_session_id": "s-contract002",
+      "sessions": [
+        {
+          "created_at": "2026-09-26T00:00:00Z",
+          "id": "s-contract001",
+          "message_count": 2,
+          "verbose": false
+        },
+        {
+          "created_at": "2026-09-26T00:01:00Z",
+          "id": "s-contract002",
+          "message_count": 0,
+          "verbose": true
+        }
+      ]
+    }
+  },
+  "tasks": [
+    {
+      "created_at_ms": 1795000000000,
+      "delete_after_run": true,
+      "enabled": true,
+      "id": "job-10000000",
+      "name": "at-job",
+      "payload": {
+        "message": "__wake__:new_mail:proj-contract",
+        "routing_key": "team:pm"
+      },
+      "schedule": {
+        "at_ms": 1795000001000,
+        "every_ms": null,
+        "expr": null,
+        "kind": "at",
+        "tz": null
+      },
+      "state": {
+        "last_error": null,
+        "last_run_at_ms": null,
+        "last_status": null,
+        "next_run_at_ms": null
+      },
+      "updated_at_ms": 1795000000000
+    },
+    {
+      "created_at_ms": 1795000000000,
+      "delete_after_run": false,
+      "enabled": true,
+      "id": "job-20000000",
+      "name": "every-job",
+      "payload": {
+        "message": "__wake__:heartbeat",
+        "routing_key": "team:rd"
+      },
+      "schedule": {
+        "at_ms": null,
+        "every_ms": 30000,
+        "expr": null,
+        "kind": "every",
+        "tz": null
+      },
+      "state": {
+        "last_error": null,
+        "last_run_at_ms": null,
+        "last_status": null,
+        "next_run_at_ms": null
+      },
+      "updated_at_ms": 1795000000000
+    },
+    {
+      "created_at_ms": 1795000000000,
+      "delete_after_run": false,
+      "enabled": true,
+      "id": "job-30000000",
+      "name": "cron-job",
+      "payload": {
+        "message": "nightly",
+        "routing_key": "team:qa"
+      },
+      "schedule": {
+        "at_ms": null,
+        "every_ms": null,
+        "expr": "0 2 * * *",
+        "kind": "cron",
+        "tz": "Asia/Shanghai"
+      },
+      "state": {
+        "last_error": null,
+        "last_run_at_ms": null,
+        "last_status": null,
+        "next_run_at_ms": null
+      },
+      "updated_at_ms": 1795000000000
+    }
+  ],
+  "test_api": {
+    "request_defaults": {
+      "attachment": null,
+      "content": "",
+      "msg_id": null,
+      "routing_key": "p2p:ou_contract",
+      "sender_id": "ou_test001"
+    },
+    "response_fields": [
+      "msg_id",
+      "reply",
+      "session_id",
+      "duration_ms",
+      "skills_called"
+    ]
+  }
+}

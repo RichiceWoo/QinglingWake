@@ -18,6 +18,7 @@
 | 2026-09-25 | apply | 完成 Task 6 Human checkpoint、分类与自评 | callback/id/latest pending 分类优先级、JSONL resolve marker、五维 HALF_UP 自评及 Python golden 通过；对应命令共 57 项测试 |
 | 2026-09-26 | apply | 完成 Task 7 Cron、wake、heartbeat 与 Cleanup | at/every/cron、时区、mtime+size 热重载、并发 wake 去重、四角色错峰、同角色 heartbeat 抑制、data root 防逃逸及凭证权限通过；对应命令共 72 项测试 |
 | 2026-09-26 | apply | 完成 Task 8 workspace 模板转换与外部初始化 | 35 个源 Skill 全量映射为 29 个 reference Skill 与 6 个 task Skill/Sub-Agent；四角色 AgentScope 发现、seed/升级/改动保护、清单漂移和符号链接防护通过；对应命令共 80 项测试 |
+| 2026-09-26 | apply | 完成 Task 9 AgentScope Tools 与角色 Toolkit | 8 个团队工具、Intermediate/图片/百度搜索工具完成；Manager 8 件、其他角色 5 件团队工具，辅助工具按 Skill 最小暴露，Python 参数 schema 与业务闭环通过；对应命令共 70 项测试 |
 
 ## 技术决策
 
@@ -30,6 +31,7 @@
 | 会话与记忆 | Harness 是模型上下文唯一事实源；自研 Session 只管路由/命令/审计 | 自研全量上下文 / 双主双写 | 用户选择 2A；避免重复注入和状态漂移 |
 | Workspace/Skills | 转换为 AgentScope 外部可写 workspace；保留原 Python 交付行为 | 原样复制 / 全部改成生成 Java | 用户选择 3A；运行平台 Java 化且业务能力等价 |
 | 模板升级 | `managed` 文件按上次模板 SHA-256 安全升级；`MEMORY.md` 使用 `seed` 永不覆盖 | 每次覆盖 / 所有文件只写一次 | 可发布模板修订，同时保护运行记忆、用户定制与清单外数据 |
+| Toolkit 权限 | 公共团队工具按角色绑定；Manager 追加 3 件；图片/搜索按 Skill 显式启用 | 所有角色注册全部工具 | 减少模型误调用和额外文件、网络权限，保持 Manager 8 件/其他角色 5 件契约 |
 | 迁移范围 | 完整迁移矩阵 | 核心版 / 延期未声明 | 用户选择 4A；所有源模块必须有明确去向 |
 | 测试策略 | 单元 + 契约 + 集成 + 4 条真实 E2E | 只做单测 / 全部 7 条 E2E | 用户选择 5A；成本与等价信心平衡 |
 | 飞书 SDK | oapi-sdk-java | 自封装 HTTP | 官方 SDK 维护，WebSocket 支持完整 |
@@ -51,6 +53,7 @@
 | self_score 结构化输出与 raw 同时存在 | Python 只要 `json_output` 声明了 `self_score` 就不再回退 raw | Java 提取器保持相同优先级，避免用 raw 掩盖结构化分数错误 | 否 |
 | 同角色 AT wake 与 heartbeat 同时到期 | 两个 Cron job 都投递会让同一角色重复执行 | Cron tick 优先投递业务 wake，同时推进 heartbeat 的下次时间但不重复投递 | 否 |
 | Task 8 规范将 `sandbox_execute_bash` 举作旧工具名 | AIO-Sandbox 当前 MCP 仍实际暴露同名工具，机械改名会导致声明不可调用 | 保留真实 MCP 工具名；移除 `skill_loader`、mailbox CLI、CrewAI/Sub-Crew 等旧胶水 | 是 |
+| AgentScope `enableTools` 会先注册对象内全部 `@Tool` 方法 | 同一 `ImageAndSearchTools` 中有图片和搜索两个方法，仅启用其一时另一工具仍进入注册表 | 注册后显式移除未被当前 Skill 授权的工具，并以 Toolkit 名称集合测试固化 | 否 |
 
 ## 知识发现
 
@@ -74,6 +77,8 @@
 | Session 索引表示 | domain 只暴露当前活跃 `SessionRoute` | infra 在兼容 JSON 中保留每个 routing key 的历史 `sessions` 数组 | Harness 管模型 state；索引历史仅用于路由元数据兼容 |
 | wake 去重原子性 | Python `schedule_wake` 的查重与 `create_job` 分属两次文件锁 | Java Repository 在一次跨线程/跨进程文件锁内完成查重和追加 | 消除并发 send_mail 产生重复 wake 的窗口 |
 | Workspace 模板文件归属 | Spec 只要求幂等初始化，未定义模板版本升级时如何处理已有文件 | 清单区分 `managed`/`seed`，状态文件记录上次模板摘要；只升级未被用户修改的 managed 文件 | 同时满足模板可升级与运行数据不可覆盖 |
+| 图片工具名称 | Python 工具名 `Add image to content Local` 含空格 | Java AgentScope 工具名改为 `add_image_to_content_local`，参数 `image_url` 与行为保持兼容 | 满足模型函数名安全格式；避免后续模型 API 拒绝非法名称 |
+| infra 调用邮件唤醒 | Task 9 工具需要调用 app 层 `WakeScheduler`，但 COLA 依赖禁止 infra → app | `CommonTeamTools.MailWakeScheduler` 窄接口由 starter 后续以方法引用注入 | 保持模块依赖方向，Task 16 装配时绑定 `WakeScheduler::scheduleMailWake` |
 
 ## 代码质量备忘
 

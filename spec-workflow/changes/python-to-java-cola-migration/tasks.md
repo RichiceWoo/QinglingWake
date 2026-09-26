@@ -149,7 +149,7 @@
 - **验收标准**：Manager 恰有 8 个团队工具，其他角色有 5 个；辅助工具按角色/Skill 暴露；工具参数 JSON schema 与 Python 名称兼容。
 - **验证命令**：`mvn -pl qingling-team-infra -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 10：四角色 HarnessAgent、Sub-Agent 与 MCP
 

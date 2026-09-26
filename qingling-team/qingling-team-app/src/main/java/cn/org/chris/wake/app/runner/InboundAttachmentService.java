@@ -2,6 +2,7 @@ package cn.org.chris.wake.app.runner;
 
 import cn.org.chris.wake.domain.model.Attachment;
 import cn.org.chris.wake.domain.model.InboundMessage;
+import cn.org.chris.wake.domain.gateway.AttachmentDownloader;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -28,7 +29,7 @@ public final class InboundAttachmentService {
     /** 外部可写 workspace 根目录，附件保存到 sessions/{id}/uploads。 */
     private final Path workspaceRoot;
 
-    /** 由 Task 12 飞书实现提供的附件字节下载端口。 */
+    /** 由基础设施实现提供的附件字节下载端口。 */
     private final AttachmentDownloader downloader;
 
     /**
@@ -212,22 +213,6 @@ public final class InboundAttachmentService {
                 || ".".equals(value) || "..".equals(value)) {
             throw new IllegalArgumentException(name + " 含非法路径字符");
         }
-    }
-
-    /**
-     * 由飞书或其他接入实现下载附件原始字节。
-     */
-    @FunctionalInterface
-    public interface AttachmentDownloader {
-
-        /**
-         * 下载单个消息资源。
-         *
-         * @param messageId 来源消息标识
-         * @param attachment 附件元数据
-         * @return 下载字节；失败以异常 Future 表示
-         */
-        CompletableFuture<byte[]> download(String messageId, Attachment attachment);
     }
 
     /**

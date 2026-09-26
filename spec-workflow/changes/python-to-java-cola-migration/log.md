@@ -21,6 +21,8 @@
 | 2026-09-26 | apply | 完成 Task 9 AgentScope Tools 与角色 Toolkit | 8 个团队工具、Intermediate/图片/百度搜索工具完成；Manager 8 件、其他角色 5 件团队工具，辅助工具按 Skill 最小暴露，Python 参数 schema 与业务闭环通过；对应命令共 70 项测试 |
 | 2026-09-26 | apply | 完成 Task 10 四角色 HarnessAgent、Sub-Agent 与 MCP | 四角色 workspace/Skill/声明式 Sub-Agent/Toolkit 构建通过；Gateway 以 RuntimeContext 传递路由并在 adapter 内 Mono→Future；MCP 状态脱敏可观测；无真实模型/MCP smoke 与回归共 76 项测试通过 |
 | 2026-09-26 | apply | 完成 Task 11 Runner 完整执行链 | routing key 串行与跨 key 并行、wake 去重、Slash、session 附件、Loading、Agent、审计、卡片降级和 team 零外发完成；失败指标与队列恢复通过；对应命令共 56 项测试 |
+| 2026-09-26 | apply | 完成 Task 12 飞书 Listener、Sender 与 Downloader | 官方 oapi-sdk-java 2.7.3 Channel/OpenAPI 接入；p2p/群白名单/Bot 入群、text/post/image/file、thread root、Loading/PATCH、1/2/4 秒重试、资源下载与脱敏通过；对应命令共 109 项测试 |
+| 2026-09-26 | apply | 完成 Task 13 pgvector 记忆索引 | DashScope 摘要/标签、两份 1024 维向量、稳定幂等 ID、事务写入、空 DSN 跳过和旁路失败隔离完成；默认命令共 92 项测试；`pgvector-it` 完整 verify 成功，当前环境无 Docker，真实容器用例明确跳过 |
 
 ## 技术决策
 
@@ -45,6 +47,7 @@
 | 文件锁 | Java NIO FileLock | Apache Commons IO | JDK 原生，无额外依赖 |
 | Cron 表达式 | cron-utils 库 | 自实现 parser | 成熟库，支持时区 |
 | 测试框架 | JUnit 5 + Mockito + AssertJ | TestNG | Java 社区主流，COLA 项目标配 |
+| pgvector 集成测试 | Testcontainers 2.0.5 PostgreSQL 模块 + Failsafe profile | 默认构建强制连接数据库 / 手工 SQL 验证 | 默认构建无数据库依赖；启用 profile 时用 `pgvector/pgvector:pg16` 验证真实 DDL、双向量和幂等写入 |
 
 ## 踩坑记录
 
@@ -62,6 +65,9 @@
 | AgentScope `enableTools` 会先注册对象内全部 `@Tool` 方法 | 同一 `ImageAndSearchTools` 中有图片和搜索两个方法，仅启用其一时另一工具仍进入注册表 | 注册后显式移除未被当前 Skill 授权的工具，并以 Toolkit 名称集合测试固化 | 否 |
 | Harness 默认状态目录在用户主目录 | AgentScope 默认创建 `~/.agentscope/state/{agent}`，受限运行环境可能不可写且与外部 workspace 生命周期分离 | TeamAgentFactory 显式注入角色 workspace 下的 `JsonFileAgentStateStore` | 是 |
 | 异常 CompletableFuture 会毒化串行尾链 | 若直接将业务 Future 作为下一任务前置条件，单次 Agent 失败会使后续同 key 任务全部跳过 | 对外结果保留原异常，内部队列尾部用 `handle` 转为正常完成，并以测试覆盖“失败时已排队的下一项” | 是 |
+| 飞书 Java SDK 同时提供底层 OpenAPI 与高层 Channel | 直接用底层 EventDispatcher 需要自行维护事件归一化、策略和重连 | 入站采用 Channel 归一化消息及重连事件，出站/下载采用 OpenAPI 请求模型；adapter 仍保留群白名单二次校验 | 是 |
+| infra 单测首次触发 Mockito inline mock maker 自附加失败 | 当前 JDK/沙箱不允许 Byte Buddy 动态 attach | 与 app 模块保持一致，在 infra 测试资源中显式使用 `mock-maker-subclass`；默认回归通过 | 否 |
+| 当前环境没有可用 Docker daemon | Testcontainers 无法启动 `pgvector/pgvector:pg16` | 集成用例使用 `disabledWithoutDocker=true`，profile 仍编译并执行到明确 skipped；有 Docker 的 CI/本机将自动运行真实 upsert 验证 | 否 |
 
 ## 知识发现
 

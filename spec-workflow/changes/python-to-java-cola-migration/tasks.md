@@ -201,7 +201,7 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：SDK mock/contract 测试覆盖转换、发送、更新、下载、白名单和重连。
 - **验证命令**：`mvn -pl qingling-team-adapter,qingling-team-infra -am test`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 13：pgvector 记忆索引
 
@@ -214,7 +214,7 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：Testcontainers PostgreSQL+pgvector profile 验证 upsert；默认构建不要求数据库。
 - **验证命令**：`mvn -pl qingling-team-infra -am test`；可选 `mvn -Ppgvector-it verify`
 
-- [ ] 完成
+- [x] 完成
 
 ## Task 14：TestAPI 与 CaptureSender
 

@@ -2,6 +2,7 @@ package cn.org.chris.wake.infra.agentscope;
 
 import cn.org.chris.wake.domain.model.AgentReply;
 import cn.org.chris.wake.domain.model.AgentRequest;
+import cn.org.chris.wake.infra.memory.TurnMemoryIndexer;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
 import reactor.core.publisher.Mono;
@@ -46,6 +47,35 @@ class AgentScopeAgentGatewayTest {
         assertThat(attachmentPaths).isEqualTo(List.of("uploads/design.png"));
         assertThat(reply.content()).isEqualTo("done");
         assertThat(reply.skillsCalled()).containsExactly("code_impl", "self_score");
+    }
+
+    /**
+     * 记忆索引调度应收到完整单轮数据，且同步失败不得改变 Agent 主回复。
+     */
+    @Test
+    void shouldScheduleMemoryWithoutAffectingReply() {
+        CapturingRuntime runtime = new CapturingRuntime();
+        CapturingMemoryIndexer memoryIndexer = new CapturingMemoryIndexer();
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime), AgentScopeAgentGateway.RuntimeMode.PRODUCTION, memoryIndexer
+        );
+        AgentRequest request = new AgentRequest(
+                "rd",
+                "user-001",
+                "session-001",
+                "用户问题",
+                List.of(),
+                Map.of("routingKey", "p2p:user-001")
+        );
+
+        AgentReply reply = gateway.execute(request).join();
+
+        assertThat(reply.content()).isEqualTo("done");
+        assertThat(memoryIndexer.sessionId).isEqualTo("session-001");
+        assertThat(memoryIndexer.routingKey).isEqualTo("p2p:user-001");
+        assertThat(memoryIndexer.userMessage).isEqualTo("用户问题");
+        assertThat(memoryIndexer.assistantReply).isEqualTo("done");
+        assertThat(memoryIndexer.turnTimestampMs).isPositive();
     }
 
     /**
@@ -121,6 +151,46 @@ class AgentScopeAgentGatewayTest {
         @Override
         public void close() {
             closed = true;
+        }
+    }
+
+    /**
+     * 捕获单轮索引参数并模拟同步调度失败的测试实现。
+     */
+    private static final class CapturingMemoryIndexer implements TurnMemoryIndexer {
+
+        /** 最近一次收到的会话标识。 */
+        private String sessionId;
+
+        /** 最近一次收到的外部路由键。 */
+        private String routingKey;
+
+        /** 最近一次收到的用户消息。 */
+        private String userMessage;
+
+        /** 最近一次收到的助手回复。 */
+        private String assistantReply;
+
+        /** 最近一次收到的轮次时间戳。 */
+        private long turnTimestampMs;
+
+        /**
+         * 捕获全部参数后抛出异常，验证旁路失败隔离。
+         */
+        @Override
+        public void schedule(
+                String currentSessionId,
+                String currentRoutingKey,
+                String currentUserMessage,
+                String currentAssistantReply,
+                long currentTurnTimestampMs
+        ) {
+            sessionId = currentSessionId;
+            routingKey = currentRoutingKey;
+            userMessage = currentUserMessage;
+            assistantReply = currentAssistantReply;
+            turnTimestampMs = currentTurnTimestampMs;
+            throw new IllegalStateException("模拟记忆调度失败");
         }
     }
 }

@@ -3,6 +3,7 @@ package cn.org.chris.wake.infra.agentscope;
 import cn.org.chris.wake.domain.gateway.AgentGateway;
 import cn.org.chris.wake.domain.model.AgentReply;
 import cn.org.chris.wake.domain.model.AgentRequest;
+import cn.org.chris.wake.infra.memory.TurnMemoryIndexer;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
 import io.agentscope.harness.agent.HarnessAgent;
@@ -30,13 +31,26 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     /** 按角色绑定的可调用 Agent 运行时。 */
     private final Map<String, AgentRuntime> runtimes;
 
+    /** Agent 回复后触发的可选非阻塞记忆索引器。 */
+    private final TurnMemoryIndexer memoryIndexer;
+
     /**
      * 以实际 HarnessAgent 映射创建领域 Gateway。
      *
      * @param agents 四角色 HarnessAgent
      */
     public AgentScopeAgentGateway(Map<String, HarnessAgent> agents) {
-        this(adaptAgents(agents), RuntimeMode.PRODUCTION);
+        this(adaptAgents(agents), RuntimeMode.PRODUCTION, noOpMemoryIndexer());
+    }
+
+    /**
+     * 以实际 HarnessAgent 映射和 pgvector 索引器创建领域 Gateway。
+     *
+     * @param agents 四角色 HarnessAgent
+     * @param memoryIndexer 非阻塞记忆索引入口
+     */
+    public AgentScopeAgentGateway(Map<String, HarnessAgent> agents, TurnMemoryIndexer memoryIndexer) {
+        this(adaptAgents(agents), RuntimeMode.PRODUCTION, memoryIndexer);
     }
 
     /**
@@ -46,11 +60,27 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
      * @param ignored 区分生产构造器的内部标记
      */
     AgentScopeAgentGateway(Map<String, AgentRuntime> runtimes, RuntimeMode ignored) {
+        this(runtimes, ignored, noOpMemoryIndexer());
+    }
+
+    /**
+     * 使用可观测运行时和记忆索引器创建测试适配器。
+     *
+     * @param runtimes 测试运行时
+     * @param ignored 区分生产构造器的内部标记
+     * @param memoryIndexer 非阻塞记忆索引入口
+     */
+    AgentScopeAgentGateway(
+            Map<String, AgentRuntime> runtimes,
+            RuntimeMode ignored,
+            TurnMemoryIndexer memoryIndexer
+    ) {
         Objects.requireNonNull(ignored, "runtimeMode 不能为空");
         if (runtimes == null || runtimes.isEmpty()) {
             throw new IllegalArgumentException("Agent 运行时不能为空");
         }
         this.runtimes = Map.copyOf(runtimes);
+        this.memoryIndexer = Objects.requireNonNull(memoryIndexer, "memoryIndexer 不能为空");
     }
 
     /**
@@ -62,6 +92,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     @Override
     public CompletableFuture<AgentReply> execute(AgentRequest request) {
         Objects.requireNonNull(request, "request 不能为空");
+        long turnTimestampMs = System.currentTimeMillis();
         AgentRuntime runtime = requireRuntime(request.role());
         RuntimeContext context = RuntimeContext.builder()
                 .userId(request.userId())
@@ -71,8 +102,33 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 .put(ATTACHMENT_PATHS_ATTRIBUTE, request.attachmentPaths())
                 .build();
         return runtime.call(request.content(), context)
-                .map(AgentScopeAgentGateway::toReply)
+                .map(message -> {
+                    AgentReply reply = toReply(message);
+                    scheduleMemoryIndex(request, reply, turnTimestampMs);
+                    return reply;
+                })
                 .toFuture();
+    }
+
+    /**
+     * 触发记忆索引；即使调度器同步失败也不得影响主 Agent 回复。
+     */
+    private void scheduleMemoryIndex(AgentRequest request, AgentReply reply, long turnTimestampMs) {
+        String routingKey = Objects.toString(request.attributes().get("routingKey"), request.userId());
+        try {
+            memoryIndexer.schedule(
+                    request.sessionId(), routingKey, request.content(), reply.content(), turnTimestampMs
+            );
+        } catch (RuntimeException ignored) {
+            // 记忆是可选旁路，任何同步调度失败都不能改变主回复语义。
+        }
+    }
+
+    /**
+     * 提供默认空实现，使未配置 memory.db_dsn 的构造路径完全不产生副作用。
+     */
+    private static TurnMemoryIndexer noOpMemoryIndexer() {
+        return (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { };
     }
 
     /**

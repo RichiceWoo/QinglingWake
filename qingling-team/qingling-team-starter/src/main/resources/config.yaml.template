@@ -11,10 +11,24 @@ qingling:
     allowed-chats: []
 
   agent:
-    model: qwen3.6-max-preview
-    sub-agent-model: qwen3.6-max-preview
+    # 当前使用节省计划中的显式模型；只有显式开启后才探测免费候选。
+    model: qwen3.8-max
+    sub-agent-model: qwen3.8-max
+    free-model-selection-enabled: false
+    model-candidates:
+      - qwen3.8-27b
+      - qwen3.8-2.4t-a95b
+      - deepseek-v4.1-flash
+      - glm-5.3
+      - kimi-k3
+      - deepseek-v4-flash-0731
+      - qwen3.7-flash-2026-07-15
+      - qwen3.7-flash
+    model-probe-url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+    model-probe-timeout: 20s
     max-iterations: 30
     max-input-tokens: 30000
+    max-output-tokens: 8192
     sub-agent-max-iterations: 20
     timeout: 300s
 
@@ -61,6 +75,9 @@ qingling:
     baidu-api-key: ""
 
 # 必填模型密钥：export DASHSCOPE_API_KEY=sk-xxx
+# 节省计划模式：export QINGLING_FREE_MODEL_SELECTION_ENABLED=false QINGLING_AGENT_MODEL=qwen3.8-max
+# 免费候选模式：export QINGLING_FREE_MODEL_SELECTION_ENABLED=true
+# 旧 QINGLING_DYNAMIC_MODEL_SELECTION_ENABLED 仅在新开关未设置时作为兼容回退。
 # 兼容旧变量：export QWEN_API_KEY=sk-xxx
 # 飞书模式：export QINGLING_FEISHU_ENABLED=true FEISHU_APP_ID=... FEISHU_APP_SECRET=...
 # 可选搜索：export BAIDU_APPBUILDER_API_KEY=...

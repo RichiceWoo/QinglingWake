@@ -15,8 +15,10 @@ kind: sop
 |---|------|-------|-----------|----------------|
 | 1 | 需求澄清 | Manager | `needs/requirements.md` | ✅ 需求定稿需用户 approve |
 | 2 | 产品设计 | PM | `design/product_spec.md` | （可选评审） |
-| 3 | 技术方案 + 代码实现 | RD | `tech/tech_design.md` + `code/*.py` + pytest 通过 | （可选评审） |
-| 4 | 测试设计 + 执行 | QA | `qa/test_plan.md` + `qa/test_report.md` | （可选评审） |
+| 3A | 技术方案设计与必要修订 | RD | `tech/tech_design.md` | （可选评审） |
+| 3B | 代码实现 | RD | `code/*.py` + pytest 通过 | — |
+| 4A | 测试设计 | QA | `qa/test_plan.md` | （可选评审） |
+| 4B | 测试执行 | QA | `qa/test_report.md` | — |
 | 5 | 交付 | Manager | `delivery_sent` 事件 | ✅ 用户验收 |
 | 6 | 复盘 | Manager + 各角色 | `retro_report` 邮件链 + `retro_applied_by_*` 事件 | （memory 自动，skill/agent/soul 转用户） |
 
@@ -27,12 +29,15 @@ kind: sop
 2. 缺口 > 0：用 `send_to_human(kind="info")` 问 1-2 个最关键问题
 3. 缺口 = 0（或用户明确说"所有细节由你决定"/"直接推进"/"我批准任何方案"）：
    - **立刻**调 AgentScope Tool `create_project(project_id=<短 slug>, project_name=<中文名>, needs_content=<完整 5 节需求 markdown>)`
-   - 调 AgentScope Tool `send_to_human(routing_key=<user rk>, message=<需求摘要+请确认>, kind="checkpoint_request", project_id=<pid>, checkpoint_id=<短 id>)`
    - 调 AgentScope Tool `append_event(project_id=<pid>, action="requirements_drafted", payload={...})`
+   - 最后调 AgentScope Tool `send_to_human(routing_key="__current__", message=<需求摘要+请确认>, kind="checkpoint_request", project_id=<pid>, checkpoint_id="requirements_review")`
+   - `needs_content` 必须含 Goal/Boundary/Constraint/Risk/Acceptance 五节和可机械验证的接受标准；禁止直接复制用户原句作为需求文档
 
 ### 用户在阶段 1 回复 checkpoint
 - 含"同意/批准/approve/ok" → 加载 skill `handle_checkpoint_reply`
-  - `append_event("checkpoint_approved")`
+  - 外部 checkpoint 回复不是 mailbox message：禁止调用 `mark_done`、禁止虚构 `msg_id`
+  - 先 `append_event("checkpoint_reply_classified", {checkpoint_id:"requirements_review", reply_class:"approve"})`
+  - 再 `append_event("checkpoint_approved", {checkpoint_id:"requirements_review"})`
   - 调 `send_mail(to="pm", type="task_assign", subject="产品设计 (第 1 轮)", content={...}, project_id=<pid>)` → PM 自动被唤醒
 - 含修改意见 → 更新 `needs/requirements.md`（调 `write_shared`）+ 再发 checkpoint
 
@@ -43,10 +48,16 @@ kind: sop
 | 当前 task_done 来自 | 下一 task_assign | subject | 必须独立发送 |
 |-------------------|-----------------|---------|-----------|
 | PM（含 design/product_spec.md）| to=rd | "技术方案设计 (第 1 轮)" | ✅ 仅技术方案，不含实现 |
-| RD（含 tech/tech_design.md）| to=rd | "代码实现 (第 1 轮)" | ✅ **单独再发一次** task_assign 让 RD 写 code/ + 单测 |
+| RD（含 tech/tech_design.md，包括任意轮技术方案修订）| to=rd | "代码实现 (第 1 轮)" | ✅ **单独再发一次** task_assign 让 RD 写 code/ + 单测；正文必须写明沙盒唯一目录 `/workspace/shared/projects/<真实 project_id>/code` |
 | RD（含 code/main.py + code/tests/）| to=qa | "测试设计 (第 1 轮)" | ✅ 仅测试设计，不含执行 |
 | QA（含 qa/test_plan.md）| to=qa | "测试执行 (第 1 轮)" | ✅ **单独再发一次** task_assign 让 QA 跑 pytest |
 | QA（含 qa/test_report.md 且全 pass）| — | — | 进入阶段 5 交付 |
+
+**缺陷闭环的唯一分派规则**：
+- QA 的 `task_done` 若报告失败或携带 `qa/defects/*.md`，由 Manager 且只由 Manager 向 RD 发送一条 `task_assign`，subject 使用 `缺陷修复 (第 N 轮)`。
+- RD 修复完成后，由 Manager 且只由 Manager 向 QA 发送一条 `测试执行 (第 N+1 轮)`；QA 直接在共享挂载目录回归。
+- QA 不得直接给 RD 分派任务。若邮箱中已存在相同轮次的开放修复任务，不得重复发送。
+- 每轮回归报告继续覆盖写入 `qa/test_report.md`；只有最新报告明确全通过且无开放 defect 才能进入交付。
 
 **不要做的事**：
 - 🚫 subject="技术设计与实现" — 这是一条消息做两件事，RD 会漏做实现
@@ -54,9 +65,15 @@ kind: sop
 - 🚫 没收到 RD 的"代码实现完成"就派 QA —— code/ 目录还没产物可测
 - 🚫 没收到 QA 的"测试执行完成"就发 delivery —— 等 test_report.md 生成、且无 fail
 
+**技术方案评审后的唯一合法推进**：
+- 评审要求 revise：只向 RD 分派“技术方案修订”；修订完成邮件仍必须按 `tech/tech_design.md` 路径识别为阶段 3A。
+- 技术方案通过（包括修订后通过）：下一任务只能是向 RD 分派“代码实现 (第 1 轮)”。
+- 不论技术方案经历多少轮评审或修订，只要尚未收到包含 `code/main.py` 与 `code/tests/` 的 RD 完成邮件，就绝不能向 QA 分派测试设计。
+- `from=rd` 不能单独决定下一阶段；必须同时核对产物路径。`tech/tech_design.md` 与 `code/` 分别代表两个不可合并的阶段。
+
 **收到每条 `type=task_done` 邮件时**：
 1. 调 `read_inbox(project_id)` → 拿到 task_done
-2. 加载 skill `check_review_criteria` → 按 5 条判据判 threshold_met
+2. 加载 skill `check_review_criteria` → 只调用一次同名 Java 工具得到 threshold_met，禁止自行遍历历史或计算摘要
 3. threshold_met=false（常见情况）：
    - `append_event("task_done_received", {from_role, artifacts})`
    - 调 `mark_done(pid, msg_id)`
@@ -66,12 +83,12 @@ kind: sop
 ### 阶段 5：交付
 QA 的 test_report 到达且所有通过：
 1. 调 `append_event(pid, "delivery_requested", {...})`（交付准备好）
-2. 调 `send_to_human(routing_key=<用户rk>, message="交付汇报+验收请求", kind="delivery", project_id=pid, checkpoint_id="delivery-<pid>")`
+2. 调 `send_to_human(routing_key="__current__", message="交付汇报+验收请求", kind="delivery", project_id=pid, checkpoint_id="delivery-<pid>")`
 3. 记录到 events 的 `delivery_sent` 动作已由 send_to_human 自动写入
 
 用户 approve 回复（"同意/批准/验收通过"等）时：
 1. `append_event(pid, "delivered", {"artifacts_summary": ..., "deliverer_approved_at": "<ts>"})` **— 这一步必须做，否则交付未完成**
-2. `send_to_human(routing_key=<用户rk>, message="✅ 交付确认完成，感谢！", kind="info", project_id=pid)`
+2. `send_to_human(routing_key="__current__", message="✅ 交付确认完成，感谢！", kind="info", project_id=pid)`
 3. 告知用户如需复盘，发"复盘"触发阶段 6
 
 ### 阶段 6：复盘（用户发"复盘/团队复盘"后）

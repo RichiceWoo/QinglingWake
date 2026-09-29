@@ -27,6 +27,19 @@
 | 2026-09-26 | apply | 完成 Task 15 日志查询、Metrics 与结构化日志 | stats/tasks/steps/l1/all-agents JSONL 容错查询、Python CLI 契约、Runner/飞书/HTTP/错误 Prometheus 指标、`/metrics`、50MB×5 JSONL 滚动和凭据掩码完成；对应命令共 137 项测试通过 |
 | 2026-09-26 | apply | 完成 Task 16 Starter、配置与生命周期装配 | Spring Boot 入口、Spec 第 6 节类型安全配置、显式 Bean 装配、无飞书启动、模型密钥脱敏 fail-fast、heartbeat/Cron 与入站→Runner→后台→AgentScope 反向关闭完成；对应命令共 140 项测试通过，离线测试未调用真实模型 |
 | 2026-09-26 | apply | 完成 Task 17 跨语言契约与无 LLM 集成测试 | Python 只读快照生成确定性 fixture；源目录无 `.git`，以 11 个关键源文件 SHA-256 替代 commit 追溯；路由、Session、邮箱、事件、tasks、checkpoint、self_score、TestAPI、workspace 权限、自动唤醒及四角色 Skill 发现通过；`mvn -Pcontract-it verify` 共 140 项单测与 10 项契约/集成测试成功 |
+| 2026-09-26 | apply | Task 18 真实 E2E 基础设施已实现，等待真实配置后续跑 | 新增隔离 AIO-Sandbox Compose、Maven `e2e` profile、四场景真实 Driver、实际 MCP 工具调用观测和证据归档；141 项默认测试通过，真实场景按预期因缺少 `DASHSCOPE_API_KEY` 失败且 0 skip；Docker 29.3.1 可用，GHCR 已下载多数层，但 blob 下载两次因网络 EOF 中断，镜像尚未完整拉取 |
+| 2026-09-26 | apply | Task 18 沙盒改用官方中国大陆镜像 | GHCR 的 `pkg-containers.githubusercontent.com` 多次随机 blob EOF；依据 AIO-Sandbox 官方大陆 Quick Start，Compose 改为火山引擎公共镜像 `all-in-one-sandbox:1.11.0`，并补齐 `seccomp:unconfined`、2GB shared memory、仅本机端口绑定与 `/workspace` 环境 |
+| 2026-09-26 | diagnose | 定位 Docker 镜像层 EOF 到 Desktop containerd 链路 | 官方大陆镜像的火山对象存储同样随机 blob EOF；宿主机 curl 对相同签名 blob 返回 HTTP 206 并完整读取，Docker 使用 `io.containerd.snapshotter.v1` 且经内部 3128 代理，故排除仓库权限和本机外网阻断，等待切换经典镜像存储后续拉取 |
+| 2026-09-26 | diagnose | Task 18 首次真实运行发现嵌套挂载冲突 | Key、沙盒健康检查均通过；happy-path 在场景目录清理阶段因 `/workspace/.cron` 嵌套 bind mount 带 macOS `deny delete` ACL 而失败，尚未调用模型；移除不必要的 Cron 嵌套挂载后重建容器重试 |
+| 2026-09-28 | apply | Task 18 修复真实多 Agent 并发与路由缺陷 | 修复 Cron 旧快照覆盖执行中新增 wake、`send_to_human` 外部 routing key、开放任务幂等、Manager 确定性评审与技术方案后代码阶段；对应回归及完整默认 `mvn verify` 通过 |
+| 2026-09-28 | diagnose | 首次干净 happy-path 未通过 | 真实流程完成 checkpoint、PM、技术方案评审/修订并进入 RD 代码；百炼连接多次 EOF/SSL 握手失败导致 `file:code/main.py` 等待 30 分钟超时。RD 随后把 MCP `timeout` 传成字符串而被 schema 拒绝；该运行无成功 `summary.json`，不能计为通过 |
+| 2026-09-28 | apply | 固化 AIO-Sandbox timeout 参数契约 | RD/QA Skill 与 Sub-Agent 统一要求省略 timeout 或传 JSON 整数秒，禁止字符串；Workspace 模板契约 10/10、完整默认回归 154 项及 `git diff --check` 通过，未延长 E2E 超时 |
+| 2026-09-29 | verify | 第二次干净 happy-path 推进至 QA 设计后受外部账户状态阻断 | 显式模型为 `qwen3.8-max` 且免费选择关闭；约 6 分钟内完成 checkpoint、PM、RD 技术设计和 `code/main.py`，RD 代码与 QA 设计均完成、无重复任务；随后百炼返回 `Arrearage`。当前仅有部分场景证据，无成功 `summary.json`，Task 18 仍未完成 |
+| 2026-09-29 | apply | 增强开放任务的同义主题幂等保护 | `技术方案设计任务` 与 `技术方案设计 (第 1 轮)` 等仅后缀不同的开放分派复用同一消息；新增回归测试后完整默认 `mvn verify` 共 155 项通过 |
+| 2026-09-29 | verify | `qwen3.7-plus` 干净 happy-path 按用户要求暂停 | 显式模型为 `qwen3.7-plus`、免费选择关闭且无动态探测；真实完成 checkpoint、PM 产品设计、RD 技术方案、PM/QA 评审和 RD 修订，验证修订后正确进入 RD 代码实现且同义任务未重复；生成 `code/app.py` 后用户要求暂停，已终止 screen 与残留 Maven/Java 子进程。该运行无 Failsafe 成功或 `summary.json`，不得计为通过；下次从干净场景目录重跑 |
+| 2026-09-30 | diagnose | `qwen3.7-plus` 干净 happy-path 再次未完成 | 重建 AIO-Sandbox 后从保留 inode 的干净 workspace 启动；显式模型与免费选择开关正确。真实流程完成 checkpoint、PM、产品评审、RD 技术方案、RD 代码实现（requirements.txt、10 项 RD pytest 通过）并按 SOP 进入 QA。QA 独立执行因沙盒工具路径反复失配及导入脚本修正循环，20 分钟未生成 `qa/test_report.md`、证据矩阵或最终邮件；已终止残留进程并保存 `target/e2e-diagnostics/happy-path-qwen37plus-qa-stuck-20260930`，不得计为通过，需从干净目录重跑 |
+| 2026-09-30 | apply | 加固 Manager 需求 checkpoint 状态机模板 | 明确“创建项目及五节需求 → 写入共享文档 → 记录 `requirements_drafted` → 固定 `requirements_review` checkpoint”的顺序，并禁止把人工 checkpoint 回复伪装成邮箱消息或使用虚假 `msg_id`；Workspace 模板契约定向测试 13/13 通过。该修改后尚未重新完成完整默认回归 |
+| 2026-09-30 | diagnose | 终止 `qwen-coder-plus` 多轮 happy-path 并清理环境 | 显式模型 `qwen-coder-plus`、免费选择关闭。首轮未创建项目即发 checkpoint；加固模板后曾误把人工批准当邮箱消息；最新轮创建项目和完整五节需求，但出现 checkpoint 早于 `requirements_drafted` 且重复发送 `requirements_review`，未进入 PM。三轮均无 Failsafe 成功或 `summary.json`，诊断已保存到 `target/e2e-diagnostics/happy-path-qwen-coder-plus-*`。按用户要求终止 screen/Maven/Surefire/Java，停止并移除 AIO-Sandbox 容器与网络，清空活动场景目录并确认 8029 端口关闭；Task 18 保持未完成，待选择新模型后从干净目录重跑 |
 
 ## 技术决策
 

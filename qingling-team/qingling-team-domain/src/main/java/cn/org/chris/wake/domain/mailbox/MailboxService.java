@@ -91,8 +91,7 @@ public final class MailboxService {
                 MailStatus.UNREAD,
                 null
         );
-        repository.append(message);
-        return message.id();
+        return repository.appendOrReuseOpenTask(message).id();
     }
 
     /**

@@ -2,6 +2,11 @@ package cn.org.chris.wake.infra.agentscope;
 
 import io.agentscope.harness.agent.tools.McpServerConfig;
 import io.agentscope.harness.agent.tools.McpServerRegistrationResult;
+import io.agentscope.core.agent.Agent;
+import io.agentscope.core.hook.PostActingEvent;
+import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.tool.Toolkit;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -9,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 /**
  * 验证 AIO-Sandbox MCP 配置和脱敏注册状态观测。
@@ -93,5 +99,32 @@ class McpSandboxConfigurationTest {
         assertThat(configuration.enabled()).isFalse();
         assertThat(configuration.toolsConfig()).isEmpty();
         assertThat(configuration.registrationStatuses()).isEmpty();
+        assertThat(configuration.calledToolNames()).isEmpty();
+    }
+
+    /**
+     * 工具调用观测只保留工具名，供真实 E2E 证明沙盒不是仅完成注册。
+     */
+    @Test
+    void shouldObserveCompletedToolCallName() {
+        McpSandboxConfiguration configuration = McpSandboxConfiguration.streamableHttp(
+                "aio-sandbox",
+                "http://127.0.0.1:18080/mcp",
+                Map.of(),
+                Map.of(),
+                List.of("sandbox_execute_bash"),
+                Duration.ofSeconds(30),
+                Duration.ofSeconds(10)
+        );
+        PostActingEvent event = new PostActingEvent(
+                mock(Agent.class),
+                mock(Toolkit.class),
+                new ToolUseBlock("call-1", "sandbox_execute_bash", Map.of("cmd", "secret command")),
+                ToolResultBlock.text("ok")
+        );
+
+        configuration.toolCallObserver().onEvent(event).block();
+
+        assertThat(configuration.calledToolNames()).containsExactly("sandbox_execute_bash");
     }
 }

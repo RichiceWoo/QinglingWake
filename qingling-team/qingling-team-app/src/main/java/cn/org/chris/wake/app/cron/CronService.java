@@ -127,6 +127,7 @@ public final class CronService implements AutoCloseable {
         if (!repository.revision().equals(loadedRevision)) {
             reload(nowMs);
         }
+        Set<String> originalJobIds = jobs.stream().map(CronJob::id).collect(Collectors.toUnmodifiableSet());
         List<CronJob> updated = new ArrayList<>(jobs.size());
         boolean fired = false;
         Set<String> routesWithBusinessWake = jobs.stream()
@@ -147,9 +148,9 @@ public final class CronService implements AutoCloseable {
             }
         }
         if (fired) {
-            repository.replaceAll(updated);
+            boolean preservedNewJobs = repository.replaceAllPreservingNewJobs(updated, originalJobIds);
             jobs = updated;
-            loadedRevision = repository.revision();
+            loadedRevision = preservedNewJobs ? CronJobRepository.Revision.missing() : repository.revision();
         }
     }
 

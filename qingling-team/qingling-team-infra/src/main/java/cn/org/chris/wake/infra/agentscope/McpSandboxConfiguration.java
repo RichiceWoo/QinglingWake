@@ -5,6 +5,10 @@ import io.agentscope.harness.agent.tools.McpServerConfig;
 import io.agentscope.harness.agent.tools.McpServerRegistrationListener;
 import io.agentscope.harness.agent.tools.McpServerRegistrationResult;
 import io.agentscope.harness.agent.tools.ToolsConfig;
+import io.agentscope.core.hook.Hook;
+import io.agentscope.core.hook.HookEvent;
+import io.agentscope.core.hook.PostActingEvent;
+import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -30,6 +34,9 @@ public final class McpSandboxConfiguration {
 
     /** 线程安全的脱敏注册状态快照。 */
     private final List<RegistrationStatus> registrationStatuses = new CopyOnWriteArrayList<>();
+
+    /** AgentScope 实际完成的工具调用名称，用于 E2E 区分注册与真实调用。 */
+    private final List<String> calledToolNames = new CopyOnWriteArrayList<>();
 
     /**
      * 创建禁用 MCP 的配置，用于本地 smoke 或显式无沙箱场景。
@@ -140,6 +147,7 @@ public final class McpSandboxConfiguration {
             return builder.disableToolsConfig();
         }
         return builder.toolsConfig(toolsConfig)
+                .hook(toolCallObserver())
                 .mcpServerRegistrationListener(registrationListener());
     }
 
@@ -177,6 +185,33 @@ public final class McpSandboxConfiguration {
      */
     public List<RegistrationStatus> registrationStatuses() {
         return List.copyOf(registrationStatuses);
+    }
+
+    /**
+     * 返回 AgentScope 已完成工具调用的名称快照，不记录参数和返回值以避免泄密。
+     *
+     * @return 按调用完成顺序排列的工具名
+     */
+    public List<String> calledToolNames() {
+        return List.copyOf(calledToolNames);
+    }
+
+    /**
+     * 在工具执行完成后只采集工具名；参数、命令正文和结果均不进入观测数据。
+     *
+     * @return AgentScope 工具调用观测 Hook
+     */
+    Hook toolCallObserver() {
+        return new Hook() {
+            /** 记录成功进入 PostActing 阶段的工具名并原样返回事件。 */
+            @Override
+            public <T extends HookEvent> Mono<T> onEvent(T event) {
+                if (event instanceof PostActingEvent actingEvent) {
+                    calledToolNames.add(actingEvent.getToolUse().getName());
+                }
+                return Mono.just(event);
+            }
+        };
     }
 
     /**

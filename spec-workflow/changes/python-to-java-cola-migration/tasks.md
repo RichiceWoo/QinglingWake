@@ -277,6 +277,19 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：每条都验证产物、mailbox、events、checkpoint、AgentScope session 和最终回复；失败不得只以超时忽略。
 - **验证命令**：`mvn -Pe2e -De2e.scenario=<name> verify`
 
+### 当前进度（2026-09-30）
+
+- [x] E2E 基础设施、真实百炼模型、真实 AgentScope、真实 Docker AIO-Sandbox 已接通。
+- [x] 修复 Cron 执行旧快照覆盖新 wake，并验证下一角色 wake 能在后续 tick 执行。
+- [x] 修复 `send_to_human` 真实 routing key 上下文、任务分派幂等、技术方案修订后代码阶段不可跳过。
+- [x] 增加显式模型/免费模型选择开关、Manager 确定性评审工具、QA 共享目录与缺陷单点分派约束。
+- [x] 增加 `sandbox_execute_bash.timeout` 必须为 JSON 整数或省略的模板契约；增加同义任务主题幂等回归；完整默认 `mvn verify` 155 项通过。
+- [ ] `happy-path`：`qwen3.7-plus` 已真实推进到 RD/QA，但 QA 工具路径循环导致未完成；随后改用显式 `qwen-coder-plus`（免费选择关闭）多次从干净目录运行。该模型先后出现“未创建项目即发 checkpoint”“把人工批准误当邮箱消息”“先发 checkpoint、后写需求并再次发 checkpoint”等状态机偏差。最新运行已生成项目及完整五节需求，但产生两个 `requirements_review` checkpoint，尚未进入 PM；已按用户要求终止。所有运行均无 Failsafe 成功和 `summary.json`，不能计为通过。测试环境已清理，待确定新模型后从干净目录重跑。
+- [ ] `checkpoint-revise`：等待 happy-path 通过后执行。
+- [ ] `qa-defect-rd-fix`：等待 happy-path 通过后执行。
+- [ ] `code-fail-recovery`：等待 happy-path 通过后执行。
+- [ ] 四条场景证据齐全并完成最终默认回归、Spec 日志同步。
+
 - [ ] 完成
 
 ## Task 19：迁移收尾与文档

@@ -162,6 +162,39 @@ public final class FileWorkspaceRepository implements WorkspaceRepository {
     }
 
     /**
+     * 只返回 shared/projects 下非符号链接的合法项目目录。
+     *
+     * @return 字典序排列的项目标识
+     */
+    @Override
+    public List<String> listProjectIds() {
+        Path projectsRoot = workspaceRoot.resolve("shared/projects").normalize();
+        assertContained(workspaceRoot, projectsRoot);
+        assertNoSymbolicLinks(projectsRoot);
+        if (!Files.isDirectory(projectsRoot, LinkOption.NOFOLLOW_LINKS)) {
+            return List.of();
+        }
+        try (Stream<Path> paths = Files.list(projectsRoot)) {
+            return paths
+                    .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
+                    .peek(this::assertNoSymbolicLinks)
+                    .map(path -> path.getFileName().toString())
+                    .filter(projectId -> {
+                        try {
+                            WorkspacePolicy.validateProjectId(projectId);
+                            return true;
+                        } catch (IllegalArgumentException ignored) {
+                            return false;
+                        }
+                    })
+                    .sorted()
+                    .toList();
+        } catch (IOException exception) {
+            throw new IllegalStateException("列出共享项目失败", exception);
+        }
+    }
+
+    /**
      * 使用本地锁、文件锁、fsync 和原子 move 写文件。
      *
      * @param target 目标文件

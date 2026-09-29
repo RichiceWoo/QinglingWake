@@ -47,7 +47,7 @@ type: reference
 v0：`write_shared(project_id, "needs/sop_draft.md", content)`（注意：Manager 可写 needs/）
 
 ### Step 3 — 通知用户
-`send_to_human(routing_key, message="SOP 草稿已写入 needs/sop_draft.md，后续我按此推进", kind="info", project_id=...)`
+`send_to_human(routing_key="__current__", message="SOP 草稿已写入 needs/sop_draft.md，后续我按此推进", kind="info", project_id=...)`
 
 ### Step 4 — 附加事件（v0.5，新增 action 时扩展 VALID_ACTIONS）
 目前 `VALID_ACTIONS` 不含 `sop_drafted`，改用 `requirements_drafted` 或不写事件。

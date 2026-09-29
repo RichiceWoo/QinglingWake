@@ -34,7 +34,7 @@ type: reference
 用对比式（"A 还是 B？"）或范围式（"每周一次还是每次交付后？"）。
 
 ### Step 4 — 发出
-`send_to_human(routing_key, message=问题 Markdown, kind="info", project_id="")`
+`send_to_human(routing_key="__current__", message=问题 Markdown, kind="info", project_id="")`
 
 ### Step 5 — 全覆盖后
 - 组装一版"这是我理解的 SOP 草稿：..." 给用户预览

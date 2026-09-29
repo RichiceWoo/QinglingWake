@@ -16,10 +16,16 @@ qingling:
     app-secret: ${FEISHU_APP_SECRET:}
     allowed-chats: []
   agent:
-    model: ${QINGLING_AGENT_MODEL:qwen3.6-max-preview}
-    sub-agent-model: ${QINGLING_SUB_AGENT_MODEL:qwen3.6-max-preview}
+    model: ${QINGLING_AGENT_MODEL:qwen3.8-max}
+    sub-agent-model: ${QINGLING_SUB_AGENT_MODEL:qwen3.8-max}
+    # 新变量优先；旧动态选择变量仅作为兼容回退，默认关闭免费模型探测。
+    free-model-selection-enabled: ${QINGLING_FREE_MODEL_SELECTION_ENABLED:${QINGLING_DYNAMIC_MODEL_SELECTION_ENABLED:false}}
+    model-candidates: ${QINGLING_AGENT_MODEL_CANDIDATES:qwen3.8-27b,qwen3.8-2.4t-a95b,deepseek-v4.1-flash,glm-5.3,kimi-k3,deepseek-v4-flash-0731,qwen3.7-flash-2026-07-15,qwen3.7-flash}
+    model-probe-url: ${QINGLING_MODEL_PROBE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions}
+    model-probe-timeout: 20s
     max-iterations: 30
     max-input-tokens: 30000
+    max-output-tokens: 8192
     sub-agent-max-iterations: 20
     timeout: 300s
     api-key: ${DASHSCOPE_API_KEY:${QWEN_API_KEY:}}

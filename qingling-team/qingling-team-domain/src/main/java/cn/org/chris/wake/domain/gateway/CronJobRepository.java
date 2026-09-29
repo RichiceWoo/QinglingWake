@@ -3,6 +3,7 @@ package cn.org.chris.wake.domain.gateway;
 import cn.org.chris.wake.domain.model.CronJob;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * 定义 tasks.json 的原子读写、热重载版本与 wake 去重端口。
@@ -22,6 +23,15 @@ public interface CronJobRepository {
      * @param jobs 完整任务列表
      */
     void replaceAll(List<CronJob> jobs);
+
+    /**
+     * 原子替换本轮调度结果，同时保留本轮执行期间由工具新增的任务。
+     *
+     * @param jobs 本轮调度完成后的任务列表
+     * @param originalJobIds 本轮开始时已加载的任务标识
+     * @return 是否发现并保留了并发新增任务
+     */
+    boolean replaceAllPreservingNewJobs(List<CronJob> jobs, Set<String> originalJobIds);
 
     /**
      * 按标识替换已有任务或追加新任务。

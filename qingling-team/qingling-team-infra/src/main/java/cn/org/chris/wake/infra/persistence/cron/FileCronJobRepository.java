@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -75,6 +76,33 @@ public final class FileCronJobRepository implements CronJobRepository {
         withFileLock(() -> {
             writeJobs(snapshot);
             return null;
+        });
+    }
+
+    /**
+     * 在同一文件锁内合并调度期间新增的任务，避免旧快照覆盖角色链式 wake。
+     *
+     * @param jobs 本轮调度完成后的任务列表
+     * @param originalJobIds 本轮开始时已加载的任务标识
+     * @return 是否保留了本轮开始后新增的任务
+     */
+    @Override
+    public boolean replaceAllPreservingNewJobs(List<CronJob> jobs, Set<String> originalJobIds) {
+        List<CronJob> replacement = new ArrayList<>(Objects.requireNonNull(jobs, "jobs 不能为空"));
+        Set<String> originalIds = Set.copyOf(Objects.requireNonNull(originalJobIds, "originalJobIds 不能为空"));
+        return withFileLock(() -> {
+            Set<String> replacementIds = replacement.stream()
+                    .map(CronJob::id)
+                    .collect(java.util.stream.Collectors.toSet());
+            boolean preserved = false;
+            for (CronJob current : readJobs()) {
+                if (!originalIds.contains(current.id()) && replacementIds.add(current.id())) {
+                    replacement.add(current);
+                    preserved = true;
+                }
+            }
+            writeJobs(replacement);
+            return preserved;
         });
     }
 

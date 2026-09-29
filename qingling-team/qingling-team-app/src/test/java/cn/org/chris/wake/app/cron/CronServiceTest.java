@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -154,6 +155,35 @@ class CronServiceTest {
     }
 
     /**
+     * 角色处理邮件期间创建的下一角色 wake 不得被当前 tick 的旧快照覆盖。
+     */
+    @Test
+    void shouldPreserveAndRunWakeCreatedDuringDispatch() {
+        MemoryCronRepository repository = new MemoryCronRepository(List.of(atJob("pm-mail", NOW_MS)));
+        List<InboundMessage> messages = new ArrayList<>();
+        CronService service = new CronService(repository, message -> {
+            messages.add(message);
+            if (message.routingKey().equals("team:pm")) {
+                repository.upsert(atJob("manager-mail", NOW_MS + 1_000L, "manager"));
+            }
+            return CompletableFuture.completedFuture(null);
+        }, () -> "cron_nested", CLOCK);
+
+        service.tick(NOW_MS);
+
+        assertThat(repository.findAll()).singleElement().satisfies(job -> {
+            assertThat(job.id()).isEqualTo("manager-mail");
+            assertThat(job.payload().routingKey()).isEqualTo("team:manager");
+        });
+
+        service.tick(NOW_MS + 1_000L);
+
+        assertThat(messages).extracting(InboundMessage::routingKey)
+                .containsExactly("team:pm", "team:manager");
+        assertThat(repository.findAll()).isEmpty();
+    }
+
+    /**
      * 构造到期即删除的 AT 测试任务。
      *
      * @param id 任务标识
@@ -161,10 +191,22 @@ class CronServiceTest {
      * @return AT 任务
      */
     private static CronJob atJob(String id, long atMs) {
+        return atJob(id, atMs, "pm");
+    }
+
+    /**
+     * 构造指定目标角色且到期即删除的 AT 测试任务。
+     *
+     * @param id 任务标识
+     * @param atMs 触发时间
+     * @param role 接收唤醒的团队角色
+     * @return AT 任务
+     */
+    private static CronJob atJob(String id, long atMs, String role) {
         return new CronJob(
                 id, id, true,
                 new CronJob.Schedule(CronJob.ScheduleKind.AT, atMs, null, null, null),
-                new CronJob.Payload("team:pm", "__wake__:new_mail:demo"),
+                new CronJob.Payload("team:" + role, "__wake__:new_mail:demo"),
                 new CronJob.State(null, null, null, null),
                 NOW_MS, NOW_MS, true
         );
@@ -214,6 +256,33 @@ class CronServiceTest {
             jobs = new ArrayList<>(replacement);
             modifiedAt++;
             size = replacement.size();
+        }
+
+        /**
+         * 合并测试调度期间新增的任务，并报告是否发生过保留。
+         *
+         * @param replacement 本轮调度结果
+         * @param originalJobIds 本轮开始时的任务标识
+         * @return 是否保留了并发新增任务
+         */
+        @Override
+        public synchronized boolean replaceAllPreservingNewJobs(
+                List<CronJob> replacement,
+                Set<String> originalJobIds
+        ) {
+            List<CronJob> merged = new ArrayList<>(replacement);
+            Set<String> replacementIds = merged.stream()
+                    .map(CronJob::id)
+                    .collect(java.util.stream.Collectors.toSet());
+            boolean preserved = false;
+            for (CronJob current : jobs) {
+                if (!originalJobIds.contains(current.id()) && replacementIds.add(current.id())) {
+                    merged.add(current);
+                    preserved = true;
+                }
+            }
+            replaceAll(merged);
+            return preserved;
         }
 
         /**

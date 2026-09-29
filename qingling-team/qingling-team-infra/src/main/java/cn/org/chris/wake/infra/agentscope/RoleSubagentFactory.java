@@ -48,8 +48,45 @@ public final class RoleSubagentFactory {
         List<SubagentDeclaration> declarations = List.copyOf(
                 AgentSpecLoader.loadFromDirectory(subagentsRoot, roleRoot)
         );
+        declarations = declarations.stream()
+                .map(RoleSubagentFactory::inheritParentPermissions)
+                .toList();
         validateUniqueNames(role, declarations);
         return declarations;
+    }
+
+    /**
+     * 复制声明并显式继承父角色权限，使无人值守任务不会停在工具人工确认状态。
+     *
+     * @param declaration Markdown 加载器生成的原始声明
+     * @return 保留原字段且继承父权限的声明
+     */
+    private static SubagentDeclaration inheritParentPermissions(SubagentDeclaration declaration) {
+        return SubagentDeclaration.builder()
+                .name(declaration.getName())
+                .description(declaration.getDescription())
+                .workspaceMode(declaration.getWorkspaceMode())
+                .workspace(declaration.getWorkspacePath())
+                .inlineAgentsBody(declaration.getInlineAgentsBody())
+                .model(declaration.getModel())
+                .steps(declaration.getSteps())
+                .temperature(declaration.getTemperature())
+                .topP(declaration.getTopP())
+                .variant(declaration.getVariant())
+                .mode(declaration.getMode())
+                .hidden(declaration.isHidden())
+                .persistSession(declaration.isPersistSession())
+                .inheritParentPermissions(true)
+                .exposeToUser(declaration.getExposeToUser())
+                .tools(declaration.getTools())
+                .skills(declaration.getSkills())
+                .url(declaration.getUrl())
+                .headers(declaration.getHeaders())
+                .remoteStreaming(declaration.isRemoteStreaming())
+                .remoteStreamDetail(declaration.getRemoteStreamDetail())
+                .remoteAskPolicy(declaration.getRemoteAskPolicy())
+                .remoteContextAttributes(declaration.getRemoteContextAttributes())
+                .build();
     }
 
     /**

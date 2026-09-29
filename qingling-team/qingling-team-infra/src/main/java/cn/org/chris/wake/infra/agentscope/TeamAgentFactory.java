@@ -2,6 +2,8 @@ package cn.org.chris.wake.infra.agentscope;
 
 import cn.org.chris.wake.infra.agentscope.tool.RoleToolkitFactory;
 import io.agentscope.core.model.Model;
+import io.agentscope.core.permission.PermissionContextState;
+import io.agentscope.core.permission.PermissionMode;
 import io.agentscope.core.state.JsonFileAgentStateStore;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
@@ -133,6 +135,10 @@ public final class TeamAgentFactory {
                 .maxIters(maxIterations)
                 .maxContextTokens(maxContextTokens)
                 .asyncToolTimeout(asyncToolTimeout)
+                // 长工具链被中断后，由 AgentScope 注入缺失工具结果，使后续 wake 能继续修复或明确失败。
+                .enablePendingToolRecovery(true)
+                // 团队运行时无人值守；沙盒命令在隔离容器执行，宿主工具仍受各自边界校验保护。
+                .permissionContext(PermissionContextState.builder().mode(PermissionMode.BYPASS).build())
                 .disableDynamicSubagents()
                 .disableShellTool();
         return sandboxConfiguration.applyTo(builder).build();

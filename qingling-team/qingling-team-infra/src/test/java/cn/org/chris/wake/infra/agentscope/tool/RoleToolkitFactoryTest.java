@@ -7,6 +7,7 @@ import cn.org.chris.wake.infra.persistence.mailbox.FileMailboxRepository;
 import cn.org.chris.wake.infra.persistence.workspace.FileWorkspaceRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.model.ToolSchema;
 import io.agentscope.core.tool.Toolkit;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 验证角色最小工具集、Python 参数名兼容和八个团队工具的端到端行为。
+ * 验证角色最小工具集、Python 参数名兼容和九个团队工具的端到端行为。
  */
 class RoleToolkitFactoryTest {
 
@@ -68,7 +69,7 @@ class RoleToolkitFactoryTest {
     }
 
     /**
-     * Manager 必须恰有八个团队工具，其他角色恰有五个，并默认拥有中间产物工具。
+     * Manager 必须恰有九个团队工具，其他角色恰有五个，并默认拥有中间产物工具。
      */
     @Test
     void shouldExposeEightManagerAndFiveCommonTeamTools() {
@@ -77,7 +78,7 @@ class RoleToolkitFactoryTest {
         assertThat(manager.getToolNames()).containsAll(RoleToolkitFactory.COMMON_TEAM_TOOL_NAMES)
                 .containsAll(RoleToolkitFactory.MANAGER_TEAM_TOOL_NAMES)
                 .contains(RoleToolkitFactory.INTERMEDIATE_TOOL_NAME)
-                .hasSize(9);
+                .hasSize(10);
         for (String role : Set.of("pm", "rd", "qa")) {
             Toolkit toolkit = factory.create(role);
             assertThat(toolkit.getToolNames()).containsExactlyInAnyOrderElementsOf(
@@ -120,6 +121,7 @@ class RoleToolkitFactoryTest {
         Toolkit toolkit = factory.create("manager", Set.of(RoleToolkitFactory.SEARCH_SKILL));
         ToolSchema sendMail = schema(toolkit, "send_mail");
         ToolSchema sendToHuman = schema(toolkit, "send_to_human");
+        ToolSchema reviewCriteria = schema(toolkit, "check_review_criteria");
         ToolSchema search = schema(toolkit, "search_web");
 
         assertThat(properties(sendMail)).containsOnlyKeys("to", "type", "subject", "content", "project_id");
@@ -130,12 +132,18 @@ class RoleToolkitFactoryTest {
                 "routing_key", "message", "kind", "project_id", "checkpoint_id"
         );
         assertThat(required(sendToHuman)).containsExactlyInAnyOrder("routing_key", "message");
+        assertThat(properties(reviewCriteria)).containsOnlyKeys(
+                "project_id", "msg_id", "from_role", "task_done_content"
+        );
+        assertThat(required(reviewCriteria)).containsExactlyInAnyOrder(
+                "project_id", "msg_id", "from_role", "task_done_content"
+        );
         assertThat(properties(search)).containsOnlyKeys("query", "top_k", "recency_filter", "sites");
         assertThat(required(search)).containsExactly("query");
     }
 
     /**
-     * 八个团队工具应复用领域服务完成项目、邮件、共享文件和事件闭环。
+     * 九个团队工具应复用领域服务完成项目、邮件、共享文件、事件与评审判定闭环。
      *
      * @throws Exception JSON 结果解析失败
      */
@@ -167,8 +175,16 @@ class RoleToolkitFactoryTest {
         JsonNode event = json(manager.appendEvent(
                 "pawdiary-001", "assigned", Map.of("to", "pm", "msg_id", messageId)
         ));
+        JsonNode reviewDecision = json(manager.checkReviewCriteria(
+                "pawdiary-001", "msg-e0144ee2", "pm",
+                Map.of(
+                        "self_score", 0.95,
+                        "breakdown", Map.of("hard_constraints", 1.0)
+                )
+        ));
         JsonNode human = json(manager.sendToHuman(
-                "p2p:user", "请确认", "info", "pawdiary-001", ""
+                "__current__", "请确认", "info", "pawdiary-001", "",
+                RuntimeContext.builder().put("routingKey", "test:real-user").build()
         ));
 
         assertThat(created.path("errcode").asInt()).isZero();
@@ -178,10 +194,58 @@ class RoleToolkitFactoryTest {
         assertThat(written.path("errcode").asInt()).isZero();
         assertThat(read.path("content").asText()).isEqualTo("# spec");
         assertThat(event.path("seq").asLong()).isGreaterThan(1L);
+        assertThat(reviewDecision.path("threshold_met").asBoolean()).isFalse();
+        assertThat(reviewDecision.path("sample_bucket").asInt()).isEqualTo(87);
+        assertThat(reviewDecision.path("next_action").asText()).isEqualTo("proceed_next_stage");
         assertThat(human.path("errcode").asInt()).isZero();
+        assertThat(human.path("routing_key").asText()).isEqualTo("test:real-user");
         assertThat(eventService.readAll("pawdiary-001"))
                 .extracting(value -> value.get("action"))
                 .contains("project_created", "assigned", "info_sent");
+        assertThat(eventService.readAll("pawdiary-001").get(2))
+                .extracting(value -> ((Map<?, ?>) value.get("payload")).get("routing_key"))
+                .isEqualTo("test:real-user");
+
+        JsonNode wakeReply = json(manager.sendToHuman(
+                "__current__", "交付完成", "delivery", "pawdiary-001", "",
+                RuntimeContext.builder().put("routingKey", "team:manager").build()
+        ));
+        assertThat(wakeReply.path("routing_key").asText()).isEqualTo("test:real-user");
+    }
+
+    /**
+     * 低自评、硬约束失分或显式新 Skill 都必须稳定触发评审。
+     *
+     * @throws Exception JSON 结果解析失败
+     */
+    @Test
+    void shouldMechanicallyEvaluateReviewCriteria() throws Exception {
+        ManagerTeamTools manager = new ManagerTeamTools(
+                workspaceRepository, eventService, null, objectMapper
+        );
+        manager.createProject("review-001", "Review", "# needs");
+
+        JsonNode lowScore = json(manager.checkReviewCriteria(
+                "review-001", "msg-e0144ee2", "rd",
+                Map.of(
+                        "self_score", 0.62,
+                        "breakdown", Map.of("hard_constraints", 0.75)
+                )
+        ));
+        JsonNode noviceSkill = json(manager.checkReviewCriteria(
+                "review-001", "msg-e0144ee2", "qa",
+                Map.of(
+                        "self_score", 0.95,
+                        "skill", "test_run",
+                        "breakdown", Map.of("hard_constraints", 1.0)
+                )
+        ));
+
+        assertThat(lowScore.path("threshold_met").asBoolean()).isTrue();
+        assertThat(lowScore.path("reasons").toString())
+                .contains("self_score=0.62 < 0.70", "hard_constraints=0.75 < 0.80");
+        assertThat(noviceSkill.path("threshold_met").asBoolean()).isTrue();
+        assertThat(noviceSkill.path("reasons").toString()).contains("novice_skill=test_run, completed=0");
     }
 
     /**
@@ -201,7 +265,7 @@ class RoleToolkitFactoryTest {
 
         JsonNode invalidProject = json(common.readInbox("Bad!ID"));
         JsonNode invalidKind = json(manager.sendToHuman(
-                "p2p:user", "message", "unknown", "", ""
+                "p2p:user", "message", "unknown", "", "", RuntimeContext.empty()
         ));
 
         assertThat(invalidProject.path("errcode").asInt()).isEqualTo(1);

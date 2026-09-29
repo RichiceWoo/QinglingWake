@@ -92,13 +92,15 @@ class MailboxServiceTest {
         private Duration resetTimeout;
 
         /**
-         * 记录追加的邮件。
+         * 记录追加的邮件并模拟 Repository 返回实际持久化结果。
          *
          * @param message 待保存邮件
+         * @return 原样返回待保存邮件
          */
         @Override
-        public void append(MailMessage message) {
+        public MailMessage appendOrReuseOpenTask(MailMessage message) {
             appendedMessage = message;
+            return message;
         }
 
         /**

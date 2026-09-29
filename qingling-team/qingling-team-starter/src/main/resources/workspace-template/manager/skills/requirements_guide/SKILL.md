@@ -38,13 +38,16 @@ type: reference
 1-3 个具体问题；必要时带"例如 A / B / C"引导。
 
 ### Step 5 — 发出
-`send_to_human(routing_key, message, kind="info", project_id=<if_known>)`
+`send_to_human(routing_key="__current__", message, kind="info", project_id=<if_known>)`
 
 ### Step 6 — 覆盖判定
 如果 Step 2 的评估"全覆盖" → **不问问题**，转下一步：
-- 调 skill `requirements_write` 起草 `needs/requirements.md`
-- 用 `send_to_human(kind="checkpoint_request")` 请求最终确认
-- `CheckpointStore.register` 登记 pending
+- 若尚无项目，先调用 `create_project` 并保存工具返回的真实 `project_id`
+- 调 skill `requirements_write` 起草并真实写入 `needs/requirements.md`
+- 确认共享需求文档非空并记录 `requirements_drafted` 事件
+- 最后用完整参数 `send_to_human(routing_key="__current__", kind="checkpoint_request", project_id=project_id, checkpoint_id="requirements_review", message=...)` 请求最终确认
+- 工具调用顺序不可交换；禁止只把需求写在 checkpoint 消息正文而不落共享文件
+- checkpoint 成功后立即停止，等待用户下一条明确回复；不得把初始需求当成批准
 
 ## 输出
 

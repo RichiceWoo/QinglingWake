@@ -3,6 +3,7 @@ package cn.org.chris.wake.starter.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
+import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -44,10 +45,20 @@ public record QinglingTeamProperties(
 
     /** DashScope 主模型和 Agent 执行边界。 */
     public record Agent(
-            /** 主 Agent 使用的模型名称。 */ @DefaultValue("qwen3.6-max-preview") String model,
-            /** 声明式 Sub-Agent 使用的模型名称。 */ @DefaultValue("qwen3.6-max-preview") String subAgentModel,
+            /** 关闭免费模型选择时主 Agent 使用的显式模型名称。 */ @DefaultValue("qwen3.8-max") String model,
+            /** 声明式 Sub-Agent 使用的模型名称。 */ @DefaultValue("qwen3.8-max") String subAgentModel,
+            /** 是否在启动时按优先级探测免费模型。 */ @DefaultValue("false") boolean freeModelSelectionEnabled,
+            /** 免费模型候选列表，按智能体适配度从高到低排列。 */
+            @DefaultValue({
+                    "qwen3.8-27b", "qwen3.8-2.4t-a95b", "deepseek-v4.1-flash", "glm-5.3",
+                    "kimi-k3", "deepseek-v4-flash-0731", "qwen3.7-flash-2026-07-15", "qwen3.7-flash"
+            }) List<String> modelCandidates,
+            /** OpenAI 兼容的模型可用性探测端点。 */
+            @DefaultValue("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions") URI modelProbeUrl,
+            /** 单个候选模型探测超时。 */ @DefaultValue("20s") Duration modelProbeTimeout,
             /** 主 Agent 最大迭代次数。 */ @DefaultValue("30") int maxIterations,
             /** 主模型上下文窗口上限。 */ @DefaultValue("30000") int maxInputTokens,
+            /** 单次模型响应最大 token，避免复杂工具编排在调用前被截断。 */ @DefaultValue("8192") int maxOutputTokens,
             /** Sub-Agent 最大迭代次数。 */ @DefaultValue("20") int subAgentMaxIterations,
             /** 单次 Agent 调用超时。 */ @DefaultValue("300s") Duration timeout,
             /** DashScope API Key，优先 DASHSCOPE_API_KEY、回退 QWEN_API_KEY。 */ @DefaultValue("") String apiKey

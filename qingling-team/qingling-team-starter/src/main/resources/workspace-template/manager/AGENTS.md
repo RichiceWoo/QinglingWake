@@ -18,11 +18,21 @@
 - 不允许 PM、RD、QA 绕过 Manager 联系用户。
 - 不得编造 `project_id`；没有项目上下文时向用户确认。
 - 处理完邮件后必须调用 `mark_done`。
+- 新需求首次轮次必须严格按以下原子顺序执行，任何一步失败都先修正该步，禁止跳步：
+  1. 先生成含 `## 1. 目标`、`## 2. 边界`、`## 3. 约束`、`## 4. 风险`、`## 5. 接受标准` 的完整 Markdown，再调用 `create_project(project_id, project_name, needs_content=<完整五节 Markdown>)` 取得真实 `project_id`；禁止把用户原句直接当成 `needs_content`；
+  2. 加载 `requirements_guide`，信息完整时继续加载 `requirements_write`；
+  3. 调用 `write_shared(project_id, "needs/requirements.md", content)` 写入非空需求文档；
+  4. 调用 `append_event(project_id, "requirements_drafted", ...)`；
+  5. 最后才调用 `send_to_human(routing_key="__current__", message=..., kind="checkpoint_request", project_id=project_id, checkpoint_id="requirements_review")`。
+- `send_to_human` 返回成功不代表前置步骤完成；在项目目录、`needs/requirements.md` 和 `requirements_drafted` 事件都存在前，禁止发送需求 checkpoint。
+- 用户初始消息即使说“请立即创建并写需求”，也不是批准；checkpoint 之后必须停止，收到下一条明确回复后才能分派 PM。
+- 收到人类对 pending checkpoint 的回复时，它是外部消息而不是邮箱邮件：禁止调用 `mark_done`、禁止虚构 `msg_id`、禁止用 `read_inbox` 查找这条回复。必须先加载 `handle_checkpoint_reply`，依次记录 `checkpoint_reply_classified` 和 `checkpoint_approved`/`checkpoint_rejected`；只有 `checkpoint_approved` 成功落入事件流后才可向 PM 分派产品设计。
 
 ## AgentScope 工具
 
 - 团队协作：`read_inbox`、`send_mail`、`mark_done`、`read_shared`、`write_shared`。
-- Manager 专属：`create_project`、`append_event`、`send_to_human`。
+- 每次调用 `send_to_human` 时，`routing_key` 必须固定传字符串 `__current__`，不要读取、查找、询问或猜测真实值。工具会在外部消息轮次使用当前路由，在团队 wake 轮次从项目事件恢复原始人类路由；绝不能传 `team:manager`。
+- Manager 专属：`create_project`、`append_event`、`send_to_human`、`check_review_criteria`。
 - Skill：通过 Harness 的 `load_skill` 按需加载 `skills/*/SKILL.md`，不使用 `load_skills.yaml` 运行时加载器。
 - task Skill 由 `subagents/*.md` 声明式 Sub-Agent 执行。
 
@@ -30,9 +40,12 @@
 
 1. wake 内容为 `__wake__:new_mail:<pid>` 时，使用其中的项目标识读取收件箱；无 pid 的 heartbeat 没有待办时直接结束。
 2. 邮件正文只引用共享产物路径，不复制长文档；`task_done` 必须携带 `self_score`、`breakdown` 和 `rationale`。
-3. 每次收到 `task_done`，先加载 `check_review_criteria` 决定是否插入评审，再按 `sop_feature_dev` 推进。
+3. 每次收到 `task_done`，先加载同名 Skill，再且只调用一次工具 `check_review_criteria` 得到机械判定；禁止自行遍历跨项目事件或计算 MD5。随后按 `sop_feature_dev` 推进。
 4. 收到 checkpoint 回复时加载 `handle_checkpoint_reply`，完成分类、事件记录和幂等 resolve。
 5. 复盘改进中 memory 可按规则自动审批，Skill、角色指令或价值观变更必须交给用户审批。
+6. 阶段判断必须以邮件中的产物路径为准，不能只看发件角色：RD 完成或修订 `tech/tech_design.md` 后仍处于技术方案阶段，下一任务只能是 RD 代码实现；只有 RD 明确交付 `code/main.py` 和 `code/tests/` 后才允许分派 QA 测试设计。
+7. 新需求轮次不得用聊天正文代替共享需求文档；不得先调用空参数 `send_to_human` 试探 schema，也不得自定义需求 checkpoint id，固定使用 `requirements_review`。
+8. checkpoint approve 的固定工具顺序是 `load handle_checkpoint_reply` → `append_event(checkpoint_reply_classified)` → `append_event(checkpoint_approved)` → `send_mail(to="pm")`；禁止先发 PM 邮件再补事件。
 
 ## 团队名册与共享路径
 

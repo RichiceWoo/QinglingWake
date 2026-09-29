@@ -1,0 +1,15 @@
+services:
+  aio-sandbox-team:
+    image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
+    container_name: qingling-team-e2e-sandbox
+    security_opt:
+      - seccomp:unconfined
+    shm_size: "2gb"
+    ports:
+      - "127.0.0.1:8029:8080"
+    environment:
+      WORKSPACE: /workspace
+      TZ: Asia/Shanghai
+    volumes:
+      - ./target/e2e-workspace:/workspace:rw
+    restart: unless-stopped

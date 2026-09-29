@@ -8,8 +8,8 @@ type: reference
 
 ## 🚨 Critical Rules
 1. **OR 逻辑**：5 条判据任一命中即插评审；不要当作"综合评分"用。
-2. **返回值稳定**：只返回 bool 和 reasons；不发邮件、不写事件（那是调用方的事）。
-3. **抽查 15% 的随机数要幂等**：用 `hash(msg_id)` 而不是 `random()`，否则复盘时复不出来。
+2. **只调用一次同名工具**：把原始 `task_done.content` 原样作为 `task_done_content` 传入；不要自行遍历项目或计算摘要。
+3. **返回值稳定**：工具只返回判定，不发邮件、不写事件（后续动作由 Manager 完成）。
 
 ## 判据表（任一触发 → threshold_met=True）
 
@@ -23,14 +23,14 @@ type: reference
 
 ## 步骤
 
-### Step 1 — 拿 task_done content
-从邮件 content 读 `self_score / breakdown / skill / impact_level`（可选）。
+### Step 1 — 拿 task_done 原始字段
+从邮件取得 `project_id / msg_id / from` 和完整 `content`。
 
-### Step 2 — 计数角色历史（判据 4）
-读 `shared/projects/*/events.jsonl`（跨项目），数最近 30 天同角色同 skill 的 task_done_received 条数。
+### Step 2 — 一次性机械判定
+调用 `check_review_criteria(project_id, msg_id, from_role, task_done_content)`。跨项目近 30 天计数、阈值判断和 MD5 抽查全部由 Java 工具完成；不得再调用其他工具辅助计算。
 
-### Step 3 — 逐条检查
-对 1-5 每条 eval → 命中 reasons.append。
+### Step 3 — 使用工具结果
+直接使用返回的 `threshold_met / reasons / next_action` 推进，禁止重复判定。`content.skill` 缺失时不适用“同 Skill 新手期”判据。
 
 ## 输出
 

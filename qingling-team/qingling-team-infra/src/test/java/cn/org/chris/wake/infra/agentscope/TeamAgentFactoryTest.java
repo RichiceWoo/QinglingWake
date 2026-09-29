@@ -15,7 +15,9 @@ import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ToolSchema;
+import io.agentscope.core.permission.PermissionMode;
 import io.agentscope.harness.agent.HarnessAgent;
+import io.agentscope.harness.agent.subagent.SubagentDeclaration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -92,10 +94,14 @@ class TeamAgentFactoryTest {
                 HarnessAgent agent = agents.get(role);
                 assertThat(agent.getName()).isEqualTo(role);
                 assertThat(agent.getModel().getModelName()).isEqualTo("no-call-model");
+                assertThat(agent.getDelegate().isPendingToolRecoveryEnabled()).isTrue();
+                assertThat(agent.getDelegate().getPermissionContext().getMode()).isEqualTo(PermissionMode.BYPASS);
                 assertThat(agent.getWorkspaceManager().getWorkspace())
                         .isEqualTo(workspaceRoot.resolve(role).toRealPath());
                 assertThat(skillNames(agent)).contains("fixture_skill");
                 assertThat(agent.getSubagentAgentManager().hasAgent(taskSubagentName(role))).isTrue();
+                assertThat(agent.getSubagentAgentManager().getDeclaration(taskSubagentName(role)))
+                        .get().extracting(SubagentDeclaration::isInheritParentPermissions).isEqualTo(true);
                 assertThat(agent.getToolkit().getToolNames())
                         .containsAll(RoleToolkitFactory.COMMON_TEAM_TOOL_NAMES);
             }

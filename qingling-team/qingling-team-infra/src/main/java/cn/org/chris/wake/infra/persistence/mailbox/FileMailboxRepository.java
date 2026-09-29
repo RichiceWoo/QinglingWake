@@ -77,18 +77,61 @@ public final class FileMailboxRepository implements MailboxRepository {
     }
 
     /**
-     * 在收件箱文件锁内追加 unread 邮件，不覆盖已有消息。
+     * 在收件箱文件锁内追加邮件，并原子复用相同的未完成任务分派。
      *
      * @param message 待保存邮件
+     * @return 实际追加或复用的邮件
      */
     @Override
-    public void append(MailMessage message) {
+    public MailMessage appendOrReuseOpenTask(MailMessage message) {
         validateRole(message.to());
         Path inbox = inboxPath(message.projectId(), message.to());
-        withLockedInbox(inbox, messages -> {
+        return withLockedInbox(inbox, messages -> {
+            if ("task_assign".equals(message.type())) {
+                MailMessage duplicate = messages.stream()
+                        .filter(existing -> isOpenDuplicateTask(existing, message))
+                        .findFirst()
+                        .map(existing -> fromMap(new LinkedHashMap<>(existing)))
+                        .orElse(null);
+                if (duplicate != null) {
+                    return duplicate;
+                }
+            }
             messages.add(toMap(message));
-            return null;
+            return message;
         });
+    }
+
+    /**
+     * 判断磁盘邮件是否与候选邮件构成同一项尚未完成的任务分派。
+     *
+     * @param existing 磁盘中的邮件字段
+     * @param candidate 候选任务分派
+     * @return 相同任务且状态为 unread 或 in_progress 时返回 true
+     */
+    private static boolean isOpenDuplicateTask(Map<String, Object> existing, MailMessage candidate) {
+        String status = String.valueOf(existing.get("status"));
+        boolean open = "unread".equals(status) || "in_progress".equals(status);
+        return open
+                && candidate.from().equals(existing.get("from"))
+                && candidate.to().equals(existing.get("to"))
+                && candidate.type().equals(existing.get("type"))
+                && canonicalTaskSubject(candidate.subject()).equals(
+                        canonicalTaskSubject(String.valueOf(existing.get("subject")))
+                );
+    }
+
+    /**
+     * 归一化模型可能生成的任务主题变体，避免“任务”或轮次后缀绕过开放任务幂等保护。
+     *
+     * @param subject 原始任务主题
+     * @return 用于开放任务比较的规范主题
+     */
+    private static String canonicalTaskSubject(String subject) {
+        return subject.strip()
+                .replaceAll("\\s+", "")
+                .replaceAll("[（(]第?\\d+轮[^）)]*[）)]$", "")
+                .replaceAll("任务$", "");
     }
 
     /**

@@ -139,6 +139,99 @@ class Task5FileRepositoriesTest {
     }
 
     /**
+     * 并发重复分派同一任务时必须只保留一封未完成邮件，并向所有调用方返回同一消息标识。
+     *
+     * @throws Exception 并发任务或邮箱文件读取失败
+     */
+    @Test
+    void shouldAtomicallyReuseDuplicateOpenTaskAssignments() throws Exception {
+        Path workspace = temporaryDirectory.resolve("workspace-idempotent-task");
+        ObjectMapper mapper = new ObjectMapper();
+        new FileWorkspaceRepository(workspace).initializeProject("p1");
+        AtomicInteger ids = new AtomicInteger();
+        MailboxService service = new MailboxService(
+                new FileMailboxRepository(workspace, mapper),
+                () -> "msg-" + String.format("%08x", ids.incrementAndGet()),
+                Clock.systemUTC()
+        );
+        ExecutorService executor = Executors.newFixedThreadPool(8);
+        List<String> returnedIds;
+        try {
+            List<Callable<String>> sends = new ArrayList<>();
+            for (int index = 0; index < 20; index++) {
+                sends.add(() -> service.send(
+                        "p1", "rd", "manager", "task_assign", "技术方案设计 (第 1 轮)",
+                        Map.of("attempt", "duplicate")
+                ));
+            }
+            returnedIds = executor.invokeAll(sends).stream().map(future -> {
+                try {
+                    return future.get();
+                } catch (Exception exception) {
+                    throw new IllegalStateException(exception);
+                }
+            }).toList();
+        } finally {
+            executor.shutdownNow();
+        }
+
+        JsonNode inbox = mapper.readTree(
+                workspace.resolve("shared/projects/p1/mailboxes/rd.json").toFile()
+        );
+        assertThat(inbox).hasSize(1);
+        assertThat(returnedIds).containsOnly(inbox.get(0).path("id").asText());
+
+        List<MailMessage> claimed = service.readInbox("p1", "rd");
+        service.markDone("p1", "rd", claimed.get(0).id());
+        String nextRoundId = service.send(
+                "p1", "rd", "manager", "task_assign", "技术方案设计 (第 1 轮)",
+                Map.of("attempt", "after_done")
+        );
+        assertThat(nextRoundId).isNotEqualTo(claimed.get(0).id());
+        assertThat(mapper.readTree(
+                workspace.resolve("shared/projects/p1/mailboxes/rd.json").toFile()
+        )).hasSize(2);
+    }
+
+    /**
+     * 模型生成的主题仅有“任务”、空白或轮次后缀差异时，开放任务仍必须复用同一封邮件。
+     *
+     * @throws Exception 邮箱文件读取失败
+     */
+    @Test
+    void shouldReuseSemanticallyEquivalentOpenTaskAssignments() throws Exception {
+        Path workspace = temporaryDirectory.resolve("workspace-semantic-idempotent-task");
+        ObjectMapper mapper = new ObjectMapper();
+        new FileWorkspaceRepository(workspace).initializeProject("p1");
+        AtomicInteger ids = new AtomicInteger();
+        MailboxService service = new MailboxService(
+                new FileMailboxRepository(workspace, mapper),
+                () -> "msg-" + String.format("%08x", ids.incrementAndGet()),
+                Clock.systemUTC()
+        );
+
+        String firstId = service.send(
+                "p1", "rd", "manager", "task_assign", "技术方案设计任务", Map.of("source", "first")
+        );
+        String reusedId = service.send(
+                "p1", "rd", "manager", "task_assign", "技术方案设计 (第 1 轮)", Map.of("source", "retry")
+        );
+
+        assertThat(reusedId).isEqualTo(firstId);
+        assertThat(mapper.readTree(
+                workspace.resolve("shared/projects/p1/mailboxes/rd.json").toFile()
+        )).hasSize(1);
+
+        String differentTaskId = service.send(
+                "p1", "rd", "manager", "task_assign", "代码实现任务", Map.of("source", "different")
+        );
+        assertThat(differentTaskId).isNotEqualTo(firstId);
+        assertThat(mapper.readTree(
+                workspace.resolve("shared/projects/p1/mailboxes/rd.json").toFile()
+        )).hasSize(2);
+    }
+
+    /**
      * 超时 in_progress 邮件应恢复为 unread，近期邮件保持不变。
      */
     @Test

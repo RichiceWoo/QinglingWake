@@ -86,6 +86,26 @@ public final class MemoryExtractionClient implements MemoryExtractionPort {
     }
 
     /**
+     * 使用动态选中的免费聊天模型创建客户端，向量模型仍保持固定维度兼容项。
+     *
+     * @param httpClient JDK HTTP 客户端
+     * @param objectMapper JSON 序列化器
+     * @param apiKey DashScope API key
+     * @param extractModel 动态选择的摘要模型
+     */
+    public MemoryExtractionClient(
+            HttpClient httpClient,
+            ObjectMapper objectMapper,
+            String apiKey,
+            String extractModel
+    ) {
+        this(
+                jdkTransport(httpClient), objectMapper, apiKey, DEFAULT_BASE_URI,
+                extractModel, DEFAULT_EMBEDDING_MODEL
+        );
+    }
+
+    /**
      * 使用可替换传输和模型配置创建客户端。
      *
      * @param transport HTTP 传输端口

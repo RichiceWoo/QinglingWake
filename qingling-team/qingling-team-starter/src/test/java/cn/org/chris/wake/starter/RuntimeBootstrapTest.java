@@ -5,6 +5,7 @@ import cn.org.chris.wake.adapter.feishu.FeishuWebSocketListener;
 import cn.org.chris.wake.app.cron.CronService;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
 import cn.org.chris.wake.starter.config.QinglingTeamProperties;
+import cn.org.chris.wake.starter.config.DashScopeModelSelector;
 import cn.org.chris.wake.starter.config.RuntimeSettings;
 import cn.org.chris.wake.starter.runtime.RuntimeLifecycle;
 import org.junit.jupiter.api.Test;
@@ -43,6 +44,8 @@ class RuntimeBootstrapTest {
                 "--qingling.memory.context-dir=" + data.resolve("ctx"),
                 "--qingling.feishu.enabled=false",
                 "--qingling.sandbox.enabled=false",
+                "--qingling.agent.free-model-selection-enabled=false",
+                "--qingling.agent.model=qwen3.8-max",
                 "--qingling.debug.test-api-enabled=true",
                 "--qingling.cleanup.run-on-startup=false",
                 "--qingling.cron.heartbeat-stagger-seconds[0]=3600",
@@ -52,7 +55,16 @@ class RuntimeBootstrapTest {
         )) {
             QinglingTeamProperties properties = context.getBean(QinglingTeamProperties.class);
             assertThat(context.getBean(RuntimeSettings.class).workspaceRoot()).isEqualTo(workspace.toAbsolutePath());
-            assertThat(properties.agent().model()).isEqualTo("qwen3.6-max-preview");
+            assertThat(properties.agent().freeModelSelectionEnabled()).isFalse();
+            assertThat(properties.agent().model()).isEqualTo("qwen3.8-max");
+            assertThat(properties.agent().modelCandidates()).containsExactly(
+                    "qwen3.8-27b", "qwen3.8-2.4t-a95b", "deepseek-v4.1-flash", "glm-5.3",
+                    "kimi-k3", "deepseek-v4-flash-0731", "qwen3.7-flash-2026-07-15", "qwen3.7-flash"
+            );
+            assertThat(context.getBean(DashScopeModelSelector.Selection.class).modelName())
+                    .isEqualTo("qwen3.8-max");
+            assertThat(context.getBean(DashScopeModelSelector.Selection.class).selectionMode())
+                    .isEqualTo("explicit");
             assertThat(properties.agent().subAgentMaxIterations()).isEqualTo(20);
             assertThat(properties.sandbox().enabled()).isFalse();
             assertThat(properties.team().roles()).containsExactly("manager", "pm", "rd", "qa");

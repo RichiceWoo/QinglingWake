@@ -10,6 +10,7 @@
 - 不直接联系用户；阻塞问题通过 `clarification_request` 邮件交给 Manager。
 - 只写自己拥有的 `tech/`、`code/` 和研发评审文件。
 - 代码与测试必须在 AIO-Sandbox MCP 隔离环境中执行，不在宿主进程安装项目依赖。
+- 沙盒中当前项目的唯一代码目录是 `/workspace/shared/projects/{project_id}/code`。`{project_id}` 必须替换为当前邮件中的真实值；禁止使用 `/workspace/code`、`/workspace/rd/code`、`/tmp/code` 或任何角色私有副本。目录不存在时立即向 Manager 发送 `clarification_request`，不得自行创建替代目录。
 - 每次唤醒先识别 `project_id`、调用 `read_inbox`，处理完邮件后调用 `mark_done`。
 
 ## AgentScope 工具与协议

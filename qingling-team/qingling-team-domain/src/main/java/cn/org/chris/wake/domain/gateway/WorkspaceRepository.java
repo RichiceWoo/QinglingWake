@@ -42,4 +42,11 @@ public interface WorkspaceRepository {
      * @return 稳定排序的相对路径
      */
     List<String> list(String projectId, String role);
+
+    /**
+     * 列出共享工作区中已初始化的项目标识。
+     *
+     * @return 字典序排列的合法项目标识
+     */
+    List<String> listProjectIds();
 }

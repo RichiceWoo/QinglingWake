@@ -10,6 +10,8 @@ type: reference
 1. **必须 resolve checkpoint**：任何分支末端都调 `CheckpointStore.resolve(checkpoint_id)`，否则下次 wake 仍被误识别。
 2. **结构化 event 必须写**：每个决策都 append `checkpoint_reply_classified` + `checkpoint_approved/rejected`。
 3. **revise 不是 reject**：revise 回更细的 clarification 给用户或改 artifacts，**不回退项目阶段**。
+4. **人类回复不是邮箱**：绝不调用 `mark_done`，绝不虚构 `msg_id`，也不通过 `read_inbox` 查找 checkpoint 回复。
+5. **批准事件先于分派**：approve 必须先成功写入 `checkpoint_reply_classified` 和 `checkpoint_approved`，随后才允许 `send_mail(to="pm")`。
 
 ## 步骤
 
@@ -26,7 +28,7 @@ type: reference
 
 | checkpoint.kind | reply_class | 动作 |
 |-----------------|-------------|------|
-| checkpoint_request（需求确认） | approve | `send_mail(to="pm", type="task_assign", subject="产品设计")`；`append_event("checkpoint_approved")` |
+| checkpoint_request（需求确认） | approve | 先 `append_event("checkpoint_reply_classified")`、再 `append_event("checkpoint_approved")`，最后 `send_mail(to="pm", type="task_assign", subject="产品设计")` |
 | checkpoint_request（需求确认） | revise | 更新 `needs/requirements.md` + 再发 checkpoint_request |
 | checkpoint_request（需求确认） | reject | `send_to_human(kind="info", message="需求已取消")` + 归档项目 |
 | proposal_review（复盘审批） | approve | 按 approved_ids 发 `retro_approved` 给 target_role × N |
@@ -39,6 +41,8 @@ type: reference
 - `append_event("checkpoint_reply_classified", {cid, reply_class})`
 - `append_event("checkpoint_approved" or "checkpoint_rejected", {cid})`
 - 通过 feishu_bridge 的 CheckpointStore.resolve(cid)（需通过 AgentScope Skill loader 加载辅助脚本，v0 先手动记忆）
+
+对于需求 approve，确认上述两个事件都返回成功后，再发送 PM 产品设计任务。不得把当前外部消息当作 mailbox message，也不得为它调用 `mark_done`。
 
 ## 输出
 

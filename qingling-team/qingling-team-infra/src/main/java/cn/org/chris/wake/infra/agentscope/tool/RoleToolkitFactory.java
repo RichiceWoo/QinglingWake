@@ -22,9 +22,9 @@ public final class RoleToolkitFactory {
             "send_mail", "read_inbox", "mark_done", "read_shared", "write_shared"
     );
 
-    /** Manager 独占的三个团队工具名。 */
+    /** Manager 独占的四个团队工具名。 */
     public static final Set<String> MANAGER_TEAM_TOOL_NAMES = Set.of(
-            "create_project", "append_event", "send_to_human"
+            "create_project", "append_event", "send_to_human", "check_review_criteria"
     );
 
     /** 总是提供给角色的中间产物工具名。 */

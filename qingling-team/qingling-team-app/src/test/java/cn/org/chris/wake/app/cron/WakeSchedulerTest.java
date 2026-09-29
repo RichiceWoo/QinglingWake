@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -88,6 +89,22 @@ class WakeSchedulerTest {
         public synchronized void replaceAll(List<CronJob> replacement) {
             jobs = new ArrayList<>(replacement);
             version++;
+        }
+
+        /**
+         * 当前测试不模拟调度期间并发新增，直接替换并报告未发生合并。
+         *
+         * @param replacement 新列表
+         * @param originalJobIds 本轮开始时的任务标识
+         * @return 固定为 false
+         */
+        @Override
+        public synchronized boolean replaceAllPreservingNewJobs(
+                List<CronJob> replacement,
+                Set<String> originalJobIds
+        ) {
+            replaceAll(replacement);
+            return false;
         }
 
         /**

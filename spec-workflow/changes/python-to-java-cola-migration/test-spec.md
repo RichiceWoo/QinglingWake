@@ -2,7 +2,7 @@
 
 > status: apply  
 > created: 2026-09-13  
-> updated: 2026-09-25  
+> updated: 2026-09-30
 > selected-strategy: 5A（单元 + 契约 + 集成 + 4 条真实 E2E）
 
 ## 0. 测试原则
@@ -172,6 +172,17 @@ Spring Boot `no-feishu` 模式启动；TestAPI 通过 CaptureSender 完成一轮
 - MCP/AIO-Sandbox 实际被调用，工具名不存在旧 CrewAI 残留。
 - 最终对人回复成功，敏感配置未出现在日志或产物。
 
+### 当前执行状态（2026-09-30）
+
+| 场景 | 状态 | 已验证 | 未完成/阻断 |
+|---|---|---|---|
+| `happy-path` | 本轮已终止，尚未通过 | `qwen3.7-plus` 真实推进到 RD/QA；`qwen-coder-plus` 模板加固后的最新运行创建项目并生成完整五节需求，显式模型和免费选择关闭配置正确 | `qwen-coder-plus` 最新运行先发 checkpoint、后记录 `requirements_drafted`，并重复发送 `requirements_review` checkpoint，未进入 PM；无最终 QA、交付、Failsafe 成功和 `summary.json`。进程、Docker 沙盒和活动目录已清理，待选择新模型后从干净目录重跑 |
+| `checkpoint-revise` | 未运行 | 驱动与断言已实现 | 等待 happy-path 通过 |
+| `qa-defect-rd-fix` | 未运行 | 驱动与断言已实现 | 等待 happy-path 通过 |
+| `code-fail-recovery` | 未运行 | 驱动与断言已实现 | 等待 happy-path 通过 |
+
+不得把以下运行作为通过证据：模型额度/账户状态失败、网络重试耗尽、阶段超时、人工终止，或仅生成部分产物但没有 Failsafe 成功与场景 `summary.json`。
+
 ## 8. 明确不在默认单元测试中验证
 
 | 项目 | 验证位置 |
@@ -186,10 +197,10 @@ Spring Boot `no-feishu` 模式启动；TestAPI 通过 CaptureSender 完成一轮
 - [x] 固化 Python golden fixtures。
 - [x] 实现 P0 单元与架构测试。
 - [x] 实现契约测试和 IT-01～IT-06。
-- [ ] 运行默认 `mvn verify`。
+- [x] 运行默认 `mvn verify`（2026-09-29，155 tests）。
 - [ ] 运行可选 pgvector profile。
 - [ ] 运行四条真实 E2E 并保存证据。
-- [ ] 把未覆盖风险和失败证据同步到 `spec.md`/`log.md`。
+- [x] 把当前未覆盖风险和失败证据同步到 `spec.md`/`log.md`（2026-09-29；四场景完成后仍需最终更新）。
 
 ```bash
 cd /Users/qingling/workspace/IdeaProjects/QinglingWake/qingling-team
@@ -215,3 +226,13 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 | 2026-09-25 | `mvn test` | 通过（全 6 模块，57 tests） | Task 1～6 全量回归；Reactor Summary 全部 SUCCESS |
 | 2026-09-26 | `mvn -pl qingling-team-starter -am test` | 通过（全 6 模块，140 tests） | Task 16 无飞书启动、缺失模型密钥脱敏 fail-fast、配置映射、四角色 heartbeat/Cron、Runner 排空与运行时关闭；Reactor Summary 全部 SUCCESS，未调用真实模型 |
 | 2026-09-26 | `mvn -Pcontract-it verify` | 通过（140 unit + 10 contract/IT） | Python fixture 含 11 个源文件 SHA-256；路由、Session、邮箱、事件、tasks、checkpoint、self_score、TestAPI、workspace 权限、自动唤醒、四角色 Skill 发现及 IT-01～IT-06 全部通过；无真实 LLM、飞书或网络调用 |
+| 2026-09-26 | `mvn -pl qingling-team-starter -am test` | 通过（全 6 模块，141 tests） | Task 18 增加 AgentScope 工具调用 Hook，只采集工具名；E2E 将断言 `sandbox_execute_bash` 真实被调用，参数和结果不进入证据 |
+| 2026-09-26 | `mvn -Pe2e -De2e.scenario=happy-path verify` | 前置配置阻塞（141 unit 通过，真实 E2E 1 failure、0 skip） | E2E Harness 已编译执行并明确报告缺少 `DASHSCOPE_API_KEY`；Docker daemon 29.3.1 可用，GHCR 已下载多数层但 blob 下载因 EOF 中断；未伪造或跳过真实场景结果 |
+| 2026-09-26 | `docker compose -f sandbox-docker-compose.yaml config` | 通过 | GHCR 多次 blob EOF 后切换 AIO-Sandbox 官方中国大陆镜像 `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0`；固定版本并启用官方要求的容器安全与 shared memory 参数 |
+| 2026-09-26 | `mvn -Pe2e -De2e.scenario=happy-path verify` | 环境装配失败（141 unit 通过，E2E 1 error、0 skip） | Key 和沙盒健康检查已通过；真实 E2E 在清理 `/workspace/.cron` 嵌套挂载点时触发 `AccessDeniedException`，未调用模型；已移除冲突挂载并准备重跑 |
+| 2026-09-28 | `mvn verify` | 通过（154 tests） | Cron 并发 wake、routing key、任务分派幂等、模型选择、确定性评审、SOP 阶段顺序、Workspace 模板契约及完整默认回归通过；未运行真实 E2E profile |
+| 2026-09-28 | `mvn -Pe2e -De2e.scenario=happy-path verify` | 失败，不能计为通过 | 真实流程推进至技术方案两轮评审、RD 代码实现；百炼连接反复 EOF/SSL 握手失败导致 `file:code/main.py` 等待 30 分钟超时；RD 后续还以字符串传入 sandbox timeout，被 MCP schema 拒绝。未生成成功 `summary.json` |
+| 2026-09-28 | `WorkspaceTemplateContractTest` + `mvn verify` | 通过（10/10；完整 154 tests） | RD/QA 模板明确 `sandbox_execute_bash` 的 timeout 必须省略或传 JSON 整数，禁止字符串；`git diff --check` 通过 |
+| 2026-09-29 | 第二次干净 `happy-path` | 进行中，尚未通过 | 约 6 分钟内完成 checkpoint、PM、RD 技术设计并生成 `code/main.py`；RD 代码任务唯一，QA 测试设计完成；随后百炼返回 `Arrearage`，当前只有 `model-selection.json`，无成功 `summary.json` |
+| 2026-09-29 | `qwen3.7-plus` 干净 `happy-path` | 用户主动暂停，不能计为通过 | `model-selection.json` 显示显式 `qwen3.7-plus`、免费选择关闭、无动态探测；完成 checkpoint、PM、RD 技术方案、PM/QA 评审、RD 修订，并真实验证修订后分派“代码实现 (第 1 轮)”而非跳到 QA；同义任务主题仅保留一条开放任务；已生成 `code/app.py`。暂停时终止 screen 及残留 Maven/Java 子进程，无成功 `summary.json`，下次须清理场景目录后重跑 |
+| 2026-09-30 | `qwen-coder-plus` 多次干净 `happy-path` | 用户终止本轮测试，不能计为通过 | 首轮未创建项目/需求即发 checkpoint；加固 Manager 需求与批准回复模板后，定向 Workspace 模板契约 13/13 通过。后续运行曾把人工批准误当邮箱消息；最新运行已创建项目和完整五节需求，但先发 checkpoint、后记录 `requirements_drafted`，并再次发送同一 `requirements_review` checkpoint，未进入 PM且无 `summary.json`。三轮诊断分别保存在 `target/e2e-diagnostics/happy-path-qwen-coder-plus-*`；E2E 进程、Docker 沙盒和活动目录已清理，待选择新模型后重跑 |

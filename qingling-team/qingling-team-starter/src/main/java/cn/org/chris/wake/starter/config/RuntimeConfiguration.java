@@ -47,6 +47,7 @@ import cn.org.chris.wake.starter.runtime.RoutingSenderGateway;
 import cn.org.chris.wake.starter.runtime.RuntimeLifecycle;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lark.oapi.Client;
+import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
 import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -84,11 +85,17 @@ public class RuntimeConfiguration {
     public RuntimeSettings runtimeSettings(QinglingTeamProperties properties) {
         requireText(properties.agent().apiKey(), "DASHSCOPE_API_KEY 或 QWEN_API_KEY 未配置");
         requireText(properties.agent().model(), "qingling.agent.model 未配置");
+        requirePositive(properties.agent().modelProbeTimeout(), "qingling.agent.model-probe-timeout");
+        if (properties.agent().freeModelSelectionEnabled()
+                && (properties.agent().modelCandidates() == null || properties.agent().modelCandidates().isEmpty())) {
+            throw new IllegalStateException("qingling.agent.model-candidates 至少需要一个模型");
+        }
         if (!REQUIRED_ROLES.equals(properties.team().roles())) {
             throw new IllegalStateException("qingling.team.roles 必须依次为 manager、pm、rd、qa");
         }
         requirePositive(properties.agent().maxIterations(), "qingling.agent.max-iterations");
         requirePositive(properties.agent().maxInputTokens(), "qingling.agent.max-input-tokens");
+        requirePositive(properties.agent().maxOutputTokens(), "qingling.agent.max-output-tokens");
         requirePositive(properties.agent().subAgentMaxIterations(), "qingling.agent.sub-agent-max-iterations");
         requirePositive(properties.agent().timeout(), "qingling.agent.timeout");
         requirePositive(properties.debug().replyTimeout(), "qingling.debug.reply-timeout");
@@ -273,14 +280,35 @@ public class RuntimeConfiguration {
         );
     }
 
-    /** 创建显式传入 API Key 的 DashScope 主模型。 */
+    /** 创建仅在显式开关开启时执行启动探测的免费模型选择器。 */
     @Bean
-    public Model agentModel(RuntimeSettings settings, CleanupService preparedRuntime) {
+    public DashScopeModelSelector dashScopeModelSelector(ObjectMapper objectMapper) {
+        return new DashScopeModelSelector(HttpClient.newHttpClient(), objectMapper);
+    }
+
+    /** 按免费选择开关决定直接使用显式模型或按候选优先级探测。 */
+    @Bean
+    public DashScopeModelSelector.Selection agentModelSelection(
+            RuntimeSettings settings,
+            CleanupService preparedRuntime,
+            DashScopeModelSelector selector
+    ) {
+        return selector.select(settings.properties().agent());
+    }
+
+    /** 创建显式传入 API Key 和最终选择结果的 DashScope 主模型。 */
+    @Bean
+    public Model agentModel(
+            RuntimeSettings settings,
+            DashScopeModelSelector.Selection modelSelection
+    ) {
         QinglingTeamProperties.Agent agent = settings.properties().agent();
         return DashScopeChatModel.builder()
                 .apiKey(agent.apiKey())
-                .modelName(agent.model())
+                .modelName(modelSelection.modelName())
                 .stream(true)
+                .enableThinking(false)
+                .defaultOptions(GenerateOptions.builder().maxTokens(agent.maxOutputTokens()).build())
                 .contextWindowSize(agent.maxInputTokens())
                 .build();
     }
@@ -300,11 +328,17 @@ public class RuntimeConfiguration {
 
     /** 创建可选 pgvector 记忆索引器，空 DSN 时自动跳过。 */
     @Bean
-    public PgVectorMemoryIndexer memoryIndexer(RuntimeSettings settings, ObjectMapper objectMapper) {
+    public PgVectorMemoryIndexer memoryIndexer(
+            RuntimeSettings settings,
+            ObjectMapper objectMapper,
+            DashScopeModelSelector.Selection modelSelection
+    ) {
         String apiKey = settings.properties().agent().apiKey();
         return new PgVectorMemoryIndexer(
                 settings.properties().memory().dbDsn(),
-                new MemoryExtractionClient(HttpClient.newHttpClient(), objectMapper, apiKey)
+                new MemoryExtractionClient(
+                        HttpClient.newHttpClient(), objectMapper, apiKey, modelSelection.modelName()
+                )
         );
     }
 

@@ -5,6 +5,7 @@ import io.agentscope.core.model.Model;
 import io.agentscope.core.permission.PermissionContextState;
 import io.agentscope.core.permission.PermissionMode;
 import io.agentscope.core.state.JsonFileAgentStateStore;
+import io.agentscope.core.tool.Toolkit;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
 
@@ -123,12 +124,13 @@ public final class TeamAgentFactory {
     public HarnessAgent create(String role) {
         Path roleWorkspace = subagentFactory.roleWorkspace(role);
         List<SubagentDeclaration> subagents = subagentFactory.create(role);
+        Toolkit toolkit = toolkitFactory.create(role, activeSkillsByRole.getOrDefault(role, Set.of()));
         HarnessAgent.Builder builder = HarnessAgent.builder()
                 .name(role)
                 .description(roleDescription(role))
                 .sysPrompt("遵循当前角色 workspace 中的 AGENTS.md、Skill 与团队协作约束完成任务。")
                 .model(model)
-                .toolkit(toolkitFactory.create(role, activeSkillsByRole.getOrDefault(role, Set.of())))
+                .toolkit(toolkit)
                 .workspace(roleWorkspace)
                 .stateStore(new JsonFileAgentStateStore(roleWorkspace.resolve(".agentscope/state")))
                 .subagents(subagents)
@@ -140,8 +142,14 @@ public final class TeamAgentFactory {
                 // 团队运行时无人值守；沙盒命令在隔离容器执行，宿主工具仍受各自边界校验保护。
                 .permissionContext(PermissionContextState.builder().mode(PermissionMode.BYPASS).build())
                 .disableDynamicSubagents()
+                // 正式产物只能经团队共享工具读写，避免 Harness 相对路径文件工具写入错误目录或长时间阻塞。
+                .disableFilesystemTools()
                 .disableShellTool();
-        return sandboxConfiguration.applyTo(builder).build();
+        HarnessAgent.Builder configuredBuilder = sandboxConfiguration.applyTo(builder, toolkit);
+        if (sandboxConfiguration.enabled() && Set.of("rd", "qa").contains(role)) {
+            toolkit.registerAgentTool(new ProjectTestAgentTool(toolkit, new com.fasterxml.jackson.databind.ObjectMapper()));
+        }
+        return configuredBuilder.build();
     }
 
     /**

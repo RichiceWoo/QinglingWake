@@ -13,6 +13,9 @@ import java.util.Set;
  */
 public final class EventService {
 
+    /** 只能由 Java 专用方法写入、禁止通用模型工具伪造的内部动作。 */
+    private static final Set<String> RESERVED_ACTIONS = Set.of("workflow_transitioned");
+
     /** 与 Python 附录 A.3 一致的固定事件动作。 */
     public static final Set<String> VALID_ACTIONS = Set.of(
             "project_created", "archived",
@@ -21,6 +24,7 @@ public final class EventService {
             "assigned", "task_done_received", "revision_requested", "rd_delivered",
             "review_criteria_checked", "decided_insert_review", "review_requested", "review_received",
             "delivery_requested", "delivered",
+            "workflow_transitioned", "completion_rejected",
             "retro_triggered", "retro_report_received", "retro_proposal_invalid",
             "retro_approved_by_manager", "retro_approved_by_human", "retro_rejected_by_human",
             "retro_apply_failed", "task_quality_adjusted", "evolved",
@@ -58,8 +62,24 @@ public final class EventService {
         if (!isValidAction(action)) {
             throw new IllegalArgumentException("unknown action: " + action);
         }
+        if (RESERVED_ACTIONS.contains(action)) {
+            throw new IllegalArgumentException("reserved action 只能由 Java 状态机写入: " + action);
+        }
         Map<String, Object> safePayload = payload == null ? Map.of() : Map.copyOf(payload);
         return repository.append(projectId, actor, action, safePayload);
+    }
+
+    /**
+     * 由 Java 状态机专用入口追加阶段迁移，通用 append_event 工具无法调用该语义。
+     *
+     * @param projectId 所属项目
+     * @param payload 状态机生成的不可变迁移详情
+     * @return 从 1 开始的项目内 seq
+     */
+    public long appendWorkflowTransition(String projectId, Map<String, Object> payload) {
+        WorkspacePolicy.validateProjectId(projectId);
+        Map<String, Object> safePayload = payload == null ? Map.of() : Map.copyOf(payload);
+        return repository.append(projectId, "manager", "workflow_transitioned", safePayload);
     }
 
     /**

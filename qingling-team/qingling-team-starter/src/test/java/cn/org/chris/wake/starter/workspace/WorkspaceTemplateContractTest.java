@@ -138,7 +138,7 @@ class WorkspaceTemplateContractTest {
         String codeImplSkill = Files.readString(templateRoot.resolve("rd/skills/code_impl/SKILL.md"));
         String testRun = Files.readString(templateRoot.resolve("qa/subagents/test_run.md"));
 
-        assertThat(codeImpl).contains("Python", "pip", "pytest", "sandbox_execute_bash");
+        assertThat(codeImpl).contains("Python", "pip", "pytest", "sandbox_execute_bash", "run_project_tests");
         assertThat(codeImpl)
                 .contains("源码必须用 `write_shared` 逐文件写入")
                 .contains("禁止 heredoc、`cat >`、`tee` 或 shell 重定向写文件");
@@ -149,7 +149,7 @@ class WorkspaceTemplateContractTest {
                 .contains("SQLAlchemy `StaticPool`")
                 .contains("TODO_DB_PATH")
                 .doesNotContain("<<'EOF'");
-        assertThat(testRun).contains("Python", "pip", "pytest", "sandbox_execute_bash");
+        assertThat(testRun).contains("Python", "pip", "pytest", "sandbox_execute_bash", "run_project_tests");
         try (Stream<Path> files = Files.walk(templateRoot)) {
             for (Path file : files.filter(Files::isRegularFile).toList()) {
                 if (file.getFileName().toString().equals("migration-manifest.json")
@@ -169,12 +169,12 @@ class WorkspaceTemplateContractTest {
     }
 
     /**
-     * 沙盒执行模板必须明确 timeout 的整数类型，避免模型用字符串触发 MCP 参数校验失败。
+     * 正式测试必须使用只接收 project_id 的结构化工具，原始 Shell 只保留无副作用探测用途。
      *
      * @throws Exception 模板资源读取失败
      */
     @Test
-    void shouldRequireIntegerSandboxTimeoutArguments() throws Exception {
+    void shouldRequireStructuredProjectTestTool() throws Exception {
         Path templateRoot = templateRoot();
         String rdSkill = Files.readString(templateRoot.resolve("rd/skills/code_impl/SKILL.md"));
         String rdSubagent = Files.readString(templateRoot.resolve("rd/subagents/code_impl.md"));
@@ -182,9 +182,13 @@ class WorkspaceTemplateContractTest {
         String qaSubagent = Files.readString(templateRoot.resolve("qa/subagents/test_run.md"));
 
         assertThat(rdSkill).contains("timeout=300", "禁止传字符串");
-        assertThat(rdSubagent).contains("JSON 整数秒", "禁止传字符串");
+        assertThat(rdSubagent)
+                .contains("run_project_tests(project_id)")
+                .contains("原始 `sandbox_execute_bash` 只可用于首次无副作用");
         assertThat(qaSkill).contains("timeout=300", "禁止传字符串");
-        assertThat(qaSubagent).contains("JSON 整数秒", "禁止传字符串");
+        assertThat(qaSubagent)
+                .contains("run_project_tests(project_id)")
+                .contains("原始 `sandbox_execute_bash` 只可用于首次无副作用");
     }
 
     /**
@@ -216,7 +220,8 @@ class WorkspaceTemplateContractTest {
                 .contains("禁止发送需求 checkpoint")
                 .contains("也不是批准")
                 .contains("禁止调用 `mark_done`")
-                .contains("checkpoint_approved` 成功落入事件流后")
+                .contains("随后只向 `advance_workflow` 提交结论")
+                .contains("Java 决定进入 PM 产品设计或终止项目")
                 .contains("禁止把用户原句直接当成 `needs_content`");
         assertThat(requirementsGuide)
                 .contains("工具调用顺序不可交换")
@@ -231,13 +236,16 @@ class WorkspaceTemplateContractTest {
                 .contains("人类回复不是邮箱")
                 .contains("绝不调用 `mark_done`")
                 .contains("批准事件先于分派")
-                .contains("随后才允许 `send_mail(to=\"pm\")`");
+                .contains("最后 `advance_workflow(signal=\"checkpoint_approved\")`")
+                .contains("advance_workflow(signal=\"checkpoint_rejected\")")
+                .contains("advance_workflow(signal=\"delivery_approved\")")
+                .contains("advance_workflow(signal=\"delivery_rejected\")");
         assertThat(featureSop)
                 .contains("checkpoint_id=\"requirements_review\"")
                 .contains("禁止直接复制用户原句作为需求文档")
                 .contains("外部 checkpoint 回复不是 mailbox message")
                 .contains("append_event(\"checkpoint_approved\"")
-                .contains("send_mail(to=\"pm\"");
+                .contains("advance_workflow(project_id=<pid>, signal=\"checkpoint_approved\"");
     }
 
     /**
@@ -280,11 +288,12 @@ class WorkspaceTemplateContractTest {
                 .contains("禁止 `ls /workspace` 后选择角色私有目录作为回退")
                 .contains("修复失败用例时仍只能调用 `write_shared`");
         assertThat(codeImplSubagent)
-                .contains("第一次沙盒调用先用 `test -d` 验证该精确目录")
+                .contains("首次无副作用的 `pwd`/`test -d` 工具契约探测")
+                .contains("正式测试必须调用 `run_project_tests(project_id)`")
                 .contains("禁止使用或创建 `/workspace/code`、`/workspace/rd/code`、`/tmp/code`")
                 .contains("精确目录不存在时向 Manager 发送 `clarification_request`");
         assertThat(featureSop)
-                .contains("沙盒唯一目录 `/workspace/shared/projects/<真实 project_id>/code`");
+                .contains("`run_project_tests(project_id)` 固定");
     }
 
     /**
@@ -330,11 +339,11 @@ class WorkspaceTemplateContractTest {
                 .contains("test -s requirements.txt");
         assertThat(testRunSubagent)
                 .contains("只补充需求文档明确支持的用例")
-                .contains("直接在其 `code/` 目录安装依赖并运行 RD pytest")
+                .contains("固定目录用 pip 安装 `requirements.txt`")
+                .contains("正式测试必须调用 `run_project_tests(project_id)`")
                 .contains("禁止逐文件 `read_shared` 后复制到 `/tmp`")
                 .contains("禁止直接向 RD 发送 `task_assign`")
-                .contains("禁止用 `write_file`")
-                .contains("用 `read_shared` 回读确认");
+                .contains("并回读确认");
     }
 
     /**
@@ -388,7 +397,8 @@ class WorkspaceTemplateContractTest {
         );
 
         assertThat(featureSop)
-                .contains("由 Manager 且只由 Manager 向 RD 发送一条 `task_assign`")
+                .contains("Manager 提交 `advance_workflow(signal=\"qa_defect_found\")`")
+                .contains("Java 只向 RD 发送一条固定缺陷修复任务")
                 .contains("QA 不得直接给 RD 分派任务")
                 .contains("已存在相同轮次的开放修复任务，不得重复发送")
                 .contains("最新报告明确全通过且无开放 defect 才能进入交付");

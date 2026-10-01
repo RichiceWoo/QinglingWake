@@ -12,8 +12,8 @@ qingling:
 
   agent:
     # 当前使用节省计划中的显式模型；只有显式开启后才探测免费候选。
-    model: qwen3.8-max
-    sub-agent-model: qwen3.8-max
+    model: qwen3-max
+    sub-agent-model: qwen3-max
     free-model-selection-enabled: false
     model-candidates:
       - qwen3.8-27b
@@ -39,7 +39,7 @@ qingling:
     timeout: 120s
     initialization-timeout: 30s
     max-retries: 2
-    enabled-tools: []
+    enabled-tools: [sandbox_execute_bash]
     headers: {}
 
   memory:
@@ -75,7 +75,7 @@ qingling:
     baidu-api-key: ""
 
 # 必填模型密钥：export DASHSCOPE_API_KEY=sk-xxx
-# 节省计划模式：export QINGLING_FREE_MODEL_SELECTION_ENABLED=false QINGLING_AGENT_MODEL=qwen3.8-max
+# 工具链稳定期：export QINGLING_FREE_MODEL_SELECTION_ENABLED=false QINGLING_AGENT_MODEL=qwen3-max QINGLING_SUB_AGENT_MODEL=qwen3-max
 # 免费候选模式：export QINGLING_FREE_MODEL_SELECTION_ENABLED=true
 # 旧 QINGLING_DYNAMIC_MODEL_SELECTION_ENABLED 仅在新开关未设置时作为兼容回退。
 # 兼容旧变量：export QWEN_API_KEY=sk-xxx

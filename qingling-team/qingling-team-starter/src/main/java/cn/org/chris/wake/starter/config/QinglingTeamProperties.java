@@ -45,8 +45,8 @@ public record QinglingTeamProperties(
 
     /** DashScope 主模型和 Agent 执行边界。 */
     public record Agent(
-            /** 关闭免费模型选择时主 Agent 使用的显式模型名称。 */ @DefaultValue("qwen3.8-max") String model,
-            /** 声明式 Sub-Agent 使用的模型名称。 */ @DefaultValue("qwen3.8-max") String subAgentModel,
+            /** 关闭免费模型选择时主 Agent 使用的显式模型名称。 */ @DefaultValue("qwen3-max") String model,
+            /** 声明式 Sub-Agent 使用的模型名称。 */ @DefaultValue("qwen3-max") String subAgentModel,
             /** 是否在启动时按优先级探测免费模型。 */ @DefaultValue("false") boolean freeModelSelectionEnabled,
             /** 免费模型候选列表，按智能体适配度从高到低排列。 */
             @DefaultValue({

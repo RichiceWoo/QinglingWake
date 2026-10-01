@@ -360,7 +360,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
         applicationContext.close();
     }
 
-    /** 验证 QA 确实生成缺陷，并存在 QA→RD 修复分派及 RD 后续完成邮件。 */
+    /** 验证 QA 确实生成缺陷，并由 Java 状态机通过 Manager 分派 RD 修复及接收后续完成邮件。 */
     private void assertQaDefectFixLoop() throws Exception {
         Path defects = requireProjectDirectory().resolve("qa/defects");
         try (Stream<Path> files = Files.exists(defects) ? Files.list(defects) : Stream.empty()) {
@@ -369,9 +369,11 @@ final class RealTeamE2EDriver implements AutoCloseable {
         }
         List<JsonNode> mail = allMail();
         assertThat(mail).anySatisfy(message -> {
-            assertThat(message.path("from").asText()).isEqualTo("qa");
+            assertThat(message.path("from").asText()).isEqualTo("manager");
             assertThat(message.path("to").asText()).isEqualTo("rd");
             assertThat(message.path("type").asText()).isEqualTo("task_assign");
+            assertThat(message.path("subject").asText()).contains("缺陷修复");
+            assertThat(message.path("content").path("workflow_stage").asText()).isEqualTo("DEFECT_FIX");
         });
         assertThat(mail).anySatisfy(message -> {
             assertThat(message.path("from").asText()).isEqualTo("rd");

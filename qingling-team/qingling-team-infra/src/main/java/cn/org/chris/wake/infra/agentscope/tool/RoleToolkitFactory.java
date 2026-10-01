@@ -24,7 +24,7 @@ public final class RoleToolkitFactory {
 
     /** Manager 独占的四个团队工具名。 */
     public static final Set<String> MANAGER_TEAM_TOOL_NAMES = Set.of(
-            "create_project", "append_event", "send_to_human", "check_review_criteria"
+            "create_project", "append_event", "send_to_human", "check_review_criteria", "advance_workflow"
     );
 
     /** 总是提供给角色的中间产物工具名。 */
@@ -63,6 +63,9 @@ public final class RoleToolkitFactory {
     /** 创建角色绑定工具及中间产物工具使用的 JSON 编解码器。 */
     private final ObjectMapper objectMapper;
 
+    /** 四角色共享的 Java 确定性流程控制器。 */
+    private final DeterministicWorkflowTools workflowTools;
+
     /**
      * 创建角色 Toolkit 工厂。
      *
@@ -90,6 +93,13 @@ public final class RoleToolkitFactory {
         this.senderGateway = senderGateway;
         this.imageAndSearchTools = Objects.requireNonNull(imageAndSearchTools, "imageAndSearchTools 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
+        this.workflowTools = new DeterministicWorkflowTools(
+                eventService,
+                mailboxService,
+                wakeScheduler,
+                new TaskCompletionEvidenceGate(workspaceRepository),
+                objectMapper
+        );
     }
 
     /**
@@ -116,12 +126,13 @@ public final class RoleToolkitFactory {
         Set<String> skills = activeSkills == null ? Set.of() : Set.copyOf(activeSkills);
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(new CommonTeamTools(
-                role, mailboxService, workspaceRepository, wakeScheduler, objectMapper
+                role, mailboxService, workspaceRepository, wakeScheduler, objectMapper, workflowTools
         ));
         if ("manager".equals(role)) {
             toolkit.registerTool(new ManagerTeamTools(
                     workspaceRepository, eventService, senderGateway, objectMapper
             ));
+            toolkit.registerTool(workflowTools);
         }
         toolkit.registerTool(new IntermediateArtifactTools(objectMapper));
         registerSkillTools(toolkit, skills);

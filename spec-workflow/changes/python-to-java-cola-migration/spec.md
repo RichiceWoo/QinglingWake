@@ -235,7 +235,7 @@
 | Task 15 日志查询、Metrics 与结构化日志 | 已完成 | app LogQueryService、infra JSONL/Metrics、starter CLI/metrics/logback | stats/tasks/steps/l1/all-agents Python 契约、7 类 Prometheus 指标、50MB×5 滚动 JSONL 与凭据掩码通过；对应命令共 137 项测试 |
 | Task 16 Starter、配置与生命周期装配 | 已完成 | starter Application/Properties/RuntimeConfiguration、YAML 模板、生命周期与路由 Sender | 无飞书 Spring 容器启动、配置 fail-fast、四角色 heartbeat/Cron、Runner 排空与反向关闭通过；对应命令共 140 项测试，未调用真实模型 |
 | Task 17 跨语言契约与无 LLM 集成测试 | 已完成 | `contract-fixtures/generate_contract_fixture.py`、starter contract fixtures/IT、Maven `contract-it` profile | Python 源快照无 `.git`，以目录及 11 个源文件 SHA-256 追溯；140 项单测与 10 项契约/集成测试通过，未调用真实 LLM、飞书或网络 |
-| Task 18 四条真实 E2E | 已终止本轮测试，未完成 | `sandbox-docker-compose.yaml`、`E2E.md`、starter `RealTeamE2E`/Driver、模型选择器、Cron/routing/mailbox 修复、Workspace/SOP 模板与回归测试 | `qwen3.7-plus` 可推进到 RD/QA，但未完成 QA；`qwen-coder-plus` 经模板加固后可创建项目和完整五节需求，仍出现 checkpoint 顺序错误及重复 checkpoint，未进入 PM。相关诊断证据已保存；所有运行均无 Failsafe 成功或 `summary.json`。E2E 进程、Docker 沙盒和活动场景目录已清理，待选择新模型后从干净目录重跑；四条 E2E 均尚无完整成功证据，Task 18 保持未完成 |
+| Task 18 四条真实 E2E | P0 工具链根因及流程防绕过门禁已修复，真实模型场景仍未完成 | `sandbox-docker-compose.yaml`、`E2E.md`、starter `RealTeamE2E`/Driver、模型选择器、Cron/routing/mailbox 修复、Java 工作流状态机、完成证据门禁、`run_project_tests`、MCP 完成态归一化、零模型真实工具契约、Workspace/SOP 模板 | 父/子 Harness 内置文件工具已禁用；声明式 RD/QA Sub-Agent 可继承真实 `sandbox_execute_bash` 与结构化测试包装器。Java 独占阶段迁移并拒绝无测试证据的成功回报；通用事件工具不能伪造迁移；`new_mail` wake 显式携带真实 project_id。默认回归现为 177 项，重启沙盒后的真实 Docker 零模型工具契约 1 项严格返回 `SUCCESS`。本轮两次显式 `qwen3-max` 验证分别暴露 wake 项目标识误判、pytest 收集失败后 MCP pending；均没有成功 `summary.json`。四条真实 E2E 尚未通过，Task 18 保持未完成 |
 
 ## 12. 审查结论
 

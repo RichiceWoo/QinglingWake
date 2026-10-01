@@ -29,6 +29,9 @@ public final class CommonTeamTools {
     /** 发送邮件后注册一秒唤醒的调度器。 */
     private final MailWakeScheduler wakeScheduler;
 
+    /** 可为空的 Java 确定性状态机；为空仅用于独立领域工具测试。 */
+    private final DeterministicWorkflowTools workflowTools;
+
     /** 工具 JSON 响应编解码器。 */
     private final ObjectMapper objectMapper;
 
@@ -48,6 +51,27 @@ public final class CommonTeamTools {
             MailWakeScheduler wakeScheduler,
             ObjectMapper objectMapper
     ) {
+        this(role, mailboxService, workspaceRepository, wakeScheduler, objectMapper, null);
+    }
+
+    /**
+     * 创建绑定 Java 工作流门禁的公共团队工具。
+     *
+     * @param role 当前角色
+     * @param mailboxService 邮箱领域服务
+     * @param workspaceRepository 共享工作区端口
+     * @param wakeScheduler 邮件唤醒调度端口
+     * @param objectMapper JSON 编解码器
+     * @param workflowTools Java 状态机与完成证据门禁
+     */
+    public CommonTeamTools(
+            String role,
+            MailboxService mailboxService,
+            WorkspaceRepository workspaceRepository,
+            MailWakeScheduler wakeScheduler,
+            ObjectMapper objectMapper,
+            DeterministicWorkflowTools workflowTools
+    ) {
         if (!MailboxService.TEAM_ROLES.contains(role)) {
             throw new IllegalArgumentException("未知团队角色: " + role);
         }
@@ -56,6 +80,7 @@ public final class CommonTeamTools {
         this.workspaceRepository = Objects.requireNonNull(workspaceRepository, "workspaceRepository 不能为空");
         this.wakeScheduler = Objects.requireNonNull(wakeScheduler, "wakeScheduler 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
+        this.workflowTools = workflowTools;
     }
 
     /**
@@ -82,6 +107,9 @@ public final class CommonTeamTools {
     ) {
         try {
             String checkedProjectId = AgentToolSupport.requireProjectId(projectId);
+            if (workflowTools != null) {
+                workflowTools.validateOutgoingMail(checkedProjectId, role, type, content);
+            }
             String messageId = mailboxService.send(
                     checkedProjectId, to, role, type, subject, content
             );

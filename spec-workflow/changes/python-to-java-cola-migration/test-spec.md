@@ -172,11 +172,19 @@ Spring Boot `no-feishu` 模式启动；TestAPI 通过 CaptureSender 完成一轮
 - MCP/AIO-Sandbox 实际被调用，工具名不存在旧 CrewAI 残留。
 - 最终对人回复成功，敏感配置未出现在日志或产物。
 
-### 当前执行状态（2026-09-30）
+### E2E 前置：零模型真实工具契约
+
+- 使用 `tool-contract` profile 创建真实 RD/QA 声明式 Sub-Agent，但注入 `NoCallModel`，禁止调用百炼。
+- 两个子代理都必须继承 `sandbox_execute_bash` 和 `run_project_tests`，且不能重新暴露 Harness 内置文件工具。
+- 两个子代理都必须通过真实 Docker MCP 执行无副作用 `pwd && test -d /workspace/shared/projects/tool-contract/code`。
+- 此契约失败时禁止进入昂贵 `e2e` profile；通过只证明工具注册、继承和目录挂载，不替代四条业务 E2E。
+- RD/QA `send_mail(task_done)` 另由 Java 集成测试验证证据硬门禁；模型不能通过通用 `append_event` 伪造 `workflow_transitioned`。
+
+### 当前执行状态（2026-10-01）
 
 | 场景 | 状态 | 已验证 | 未完成/阻断 |
 |---|---|---|---|
-| `happy-path` | 本轮已终止，尚未通过 | `qwen3.7-plus` 真实推进到 RD/QA；`qwen-coder-plus` 模板加固后的最新运行创建项目并生成完整五节需求，显式模型和免费选择关闭配置正确 | `qwen-coder-plus` 最新运行先发 checkpoint、后记录 `requirements_drafted`，并重复发送 `requirements_review` checkpoint，未进入 PM；无最终 QA、交付、Failsafe 成功和 `summary.json`。进程、Docker 沙盒和活动目录已清理，待选择新模型后从干净目录重跑 |
+| `happy-path` | 修复后两次 `qwen3-max` 干净验证仍失败，已停止 | 第 1 次完成 checkpoint 和 PM；第 2 次在确定性 `new_mail` wake 修复后完成 PM、产品评审、技术方案，并由 Java 状态机正确执行 `TECH_DESIGN → CODE_IMPLEMENTATION`；RD 生成 Python 项目并真实调用 pytest，测试失败时完成硬门禁没有接受虚假成功 | 第 1 次 RD 把 Maven 模块名误作项目标识；第 2 次 pytest 收集失败后 RD 调用链停留在 pending。随后发现 MCP 已完成结果可能错误标成 `RUNNING`，以及 Docker health/nc 正常但 MCP 不响应的假健康；状态归一化与严格工具契约已修复并通过，但按本轮两次上限不启动第 3 次。诊断在 `target/e2e-evidence/diagnostics/happy-path-20261001-2011`、`happy-path-20261001-2030`；均无最终 QA、交付、Failsafe 成功和 `summary.json` |
 | `checkpoint-revise` | 未运行 | 驱动与断言已实现 | 等待 happy-path 通过 |
 | `qa-defect-rd-fix` | 未运行 | 驱动与断言已实现 | 等待 happy-path 通过 |
 | `code-fail-recovery` | 未运行 | 驱动与断言已实现 | 等待 happy-path 通过 |
@@ -191,6 +199,7 @@ Spring Boot `no-feishu` 模式启动；TestAPI 通过 CaptureSender 完成一轮
 | Qwen 输出内容完全确定 | E2E 验证结构和业务不变量，不断言逐字文本 |
 | PostgreSQL/pgvector | `pgvector-it` profile |
 | AIO-Sandbox 真实命令执行 | `e2e` profile |
+| AIO-Sandbox 工具注册、子代理继承与固定目录探针 | `tool-contract` profile（真实 Docker、零模型） |
 
 ## 9. 执行计划与命令
 
@@ -207,6 +216,7 @@ cd /Users/qingling/workspace/IdeaProjects/QinglingWake/qingling-team
 mvn verify
 mvn -Pcontract-it verify
 mvn -Ppgvector-it verify
+mvn -Ptool-contract -Dtool.contract.workspace="$(pwd)/target/e2e-workspace" verify
 mvn -Pe2e -De2e.scenario=happy-path verify
 mvn -Pe2e -De2e.scenario=checkpoint-revise verify
 mvn -Pe2e -De2e.scenario=qa-defect-rd-fix verify
@@ -236,3 +246,16 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 | 2026-09-29 | 第二次干净 `happy-path` | 进行中，尚未通过 | 约 6 分钟内完成 checkpoint、PM、RD 技术设计并生成 `code/main.py`；RD 代码任务唯一，QA 测试设计完成；随后百炼返回 `Arrearage`，当前只有 `model-selection.json`，无成功 `summary.json` |
 | 2026-09-29 | `qwen3.7-plus` 干净 `happy-path` | 用户主动暂停，不能计为通过 | `model-selection.json` 显示显式 `qwen3.7-plus`、免费选择关闭、无动态探测；完成 checkpoint、PM、RD 技术方案、PM/QA 评审、RD 修订，并真实验证修订后分派“代码实现 (第 1 轮)”而非跳到 QA；同义任务主题仅保留一条开放任务；已生成 `code/app.py`。暂停时终止 screen 及残留 Maven/Java 子进程，无成功 `summary.json`，下次须清理场景目录后重跑 |
 | 2026-09-30 | `qwen-coder-plus` 多次干净 `happy-path` | 用户终止本轮测试，不能计为通过 | 首轮未创建项目/需求即发 checkpoint；加固 Manager 需求与批准回复模板后，定向 Workspace 模板契约 13/13 通过。后续运行曾把人工批准误当邮箱消息；最新运行已创建项目和完整五节需求，但先发 checkpoint、后记录 `requirements_drafted`，并再次发送同一 `requirements_review` checkpoint，未进入 PM且无 `summary.json`。三轮诊断分别保存在 `target/e2e-diagnostics/happy-path-qwen-coder-plus-*`；E2E 进程、Docker 沙盒和活动目录已清理，待选择新模型后重跑 |
+| 2026-09-30 | `qwen3-max` 干净 `happy-path` 第 1 次 | 失败，不能计为通过 | 显式模型和免费选择开关正确；真实流程完成单一需求 checkpoint、PM、技术方案评审/修订并正确进入 RD 代码实现。RD 修复生成测试时调用 AgentScope 内置 `write_file`，工具长时间无结果并被 pending-tool recovery 标记中断，业务流未恢复；诊断保存于 `target/e2e-diagnostics/happy-path-qwen3max-attempt1-write-file-stall-20260930`，无 `summary.json` |
+| 2026-10-01 | MCP 工具白名单定向回归 | 通过（19 tests）但方案被真实 E2E 否定 | `McpSandboxConfigurationTest` 4/4、`RuntimeBootstrapTest` 2/2、`WorkspaceTemplateContractTest` 13/13 通过；随后真实运行证明只配置 `enabled-tools: [sandbox_execute_bash]` 不能同时满足子代理 MCP 继承，也不能移除 Harness 内置文件工具，因此临时配置已撤回 |
+| 2026-10-01 | `qwen3-max` 干净 `happy-path` 第 2 次 | 失败并按两次上限终止 | 真实流程完成需求 checkpoint、PM 产品设计和 RD 技术方案，heartbeat 成功恢复 PM/RD 漏发的完成邮件；进入代码实现后 RD 子代理的 `sandbox_execute_bash` 返回 `Tool not found`，虽然生成代码文件但未运行 pytest，仍发送“测试未执行”的 `task_done`，违反共同断言。诊断保存于 `target/e2e-diagnostics/happy-path-qwen3max-attempt2-sandbox-tool-unavailable-20260930`；无 `summary.json`，未启动第 3 次，测试环境已清理 |
+| 2026-10-01 | `TeamAgentFactoryTest,McpSandboxConfigurationTest` + `mvn verify` | 通过（定向 8 tests；完整 161 tests） | 父 Agent 与声明式 RD Sub-Agent 均不暴露 Harness 文件工具；RD Sub-Agent 继承 `sandbox_execute_bash`；MCP 注册失败、白名单工具缺失均启动即脱敏失败。完整默认回归六模块全部成功，未运行真实 E2E |
+| 2026-10-01 | 工作流/门禁/包装器/模板定向回归 + `mvn verify` | 通过（完整 175 tests） | Java 状态机固定 checkpoint、PM、RD、QA、交付迁移并校验阶段 Owner；通用事件入口拒绝伪造 `workflow_transitioned`；RD/QA `send_mail(task_done)` 硬门禁、`run_project_tests` 结构化证据和 Workspace 模板契约通过。未调用真实模型 |
+| 2026-10-01 | `mvn -Ptool-contract -Dtool.contract.workspace=... verify` | 通过（175 unit + 1 real tool contract） | Docker AIO-Sandbox `1.11.0` healthy、127.0.0.1:8029 可达；真实 RD/QA 声明式子代理工具矩阵正确，并分别执行无副作用 `pwd/test -d`。使用 `NoCallModel`，未调用百炼、未消耗模型 Token |
+| 2026-10-01 | `RunnerTest` + `mvn verify` | 通过（Runner 6/6；完整 176 tests） | `new_mail` wake 在进入 Agent 前确定性注入真实 project_id、首步 `read_inbox` 和结束 `mark_done`；heartbeat 与普通消息保持原语义。未调用真实模型 |
+| 2026-10-01 | 修复后 `qwen3-max` 干净 `happy-path` 第 1 次 | 失败，不能计为通过 | checkpoint 和 PM 已完成；RD 收到不透明 wake 后把 `qingling-team-starter` 当成项目标识，没有领取 `todo-mvp` 邮件。诊断保存于 `target/e2e-evidence/diagnostics/happy-path-20261001-2011`，无成功 `summary.json` |
+| 2026-10-01 | 修复后 `qwen3-max` 干净 `happy-path` 第 2 次 | 失败并达到本轮两次上限 | 确定性 wake 生效，PM、产品评审、技术方案和 `TECH_DESIGN → CODE_IMPLEMENTATION` 均完成；RD 生成项目后真实 pytest 在收集阶段失败，硬门禁拒绝虚假完成，随后 Agent 调用链停留 pending。诊断保存于 `target/e2e-evidence/diagnostics/happy-path-20261001-2030`，无成功 `summary.json` |
+| 2026-10-01 | `McpSandboxConfigurationTest,TeamAgentFactoryTest` | 通过（9/9） | MCP Mono 已完成且有输出但标记 `RUNNING` 时归一化为 `SUCCESS`；真正空输出 pending 保持不变；工具继承、禁用 Harness 文件工具和注册失败脱敏回归通过 |
+| 2026-10-01 | 重启前零模型真实工具契约 | 失败，不能计为通过 | Docker health 与 8029 TCP 均正常，但 `sandbox_execute_bash` 60 秒内没有 MCP item/terminal 信号，证明容器健康检查不能代表 MCP 工具可用 |
+| 2026-10-01 | 重启 AIO-Sandbox 后 `mvn -Ptool-contract -Dtool.contract.workspace=... verify` | 通过（177 unit + 1 real tool contract） | RD/QA 真实 Docker MCP 无副作用目录探针严格返回 `SUCCESS`；使用 `NoCallModel`，未调用百炼。`qa-defect-rd-fix` 驱动同步断言 Java 状态机的 Manager→RD `DEFECT_FIX` 分派 |
+| 2026-10-01 | 最终默认 `mvn verify` | 通过（177 tests） | 六模块全部 SUCCESS；覆盖确定性 wake、MCP 完成态归一化、Java 工作流状态机、完成证据门禁及更新后的 `qa-defect-rd-fix` 驱动断言。默认 profile 未调用真实模型 |

@@ -38,24 +38,24 @@ kind: sop
   - 外部 checkpoint 回复不是 mailbox message：禁止调用 `mark_done`、禁止虚构 `msg_id`
   - 先 `append_event("checkpoint_reply_classified", {checkpoint_id:"requirements_review", reply_class:"approve"})`
   - 再 `append_event("checkpoint_approved", {checkpoint_id:"requirements_review"})`
-  - 调 `send_mail(to="pm", type="task_assign", subject="产品设计 (第 1 轮)", content={...}, project_id=<pid>)` → PM 自动被唤醒
+  - 调 `advance_workflow(project_id=<pid>, signal="checkpoint_approved", from_role="", task_done_content={}, feedback="")` → Java 状态机自动分派 PM
 - 含修改意见 → 更新 `needs/requirements.md`（调 `write_shared`）+ 再发 checkpoint
 
 ### 阶段 2-4：流水线推进
 
-**阶段切换硬规则（必须严格遵守，不能合并）**：
+**阶段切换硬规则（必须严格遵守，不能合并）**：模型不得直接发送下表任务，只能把评审结论提交给 `advance_workflow`，由 Java 状态机生成下一任务。
 
-| 当前 task_done 来自 | 下一 task_assign | subject | 必须独立发送 |
+| 当前 task_done 来自 | Java 状态机生成的下一任务 | subject | 阶段约束 |
 |-------------------|-----------------|---------|-----------|
 | PM（含 design/product_spec.md）| to=rd | "技术方案设计 (第 1 轮)" | ✅ 仅技术方案，不含实现 |
-| RD（含 tech/tech_design.md，包括任意轮技术方案修订）| to=rd | "代码实现 (第 1 轮)" | ✅ **单独再发一次** task_assign 让 RD 写 code/ + 单测；正文必须写明沙盒唯一目录 `/workspace/shared/projects/<真实 project_id>/code` |
+| RD（含 tech/tech_design.md，包括任意轮技术方案修订）| to=rd | "代码实现 (第 1 轮)" | ✅ Java 必须先进入代码实现，禁止模型跳到 QA；唯一目录由 `run_project_tests(project_id)` 固定 |
 | RD（含 code/main.py + code/tests/）| to=qa | "测试设计 (第 1 轮)" | ✅ 仅测试设计，不含执行 |
-| QA（含 qa/test_plan.md）| to=qa | "测试执行 (第 1 轮)" | ✅ **单独再发一次** task_assign 让 QA 跑 pytest |
+| QA（含 qa/test_plan.md）| to=qa | "测试执行 (第 1 轮)" | ✅ Java 必须独立进入测试执行，QA 使用 `run_project_tests(project_id)` |
 | QA（含 qa/test_report.md 且全 pass）| — | — | 进入阶段 5 交付 |
 
 **缺陷闭环的唯一分派规则**：
-- QA 的 `task_done` 若报告失败或携带 `qa/defects/*.md`，由 Manager 且只由 Manager 向 RD 发送一条 `task_assign`，subject 使用 `缺陷修复 (第 N 轮)`。
-- RD 修复完成后，由 Manager 且只由 Manager 向 QA 发送一条 `测试执行 (第 N+1 轮)`；QA 直接在共享挂载目录回归。
+- QA 的 `task_done` 若报告失败或携带 `qa/defects/*.md`，Manager 提交 `advance_workflow(signal="qa_defect_found")`，Java 只向 RD 发送一条固定缺陷修复任务。
+- RD 修复完成并满足测试证据门禁后，Manager 提交 `advance_workflow(signal="stage_accepted")`，Java 只向 QA 发送一条回归测试任务。
 - QA 不得直接给 RD 分派任务。若邮箱中已存在相同轮次的开放修复任务，不得重复发送。
 - 每轮回归报告继续覆盖写入 `qa/test_report.md`；只有最新报告明确全通过且无开放 defect 才能进入交付。
 
@@ -77,7 +77,7 @@ kind: sop
 3. threshold_met=false（常见情况）：
    - `append_event("task_done_received", {from_role, artifacts})`
    - 调 `mark_done(pid, msg_id)`
-   - 按上表 → 下一 task_assign 发送
+   - 按上表判断评审结论，只调用 `advance_workflow`；下一 task_assign 由 Java 发送
 4. threshold_met=true：`append_event("decided_insert_review")` + 发 review_request ×2 → 等 review_done → 汇总决策
 
 ### 阶段 5：交付
@@ -98,7 +98,8 @@ QA 的 test_report 到达且所有通过：
 - `create_project(project_id, project_name, needs_content)` — Manager 独占
 - `send_to_human(routing_key, message, kind, project_id, checkpoint_id)` — Manager 独占
 - `append_event(project_id, action, payload)` — Manager 独占
-- `send_mail(to, type, subject, content, project_id)` / `read_inbox(project_id)` / `mark_done(project_id, msg_id)` — 全角色
+- `send_mail(to, type, subject, content, project_id)` / `read_inbox(project_id)` / `mark_done(project_id, msg_id)` — 全角色；`task_assign` 除外
+- `advance_workflow(project_id, signal, from_role, task_done_content, feedback)` — Manager 只提交结论，Java 决定阶段与分派
 - `read_shared(project_id, rel_path)` / `write_shared(project_id, rel_path, content)` — 全角色（按 owner 前缀）
 
 ## 硬约束

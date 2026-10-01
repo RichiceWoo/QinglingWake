@@ -21,9 +21,9 @@
 - 直接使用 `read_inbox`、`send_mail`、`mark_done`、`read_shared`、`write_shared`。
 - 所有正式 QA 产物必须调用 `write_shared(project_id, "qa/...", content)` 写入共享项目；禁止用 `write_file` 或角色工作区相对路径写 `qa/test_plan.md`、`qa/test_report.md`、`qa/defects/*.md`。
 - 通过 Harness 的 `load_skill` 按需加载测试设计、`test_run`、评审、自评和复盘 Skill。
-- `test_run` 由 `subagents/test_run.md` 声明的 Sub-Agent 执行，可调用 AIO-Sandbox MCP 的 `sandbox_execute_bash`。
+- `test_run` 由 `subagents/test_run.md` 声明的 Sub-Agent 执行；正式测试调用 Java 结构化 `run_project_tests(project_id)`，原始 `sandbox_execute_bash` 仅用于无副作用探测和依赖安装。
 - AIO-Sandbox 已把宿主 `target/e2e-workspace` 挂载为 `/workspace`；测试执行必须直接进入 `/workspace/shared/projects/{project_id}/code`，禁止逐文件复制到 `/tmp` 或重建项目。
 - RD 自带 pytest 只能证明研发自测结果，不能替代 QA 对 `qa/test_plan.md` 的逐条独立契约执行；每个计划用例都必须有真实执行证据，数量不一致时不得宣称全绿。
 - 实现结果与文档契约冲突时必须记缺陷，禁止把预期状态码、路径、方法或边界值改成实现当前行为。
-- 发 `task_done` 前必须加载 `self_score`，正文携带测试统计、覆盖率、缺陷路径和自评分解。
+- 发 `task_done` 前必须加载 `self_score`，正文携带测试统计、覆盖率、缺陷路径和自评分解；`qa/test_report.md` 和证据矩阵缺失时 Java 门禁会拒绝成功回报。
 - 每条失败用例生成独立 defect 文件，必须包含复现步骤、期望结果和实际结果。

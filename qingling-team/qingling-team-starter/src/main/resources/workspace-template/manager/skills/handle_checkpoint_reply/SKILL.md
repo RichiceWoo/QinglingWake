@@ -11,7 +11,7 @@ type: reference
 2. **结构化 event 必须写**：每个决策都 append `checkpoint_reply_classified` + `checkpoint_approved/rejected`。
 3. **revise 不是 reject**：revise 回更细的 clarification 给用户或改 artifacts，**不回退项目阶段**。
 4. **人类回复不是邮箱**：绝不调用 `mark_done`，绝不虚构 `msg_id`，也不通过 `read_inbox` 查找 checkpoint 回复。
-5. **批准事件先于分派**：approve 必须先成功写入 `checkpoint_reply_classified` 和 `checkpoint_approved`，随后才允许 `send_mail(to="pm")`。
+5. **批准事件先于分派**：approve 必须先成功写入 `checkpoint_reply_classified` 和 `checkpoint_approved`，随后只调用 `advance_workflow`；禁止直接 `send_mail(to="pm")`。
 
 ## 步骤
 
@@ -28,14 +28,14 @@ type: reference
 
 | checkpoint.kind | reply_class | 动作 |
 |-----------------|-------------|------|
-| checkpoint_request（需求确认） | approve | 先 `append_event("checkpoint_reply_classified")`、再 `append_event("checkpoint_approved")`，最后 `send_mail(to="pm", type="task_assign", subject="产品设计")` |
+| checkpoint_request（需求确认） | approve | 先 `append_event("checkpoint_reply_classified")`、再 `append_event("checkpoint_approved")`，最后 `advance_workflow(signal="checkpoint_approved")`，由 Java 分派 PM |
 | checkpoint_request（需求确认） | revise | 更新 `needs/requirements.md` + 再发 checkpoint_request |
-| checkpoint_request（需求确认） | reject | `send_to_human(kind="info", message="需求已取消")` + 归档项目 |
+| checkpoint_request（需求确认） | reject | `advance_workflow(signal="checkpoint_rejected")` 进入 `CANCELLED`，再通知需求已取消并归档项目 |
 | proposal_review（复盘审批） | approve | 按 approved_ids 发 `retro_approved` 给 target_role × N |
 | proposal_review | reject | `send_mail(to=<role>, type="retro_rejected", content={reason})` |
 | proposal_review | revise | `send_to_human` 澄清 |
-| delivery | approve | `append_event("delivered")` + `send_to_human(kind="info","交付完成")` |
-| delivery | reject | `send_mail(to="rd", type="task_assign", subject="修复交付问题 (第 N 轮)")` |
+| delivery | approve | `advance_workflow(signal="delivery_approved")` 进入 `COMPLETED`，再 `append_event("delivered")` + `send_to_human(kind="info","交付完成")` |
+| delivery | reject | `advance_workflow(signal="delivery_rejected")`，由 Java 固定分派 RD 修复并在完成后回到 QA 回归 |
 
 ### Step 4 — 写事件 + resolve
 - `append_event("checkpoint_reply_classified", {cid, reply_class})`
@@ -51,6 +51,6 @@ type: reference
   "classified": "approve",
   "checkpoint_id": "ckpt-a1b2c3d4",
   "kind": "checkpoint_request",
-  "next_actions": ["sent task_assign to pm", "appended checkpoint_approved"]
+  "next_actions": ["advanced workflow to PRODUCT_DESIGN", "appended checkpoint_approved"]
 }
 ```

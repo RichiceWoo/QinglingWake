@@ -47,6 +47,26 @@ class EventServiceTest {
     }
 
     /**
+     * 通用事件入口不得伪造阶段迁移，只有 Java 状态机专用入口可以写入。
+     */
+    @Test
+    void shouldReserveWorkflowTransitionForJavaStateMachine() {
+        RecordingEventRepository repository = new RecordingEventRepository();
+        EventService service = new EventService(repository);
+
+        assertThatThrownBy(() -> service.append(
+                "p1", "manager", "workflow_transitioned", Map.of("to_stage", "COMPLETED")
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Java 状态机");
+
+        assertThat(service.appendWorkflowTransition(
+                "p1", Map.of("from_stage", "PRODUCT_DESIGN", "to_stage", "TECH_DESIGN")
+        )).isEqualTo(1L);
+        assertThat(repository.action).isEqualTo("workflow_transitioned");
+        assertThat(repository.details).containsEntry("to_stage", "TECH_DESIGN");
+    }
+
+    /**
      * 记录事件追加参数，避免测试依赖运行时字节码代理。
      */
     private static final class RecordingEventRepository implements EventRepository {

@@ -10,9 +10,10 @@ cd /Users/qingling/workspace/IdeaProjects/QinglingWake/qingling-team
 # 必填：阿里云百炼 DashScope API Key。不要写入 config.yaml 或提交到 Git。
 export DASHSCOPE_API_KEY='sk-替换为真实值'
 
-# 当前使用百炼节省计划：关闭免费候选探测并显式选择 qwen3.8-max。
+# 当前使用百炼节省计划：关闭免费候选探测并显式选择 qwen3-max。
 export QINGLING_FREE_MODEL_SELECTION_ENABLED=false
-export QINGLING_AGENT_MODEL=qwen3.8-max
+export QINGLING_AGENT_MODEL=qwen3-max
+export QINGLING_SUB_AGENT_MODEL=qwen3-max
 
 # 可选：覆盖沙盒地址。
 export QINGLING_SANDBOX_URL='http://localhost:8029/mcp'
@@ -43,7 +44,21 @@ docker compose -f sandbox-docker-compose.yaml ps
 
 沙盒把 `target/e2e-workspace` 挂载为容器内 `/workspace`，仅绑定本机 `127.0.0.1:8029`；按官方要求启用 `seccomp:unconfined` 和 2GB shared memory。
 
-## 3. 分场景执行
+应用只从 MCP 注册 `sandbox_execute_bash`，随后在 Java 侧为 RD/QA 包装 `run_project_tests(project_id)`。包装器固定使用 `/workspace/shared/projects/{projectId}/code`，模型不能提供命令或 cwd，并返回 `exit_code`、pytest 数量与覆盖率证据。声明式 RD/QA Sub-Agent 同时继承原始工具和结构化工具；原始工具只用于无副作用探测与依赖安装。Harness 自带的文件工具和本地 Shell 均关闭。MCP 连接失败或白名单工具缺失会直接阻止启动。
+
+## 3. 零模型真实工具契约
+
+每次昂贵 E2E 前先运行下面的轻量契约。它会创建真实 RD/QA 声明式子代理，核对其工具列表，并让二者通过 Docker MCP 执行 `pwd && test -d`；使用 `NoCallModel`，不会调用百炼或消耗 Token：
+
+```bash
+mvn -Ptool-contract \
+  -Dtool.contract.workspace="$(pwd)/target/e2e-workspace" \
+  verify
+```
+
+此命令失败时禁止继续 `-Pe2e`。它不替代业务 E2E，只负责在最便宜的一层证明 MCP 注册、子代理继承和共享目录挂载真实可用。
+
+## 4. 分场景执行
 
 ```bash
 mvn -Pe2e -De2e.scenario=happy-path verify
@@ -62,7 +77,9 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 - `project/`：needs/design/tech/code/qa、mailbox、events 等验收产物；
 - `data/`：Session mapping、Cron 和审计数据。
 
-## 4. 飞书运行配置（不阻塞 Task 18）
+Java 状态机唯一决定 checkpoint、PM、RD、QA 与交付阶段的下一 Owner 和任务主题。模型只能提交评审结论；直接 `send_mail(type="task_assign")` 会被拒绝。RD 缺少 `exit_code=0`、pytest 数量或覆盖率时，QA 缺少测试报告或证据矩阵时，Java 会拒绝成功 `task_done`。
+
+## 5. 飞书运行配置（不阻塞 Task 18）
 
 在飞书开放平台创建企业自建应用后，按以下顺序配置：
 

@@ -29,6 +29,9 @@ public final class Runner implements CronDispatchGateway {
     /** 对外返回的统一可重试错误提示。 */
     private static final String ERROR_REPLY = "处理出错，请稍后重试。";
 
+    /** 携带真实项目标识的一次性邮件唤醒前缀。 */
+    private static final String NEW_MAIL_WAKE_PREFIX = "__wake__:new_mail:";
+
     /** routing key 到会话的映射和审计服务。 */
     private final SessionRoutingService sessionRoutingService;
 
@@ -216,7 +219,7 @@ public final class Runner implements CronDispatchGateway {
                     target.role(),
                     target.userId(),
                     session.activeSessionId(),
-                    prepared.content(),
+                    agentContent(inbound, target, prepared.content()),
                     prepared.attachmentPaths(),
                     requestAttributes(inbound, session)
             );
@@ -313,6 +316,34 @@ public final class Runner implements CronDispatchGateway {
         attributes.put("verbose", session.verbose());
         attributes.put("cron", inbound.cron());
         return Map.copyOf(attributes);
+    }
+
+    /**
+     * 把内部 new_mail 协议转换为确定性的收件箱操作提示，避免模型误把模块名当项目标识。
+     *
+     * @param inbound 原始入站消息
+     * @param target 已解析的角色目标
+     * @param preparedContent 附件处理后的正文
+     * @return 传给 Agent 的显式操作提示；非邮件唤醒保持原文
+     */
+    private static String agentContent(
+            InboundMessage inbound,
+            RoutingKeyResolver.RoutingTarget target,
+            String preparedContent
+    ) {
+        if (!target.teamRoute() || !inbound.cron() || !preparedContent.startsWith(NEW_MAIL_WAKE_PREFIX)) {
+            return preparedContent;
+        }
+        String projectId = preparedContent.substring(NEW_MAIL_WAKE_PREFIX.length()).trim();
+        if (projectId.isEmpty()) {
+            return preparedContent;
+        }
+        return """
+                系统 new_mail 唤醒。真实 project_id 是 `%s`。
+                本轮第一步必须调用 read_inbox(project_id="%s")，不得把 Maven 模块名、角色 workspace 名或历史项目名当成 project_id。
+                只处理 read_inbox 返回的 in_progress 邮件；完成后必须调用 mark_done(project_id="%s", msg_id=实际消息标识)。
+                原始唤醒：%s
+                """.formatted(projectId, projectId, projectId, preparedContent).strip();
     }
 
     /**

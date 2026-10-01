@@ -1,6 +1,6 @@
 ---
 name: test_run
-description: "QA 在沙盒里执行 qa/test_plan.md 所有用例、收集失败、写 defect 的 skill。当 QA 收到 type=task_assign 且 subject 含'测试执行/run tests'的邮件时**一定**加载本 skill。按 test_plan 跑 pytest → 通过标 pass、失败写 qa/defects/defect_{id}.md → 汇总 qa/test_report.md + task_done。如有 defect，顺带发 task_assign 给 RD 修复。所有'QA 真的跑测试'的时刻走此 skill。必须 sandbox_execute_bash。"
+description: "QA 在沙盒里执行 qa/test_plan.md 所有用例、收集失败、写 defect 的 skill。当 QA 收到 type=task_assign 且 subject 含'测试执行/run tests'的邮件时**一定**加载本 skill。按 test_plan 跑 pytest → 通过标 pass、失败写 qa/defects/defect_{id}.md → 汇总 qa/test_report.md、证据矩阵和 task_done；缺陷只上报 Manager，由 Java 状态机决定后续阶段。所有'QA 真的跑测试'的时刻走此 skill。必须使用 run_project_tests。"
 type: task
 ---
 

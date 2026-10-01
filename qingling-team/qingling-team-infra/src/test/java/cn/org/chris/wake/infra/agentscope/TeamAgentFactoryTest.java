@@ -16,8 +16,12 @@ import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ToolSchema;
 import io.agentscope.core.permission.PermissionMode;
+import io.agentscope.core.tool.Tool;
+import io.agentscope.core.tool.ToolParam;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
+import io.agentscope.harness.agent.tools.McpServerConfig;
+import io.agentscope.harness.agent.tools.McpServerRegistrationResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -48,6 +52,9 @@ class TeamAgentFactoryTest {
     /** 待测团队 Agent 工厂。 */
     private TeamAgentFactory factory;
 
+    /** 供不同 Sandbox 配置复用的角色 Toolkit 工厂。 */
+    private RoleToolkitFactory toolkitFactory;
+
     /**
      * 创建最小但完整的四角色 AgentScope workspace 和领域工具依赖。
      *
@@ -63,7 +70,7 @@ class TeamAgentFactoryTest {
         Files.createDirectories(dataRoot);
         ObjectMapper objectMapper = new ObjectMapper();
         FileWorkspaceRepository workspaceRepository = new FileWorkspaceRepository(dataRoot);
-        RoleToolkitFactory toolkitFactory = new RoleToolkitFactory(
+        toolkitFactory = new RoleToolkitFactory(
                 new MailboxService(new FileMailboxRepository(dataRoot, objectMapper)),
                 workspaceRepository,
                 (role, projectId) -> "job-smoke",
@@ -126,6 +133,61 @@ class TeamAgentFactoryTest {
     }
 
     /**
+     * 父 Agent 与声明式 Sub-Agent 都不得暴露 Harness 文件工具，RD 子代理必须继承白名单 MCP 工具。
+     */
+    @Test
+    void shouldDisableFilesystemToolsAndInheritSandboxToolInDeclaredSubagent() {
+        McpServerConfig server = new McpServerConfig();
+        server.setTransport(McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT);
+        server.setEnableTools(List.of("sandbox_execute_bash"));
+        McpSandboxConfiguration sandbox = new McpSandboxConfiguration(
+                "aio-sandbox",
+                server,
+                (toolkit, servers, listener) -> {
+                    toolkit.registerTool(new FakeSandboxTools());
+                    listener.onCompleted(McpServerRegistrationResult.success(
+                            "aio-sandbox", McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT
+                    ));
+                }
+        );
+        TeamAgentFactory sandboxFactory = new TeamAgentFactory(
+                new NoCallModel(),
+                toolkitFactory,
+                new RoleSubagentFactory(workspaceRoot),
+                sandbox
+        );
+
+        HarnessAgent rd = sandboxFactory.create("rd");
+        HarnessAgent codeSubagent = null;
+        try {
+            assertThat(rd.getToolkit().getToolNames())
+                    .contains("sandbox_execute_bash", "run_project_tests")
+                    .doesNotContain(
+                            "read_file", "write_file", "edit_file", "list_files", "grep_files", "glob_files"
+                    );
+            Agent created = rd.getSubagentAgentManager().createAgent(
+                    "code_impl",
+                    RuntimeContext.builder().userId("smoke-user").sessionId("smoke-session").build()
+            );
+            assertThat(created).isInstanceOf(HarnessAgent.class);
+            codeSubagent = (HarnessAgent) created;
+            assertThat(codeSubagent.getToolkit().getToolNames())
+                    .contains("read_inbox", "sandbox_execute_bash", "run_project_tests")
+                    .doesNotContain(
+                            "read_file", "write_file", "edit_file", "list_files", "grep_files", "glob_files"
+                    );
+            assertThat(sandbox.registrationStatuses())
+                    .extracting(McpSandboxConfiguration.RegistrationStatus::status)
+                    .containsExactly(McpServerRegistrationResult.Status.SUCCESS);
+        } finally {
+            if (codeSubagent != null) {
+                codeSubagent.close();
+            }
+            rd.close();
+        }
+    }
+
+    /**
      * 创建角色 workspace、一个可发现 Skill 和一个声明式 task Sub-Agent。
      *
      * @param role 角色名称
@@ -153,7 +215,7 @@ class TeamAgentFactoryTest {
                 workspace:
                   mode: shared
                 steps: 3
-                tools: read_inbox
+                tools: read_inbox,sandbox_execute_bash,run_project_tests
                 skills: fixture_skill
                 ---
 
@@ -217,6 +279,23 @@ class TeamAgentFactoryTest {
         @Override
         public String getModelName() {
             return "no-call-model";
+        }
+    }
+
+    /** 为无网络回归测试提供与真实 MCP 同名的最小沙盒工具。 */
+    private static final class FakeSandboxTools {
+
+        /**
+         * 返回固定成功结果，测试只验证工具继承而不执行任何宿主命令。
+         *
+         * @param command 被忽略的沙盒命令
+         * @return 固定成功文本
+         */
+        @Tool(name = "sandbox_execute_bash", description = "测试用沙盒命令", concurrencySafe = true)
+        public String execute(
+                @ToolParam(name = "cmd", description = "测试命令") String command
+        ) {
+            return "ok";
         }
     }
 }

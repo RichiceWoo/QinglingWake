@@ -69,7 +69,7 @@ class RoleToolkitFactoryTest {
     }
 
     /**
-     * Manager 必须恰有九个团队工具，其他角色恰有五个，并默认拥有中间产物工具。
+     * Manager 必须恰有十个团队工具，其他角色恰有五个，并默认拥有中间产物工具。
      */
     @Test
     void shouldExposeEightManagerAndFiveCommonTeamTools() {
@@ -78,7 +78,7 @@ class RoleToolkitFactoryTest {
         assertThat(manager.getToolNames()).containsAll(RoleToolkitFactory.COMMON_TEAM_TOOL_NAMES)
                 .containsAll(RoleToolkitFactory.MANAGER_TEAM_TOOL_NAMES)
                 .contains(RoleToolkitFactory.INTERMEDIATE_TOOL_NAME)
-                .hasSize(10);
+                .hasSize(11);
         for (String role : Set.of("pm", "rd", "qa")) {
             Toolkit toolkit = factory.create(role);
             assertThat(toolkit.getToolNames()).containsExactlyInAnyOrderElementsOf(

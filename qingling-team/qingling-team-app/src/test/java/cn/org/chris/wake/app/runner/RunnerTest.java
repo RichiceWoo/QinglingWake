@@ -156,8 +156,34 @@ class RunnerTest {
         assertThat(duplicate).isCompleted();
         assertThat(agentGateway.requests).hasSize(1);
         assertThat(agentGateway.requests.get(0).role()).isEqualTo("pm");
+        assertThat(agentGateway.requests.get(0).content()).isEqualTo("__wake__:heartbeat");
         gate.complete(new AgentReply("internal", List.of("mailbox_ops")));
         first.join();
+        assertThat(senderGateway.events).isEmpty();
+    }
+
+    /**
+     * new_mail 唤醒必须把真实项目标识和首个工具动作显式交给角色，避免模型误用宿主模块名。
+     */
+    @Test
+    void shouldEnrichNewMailWakeWithDeterministicInboxInstruction() {
+        runner.dispatch(message(
+                "team:rd",
+                "__wake__:new_mail:todo-mvp",
+                true,
+                null,
+                Map.of("wake_reason", "new_mail", "project_id", "todo-mvp")
+        )).join();
+
+        assertThat(agentGateway.requests).singleElement().satisfies(request -> {
+            assertThat(request.role()).isEqualTo("rd");
+            assertThat(request.content())
+                    .contains("真实 project_id 是 `todo-mvp`")
+                    .contains("第一步必须调用 read_inbox(project_id=\"todo-mvp\")")
+                    .contains("不得把 Maven 模块名、角色 workspace 名或历史项目名当成 project_id")
+                    .contains("mark_done(project_id=\"todo-mvp\"")
+                    .contains("原始唤醒：__wake__:new_mail:todo-mvp");
+        });
         assertThat(senderGateway.events).isEmpty();
     }
 

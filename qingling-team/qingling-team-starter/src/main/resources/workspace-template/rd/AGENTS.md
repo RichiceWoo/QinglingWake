@@ -17,6 +17,6 @@
 
 - 直接使用 `read_inbox`、`send_mail`、`mark_done`、`read_shared`、`write_shared`。
 - 通过 Harness 的 `load_skill` 按需加载 `tech_design`、`code_impl`、评审、自评和复盘 Skill。
-- `code_impl` 由 `subagents/code_impl.md` 声明的 Sub-Agent 执行，可调用 AIO-Sandbox MCP 的 `sandbox_execute_bash`。
-- 发 `task_done` 前必须加载 `self_score`，正文携带 pytest 状态、覆盖率、产物路径和自评分解。
+- `code_impl` 由 `subagents/code_impl.md` 声明的 Sub-Agent 执行；正式测试调用 Java 结构化 `run_project_tests(project_id)`，原始 `sandbox_execute_bash` 仅用于无副作用探测和依赖安装。
+- 发 `task_done` 前必须加载 `self_score`，正文原样携带 `run_project_tests` 返回的 `exit_code=0`、正数 pytest 数量、覆盖率、产物路径和自评分解；缺一项会被 Java 门禁拒绝。
 - 收到 `retro_approved` 后只做批准提案中指定的精确文本替换，并向 Manager 回报结果。

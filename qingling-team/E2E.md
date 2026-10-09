@@ -48,7 +48,7 @@ docker compose -f sandbox-docker-compose.yaml ps
 
 ## 3. 零模型真实工具契约
 
-每次昂贵 E2E 前先运行下面的轻量契约。它会创建真实 RD/QA 声明式子代理，核对其工具列表，并让二者通过 Docker MCP 执行 `pwd && test -d`；使用 `NoCallModel`，不会调用百炼或消耗 Token：
+每次昂贵 E2E 前先运行下面的轻量契约。它会创建真实 RD/QA 声明式子代理，核对其工具列表，连续执行 10 次无副作用 Shell 探针和 5 次结构化 `run_project_tests`，并覆盖一次受控 MCP 连接失效、client 重建与恢复探针。契约使用带调用计数断言的 `NoCallModel`，不会调用百炼或消耗 Token；结束前还会确认没有遗留 pytest、pip 或 tmux 进程：
 
 ```bash
 mvn -Ptool-contract \
@@ -56,7 +56,7 @@ mvn -Ptool-contract \
   verify
 ```
 
-此命令失败时禁止继续 `-Pe2e`。它不替代业务 E2E，只负责在最便宜的一层证明 MCP 注册、子代理继承和共享目录挂载真实可用。
+此命令失败时禁止继续 `-Pe2e`。它不替代业务 E2E，只负责在最便宜的一层证明 MCP 注册、子代理继承、共享目录挂载、结构化 execution ID、连续调用和连接恢复真实可用。
 
 ## 4. 分场景执行
 
@@ -76,6 +76,8 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 - `summary.json` 中的 `called_tools`：必须包含真实调用的 `sandbox_execute_bash`，不能只证明 MCP 注册成功；
 - `project/`：needs/design/tech/code/qa、mailbox、events 等验收产物；
 - `data/`：Session mapping、Cron 和审计数据。
+
+失败场景也会在 `finally` 中保存 `summary.json` 和 `failure-summary.json`，并尽可能复制当时的项目、事件、mailbox、Session/Cron 数据。等待产物期间驱动会同步检查 `tool_execution_failed` incident、MCP 熔断状态、mailbox 三态与 dispatch 积压；不可重试或 `BLOCKED` 的工具故障会立即报告 `tool`、`execution_id`、`failure_type`、stage 和 owner，不再伪装为后续 `qa/test_plan.md` 超时。错误文本和结构化输出在写入证据前会进行凭据脱敏和长度限制。
 
 Java 状态机唯一决定 checkpoint、PM、RD、QA 与交付阶段的下一 Owner 和任务主题。模型只能提交评审结论；直接 `send_mail(type="task_assign")` 会被拒绝。RD 缺少 `exit_code=0`、pytest 数量或覆盖率时，QA 缺少测试报告或证据矩阵时，Java 会拒绝成功 `task_done`。
 

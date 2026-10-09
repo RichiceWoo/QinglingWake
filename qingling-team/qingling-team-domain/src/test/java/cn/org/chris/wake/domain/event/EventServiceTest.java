@@ -46,9 +46,7 @@ class EventServiceTest {
         assertThat(EventService.isValidAction(null)).isFalse();
     }
 
-    /**
-     * 通用事件入口不得伪造阶段迁移，只有 Java 状态机专用入口可以写入。
-     */
+    /** 通用事件入口不得伪造阶段迁移或完成拒绝，只有对应 Java 专用入口可以写入。 */
     @Test
     void shouldReserveWorkflowTransitionForJavaStateMachine() {
         RecordingEventRepository repository = new RecordingEventRepository();
@@ -57,13 +55,23 @@ class EventServiceTest {
         assertThatThrownBy(() -> service.append(
                 "p1", "manager", "workflow_transitioned", Map.of("to_stage", "COMPLETED")
         )).isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Java 状态机");
+                .hasMessageContaining("Java 专用入口");
 
         assertThat(service.appendWorkflowTransition(
                 "p1", Map.of("from_stage", "PRODUCT_DESIGN", "to_stage", "TECH_DESIGN")
         )).isEqualTo(1L);
         assertThat(repository.action).isEqualTo("workflow_transitioned");
         assertThat(repository.details).containsEntry("to_stage", "TECH_DESIGN");
+
+        assertThatThrownBy(() -> service.append(
+                "p1", "manager", "completion_rejected", Map.of("role", "rd")
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Java 专用入口");
+        assertThat(service.appendCompletionRejected(
+                "p1", Map.of("role", "rd", "reason", "缺少测试证据")
+        )).isEqualTo(1L);
+        assertThat(repository.action).isEqualTo("completion_rejected");
+        assertThat(repository.details).containsEntry("role", "rd");
     }
 
     /**

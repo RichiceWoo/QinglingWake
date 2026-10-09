@@ -48,16 +48,31 @@ class RealTeamE2E {
             throw new AssertionError("必须通过 -De2e.scenario 指定场景，可选值: " + SCENARIOS);
         }
         try (RealTeamE2EDriver driver = RealTeamE2EDriver.start(scenario)) {
-            driver.say(PROMPTS.get(scenario));
-            driver.waitForProjectAndRequirements();
-            if ("checkpoint-revise".equals(scenario)) {
-                driver.reviseRequirements();
+            Throwable failure = null;
+            try {
+                driver.say(PROMPTS.get(scenario));
+                driver.waitForProjectAndRequirements();
+                if ("checkpoint-revise".equals(scenario)) {
+                    driver.reviseRequirements();
+                }
+                driver.approveRequirementsAndWaitForDelivery();
+                driver.approveDelivery();
+                driver.assertCommonContract();
+                driver.assertScenarioContract(scenario);
+            } catch (Exception | AssertionError scenarioFailure) {
+                failure = scenarioFailure;
+                throw scenarioFailure;
+            } finally {
+                try {
+                    driver.saveEvidence(failure);
+                } catch (Exception evidenceFailure) {
+                    if (failure != null) {
+                        failure.addSuppressed(evidenceFailure);
+                    } else {
+                        throw evidenceFailure;
+                    }
+                }
             }
-            driver.approveRequirementsAndWaitForDelivery();
-            driver.approveDelivery();
-            driver.assertCommonContract();
-            driver.assertScenarioContract(scenario);
-            driver.saveEvidence();
         }
     }
 }

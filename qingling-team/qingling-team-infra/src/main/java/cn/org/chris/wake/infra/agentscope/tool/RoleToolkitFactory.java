@@ -140,6 +140,31 @@ public final class RoleToolkitFactory {
     }
 
     /**
+     * 将 AgentScope 工具边界的结构化基础设施故障交给确定性工作流控制器。
+     *
+     * @param projectId 项目标识
+     * @param role 当前阶段 Owner
+     * @param tool 工具名称
+     * @param executionId 稳定执行标识
+     * @param failureType 失败分类
+     * @param retryable 是否仍可恢复
+     * @param attempt 同一执行的尝试序号
+     */
+    public void reportToolExecutionFailure(
+            String projectId,
+            String role,
+            String tool,
+            String executionId,
+            String failureType,
+            boolean retryable,
+            int attempt
+    ) {
+        workflowTools.reportToolExecutionFailure(
+                projectId, role, tool, executionId, failureType, retryable, attempt
+        );
+    }
+
+    /**
      * 通过 AgentScope 选择性注册 API 只暴露当前 Skill 明确需要的辅助工具。
      *
      * @param toolkit 待扩展 Toolkit

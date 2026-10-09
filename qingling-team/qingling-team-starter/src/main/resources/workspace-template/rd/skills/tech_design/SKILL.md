@@ -68,7 +68,7 @@ httpx
 ### Step 4 — self_score + task_done
 - 加载 `self_score` → 打分
 - `send_mail(to="manager", type="task_done", subject="技术方案完成", content={...}, project_id=...)`
-- `mark_done(project_id, msg_id)`
+- `send_mail` 成功后 Java 自动完成对应 `task_assign`，无需再次调用 `mark_done`。
 
 ## 输出
 

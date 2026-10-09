@@ -259,6 +259,34 @@ class Task5FileRepositoriesTest {
     }
 
     /**
+     * 缺少 processing_since 字段的旧格式 unread 邮件仍应能够被读取和领取。
+     *
+     * @throws Exception 测试邮箱文件写入失败
+     */
+    @Test
+    void shouldReadLegacyMailboxWithoutProcessingSince() throws Exception {
+        Path workspace = temporaryDirectory.resolve("workspace-legacy-mailbox");
+        ObjectMapper mapper = new ObjectMapper();
+        new FileWorkspaceRepository(workspace).initializeProject("p1");
+        Path inbox = workspace.resolve("shared/projects/p1/mailboxes/pm.json");
+        Files.writeString(inbox, """
+                [{
+                  "id":"msg-1e9ac001","project_id":"p1","from":"manager","to":"pm",
+                  "type":"task_assign","subject":"legacy","content":"work",
+                  "timestamp":"2026-09-25T00:00:00+00:00","status":"unread"
+                }]
+                """, StandardCharsets.UTF_8);
+        MailboxService service = new MailboxService(new FileMailboxRepository(workspace, mapper));
+
+        assertThat(service.readInbox("p1", "pm"))
+                .singleElement()
+                .satisfies(message -> {
+                    assertThat(message.id()).isEqualTo("msg-1e9ac001");
+                    assertThat(message.processingSince()).isNotNull();
+                });
+    }
+
+    /**
      * 项目初始化应完整且幂等，角色权限、原子读写和列举行为应一致。
      *
      * @throws Exception 测试文件读取失败

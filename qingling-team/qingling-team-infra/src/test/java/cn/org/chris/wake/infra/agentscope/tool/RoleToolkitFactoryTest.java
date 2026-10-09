@@ -167,6 +167,10 @@ class RoleToolkitFactoryTest {
         ));
         JsonNode inbox = json(pmCommon.readInbox("pawdiary-001"));
         String messageId = inbox.path("messages").get(0).path("id").asText();
+        JsonNode completion = json(pmCommon.sendMail(
+                "manager", "task_done", "产品设计完成", Map.of("artifact", "design/product_spec.md"),
+                "pawdiary-001"
+        ));
         JsonNode done = json(pmCommon.markDone("pawdiary-001", messageId));
         JsonNode written = json(pmCommon.writeShared(
                 "pawdiary-001", "design/product_spec.md", "# spec"
@@ -190,7 +194,9 @@ class RoleToolkitFactoryTest {
         assertThat(created.path("errcode").asInt()).isZero();
         assertThat(sent.path("scheduled_wake").asText()).isEqualTo("job-12345678");
         assertThat(inbox.path("count").asInt()).isEqualTo(1);
+        assertThat(completion.path("completed_assignment_id").asText()).isEqualTo(messageId);
         assertThat(done.path("status").asText()).isEqualTo("done");
+        assertThat(done.path("already_done").asBoolean()).isTrue();
         assertThat(written.path("errcode").asInt()).isZero();
         assertThat(read.path("content").asText()).isEqualTo("# spec");
         assertThat(event.path("seq").asLong()).isGreaterThan(1L);

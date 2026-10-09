@@ -10,6 +10,8 @@ services:
     environment:
       WORKSPACE: /workspace
       TZ: Asia/Shanghai
+      # 关闭预热 shell 池，确保关闭受管会话后不保留基础设施 tmux。
+      SHELL_POOL_SIZE: "0"
     volumes:
       - ./target/e2e-workspace:/workspace:rw
     restart: unless-stopped

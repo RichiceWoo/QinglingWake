@@ -8,6 +8,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -104,6 +105,33 @@ public final class MailboxService {
     public List<MailMessage> readInbox(String projectId, String role) {
         validateRole(role, false);
         return repository.claimUnread(requireText(projectId, "projectId"), role);
+    }
+
+    /**
+     * 按当前收件角色读取指定邮件的持久化状态。
+     *
+     * @param projectId 所属项目
+     * @param role 接收角色
+     * @param messageId 邮件标识
+     * @return 命中的邮件；不存在时为空
+     */
+    public Optional<MailMessage> findMessage(String projectId, String role, String messageId) {
+        validateRole(role, false);
+        return repository.findById(
+                requireText(projectId, "projectId"), role, requireText(messageId, "messageId")
+        );
+    }
+
+    /**
+     * 查找角色当前已经领取且尚未完成的全部流水线任务。
+     *
+     * @param projectId 所属项目
+     * @param role 接收角色
+     * @return 当前处理中的全部 task_assign
+     */
+    public List<MailMessage> findInProgressTaskAssignments(String projectId, String role) {
+        validateRole(role, false);
+        return repository.findInProgressTaskAssignments(requireText(projectId, "projectId"), role);
     }
 
     /**

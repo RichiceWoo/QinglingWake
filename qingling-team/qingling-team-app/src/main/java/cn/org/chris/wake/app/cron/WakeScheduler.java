@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 /**
@@ -36,6 +37,9 @@ public final class WakeScheduler {
 
     /** 可测试时钟。 */
     private final Clock clock;
+
+    /** 是否允许创建新的一次性 wake。 */
+    private final AtomicBoolean acceptingWake = new AtomicBoolean(true);
 
     /**
      * 创建使用随机任务标识和系统 UTC 时钟的调度器。
@@ -80,6 +84,9 @@ public final class WakeScheduler {
      * @return 新建或复用的任务标识
      */
     public String scheduleWake(String role, String reason, String projectId, Duration delay) {
+        if (!acceptingWake.get()) {
+            throw new IllegalStateException("wake scheduler 已停止接纳一次性唤醒");
+        }
         validateRole(role);
         String checkedReason = requireText(reason, "reason");
         Objects.requireNonNull(delay, "delay 不能为空");
@@ -101,6 +108,16 @@ public final class WakeScheduler {
                 true
         );
         return repository.saveWakeIfAbsent(candidate, nowMs).id();
+    }
+
+    /** 允许运行时启动阶段创建一次性 wake。 */
+    public void startAccepting() {
+        acceptingWake.set(true);
+    }
+
+    /** 停止创建新的一次性 wake，已持久化任务由 Cron 停止保证不再投递。 */
+    public void stopAccepting() {
+        acceptingWake.set(false);
     }
 
     /**

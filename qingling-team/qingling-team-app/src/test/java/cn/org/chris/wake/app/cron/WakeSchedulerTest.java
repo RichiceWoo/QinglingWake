@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 验证 wake 去重、项目标签和四角色 heartbeat 错峰契约。
@@ -57,6 +58,19 @@ class WakeSchedulerTest {
         assertThat(jobs).extracting(job -> job.schedule().everyMs()).containsOnly(30_000L);
         assertThat(jobs).extracting(job -> job.state().nextRunAtMs())
                 .containsExactly(CLOCK.millis(), CLOCK.millis() + 7_000L, CLOCK.millis() + 14_000L, CLOCK.millis() + 21_000L);
+    }
+
+    /** 停止接纳后不得创建一次性 wake，重新开放后恢复正常。 */
+    @Test
+    void shouldRejectOneShotWakeAfterAdmissionStops() {
+        MemoryCronRepository repository = new MemoryCronRepository();
+        WakeScheduler scheduler = new WakeScheduler(repository, () -> "wake-1", CLOCK);
+        scheduler.stopAccepting();
+
+        assertThatThrownBy(() -> scheduler.scheduleMailWake("rd", "p1"))
+                .isInstanceOf(IllegalStateException.class);
+        scheduler.startAccepting();
+        assertThat(scheduler.scheduleMailWake("rd", "p1")).isEqualTo("wake-1");
     }
 
     /**

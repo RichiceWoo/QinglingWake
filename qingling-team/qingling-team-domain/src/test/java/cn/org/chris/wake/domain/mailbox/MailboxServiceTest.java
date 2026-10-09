@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -112,6 +113,18 @@ class MailboxServiceTest {
          */
         @Override
         public List<MailMessage> claimUnread(String projectId, String role) {
+            return List.of();
+        }
+
+        /** 本测试替身不保存可供按 ID 查询的邮件。 */
+        @Override
+        public Optional<MailMessage> findById(String projectId, String role, String messageId) {
+            return Optional.empty();
+        }
+
+        /** 本测试替身不保存处理中的流水线任务。 */
+        @Override
+        public List<MailMessage> findInProgressTaskAssignments(String projectId, String role) {
             return List.of();
         }
 

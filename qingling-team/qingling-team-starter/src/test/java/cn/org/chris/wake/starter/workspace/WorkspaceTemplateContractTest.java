@@ -182,10 +182,18 @@ class WorkspaceTemplateContractTest {
         String qaSubagent = Files.readString(templateRoot.resolve("qa/subagents/test_run.md"));
 
         assertThat(rdSkill).contains("timeout=300", "禁止传字符串");
+        assertThat(rdSkill)
+                .contains("\"execution_id\": \"<run_project_tests.execution_id>\"")
+                .contains("\"pytest_collected\": \"<run_project_tests.pytest_collected>\"")
+                .contains("Java 会自动把对应 `task_assign` 标记为 `done`")
+                .doesNotContain("mark_done(pid, <task_assign_msg_id>)");
         assertThat(rdSubagent)
                 .contains("run_project_tests(project_id)")
                 .contains("原始 `sandbox_execute_bash` 只可用于首次无副作用");
         assertThat(qaSkill).contains("timeout=300", "禁止传字符串");
+        assertThat(qaSkill)
+                .contains("\"execution_id\": \"<run_project_tests.execution_id>\"")
+                .contains("Java 自动完成对应 `task_assign`");
         assertThat(qaSubagent)
                 .contains("run_project_tests(project_id)")
                 .contains("原始 `sandbox_execute_bash` 只可用于首次无副作用");
@@ -424,6 +432,35 @@ class WorkspaceTemplateContractTest {
                 .contains("下一任务只能是向 RD 分派“代码实现 (第 1 轮)”")
                 .contains("就绝不能向 QA 分派测试设计")
                 .contains("`from=rd` 不能单独决定下一阶段");
+    }
+
+    /**
+     * 角色模板必须约定由 Java 在同一阶段答复澄清并重新唤醒原 Owner。
+     *
+     * @throws Exception 模板文件读取失败
+     */
+    @Test
+    void shouldRequireJavaOwnedClarificationResumeProtocol() throws Exception {
+        Path templateRoot = templateRoot();
+        String managerInstructions = Files.readString(templateRoot.resolve("manager/AGENTS.md"));
+        String featureSop = Files.readString(templateRoot.resolve("manager/skills/sop_feature_dev/SKILL.md"));
+        String pmInstructions = Files.readString(templateRoot.resolve("pm/AGENTS.md"));
+        String rdInstructions = Files.readString(templateRoot.resolve("rd/AGENTS.md"));
+        String qaInstructions = Files.readString(templateRoot.resolve("qa/AGENTS.md"));
+
+        assertThat(managerInstructions)
+                .contains("advance_workflow(signal=\"clarification_answered\"")
+                .contains("禁止直接发送 `clarification_answer`、`info` 或 `task_assign`")
+                .contains("保持当前阶段")
+                .contains("重新唤醒该角色");
+        assertThat(featureSop)
+                .contains("澄清恢复的唯一协议")
+                .contains("from_role=<请求角色>")
+                .contains("resume_current_stage=true")
+                .contains("成功后才可 `mark_done` 原 `clarification_request`");
+        assertThat(pmInstructions).contains("使用 `clarification_answer` 恢复原产品设计阶段");
+        assertThat(rdInstructions).contains("使用 `clarification_answer` 恢复原技术设计、代码实现或缺陷修复阶段");
+        assertThat(qaInstructions).contains("使用 `clarification_answer` 恢复原测试设计或测试执行阶段");
     }
 
     /**

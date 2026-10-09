@@ -7,6 +7,7 @@ import java.util.List;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.CancellationException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -87,5 +88,50 @@ class SerialDispatchRegistryTest {
 
         assertThat(drained.join()).isTrue();
         assertThat(registry.pendingCount("p2p:user")).isZero();
+    }
+
+    /**
+     * 停止接纳后新任务必须明确失败，恢复接纳后才允许再次提交。
+     */
+    @Test
+    void shouldRejectNewTasksAfterAdmissionStops() {
+        SerialDispatchRegistry registry = new SerialDispatchRegistry(Runnable::run);
+        registry.stopAccepting();
+
+        CompletableFuture<String> rejected = registry.submit(
+                "team:rd", () -> CompletableFuture.completedFuture("unexpected")
+        );
+
+        assertThatThrownBy(rejected::join).hasCauseInstanceOf(IllegalStateException.class);
+        assertThat(registry.isAccepting()).isFalse();
+        registry.startAccepting();
+        assertThat(registry.submit("team:rd", () -> CompletableFuture.completedFuture("ok")).join())
+                .isEqualTo("ok");
+    }
+
+    /**
+     * 排空超时后的统一取消必须传播到活跃 Future，并阻止排队任务启动。
+     */
+    @Test
+    void shouldCancelRunningAndQueuedTasksAfterDrainTimeout() {
+        SerialDispatchRegistry registry = new SerialDispatchRegistry(Runnable::run);
+        CompletableFuture<String> active = new CompletableFuture<>();
+        AtomicBoolean queuedStarted = new AtomicBoolean();
+        CompletableFuture<String> first = registry.submit("team:qa", () -> active);
+        CompletableFuture<String> queued = registry.submit("team:qa", () -> {
+            queuedStarted.set(true);
+            return CompletableFuture.completedFuture("unexpected");
+        });
+        registry.stopAccepting();
+
+        assertThat(registry.awaitDrained(Duration.ofMillis(5))).isFalse();
+        assertThat(registry.cancelOutstanding()).isEqualTo(2);
+
+        assertThat(active).isCancelled();
+        assertThat(first).isCancelled();
+        assertThat(queued).isCancelled();
+        assertThat(queuedStarted).isFalse();
+        assertThatThrownBy(first::join).isInstanceOf(CancellationException.class);
+        assertThat(registry.awaitDrained(Duration.ofSeconds(1))).isTrue();
     }
 }

@@ -4,6 +4,7 @@ import cn.org.chris.wake.adapter.api.TestApiController;
 import cn.org.chris.wake.adapter.api.dto.TestRequest;
 import cn.org.chris.wake.adapter.api.dto.TestResponse;
 import cn.org.chris.wake.infra.agentscope.McpSandboxConfiguration;
+import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
 import cn.org.chris.wake.starter.QinglingTeamApplication;
 import cn.org.chris.wake.starter.config.DashScopeModelSelector;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -79,6 +80,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 记录四角色 MCP 注册结果的脱敏配置对象。 */
     private final McpSandboxConfiguration sandboxConfiguration;
 
+    /** 提供 E2E 轮询期间的 dispatch 接纳和积压快照。 */
+    private final SerialDispatchRegistry dispatchRegistry;
+
     /** 记录本场景启动时动态选中的免费模型和脱敏探测结果。 */
     private final DashScopeModelSelector.Selection modelSelection;
 
@@ -93,6 +97,12 @@ final class RealTeamE2EDriver implements AutoCloseable {
 
     /** 为 TestAPI 生成不重复且可读的消息标识。 */
     private int messageSequence;
+
+    /** 记录 MCP OPEN 首次观察时间，避免把短暂自动恢复误报为终态故障。 */
+    private final Map<String, Instant> circuitOpenSince = new LinkedHashMap<>();
+
+    /** 最近一次轮询采集的脱敏运行时诊断。 */
+    private Map<String, Object> lastRuntimeSnapshot = Map.of();
 
     /**
      * 保存已启动的真实运行时依赖；调用方应使用 {@link #start(String)}。
@@ -113,6 +123,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
         this.applicationContext = applicationContext;
         this.testApi = applicationContext.getBean(TestApiController.class);
         this.sandboxConfiguration = applicationContext.getBean(McpSandboxConfiguration.class);
+        this.dispatchRegistry = applicationContext.getBean(SerialDispatchRegistry.class);
         this.modelSelection = applicationContext.getBean(DashScopeModelSelector.Selection.class);
         this.routingKey = "test:e2e-" + scenario;
         this.startedAt = Instant.now();
@@ -308,18 +319,34 @@ final class RealTeamE2EDriver implements AutoCloseable {
         }
     }
 
-    /** 将项目、Session/Cron 数据与脱敏摘要复制到 target/e2e-evidence。 */
+    /** 将项目、Session/Cron 数据与脱敏成功摘要复制到 target/e2e-evidence。 */
     void saveEvidence() throws Exception {
-        Path project = requireProjectDirectory();
-        copyTree(project, evidenceDirectory.resolve("project"));
+        saveEvidence(null);
+    }
+
+    /**
+     * 在成功或失败路径保存脱敏证据；项目尚未创建时仍写出运行时摘要。
+     *
+     * @param failure 场景失败，可为空
+     * @throws Exception 证据写入失败
+     */
+    void saveEvidence(Throwable failure) throws Exception {
+        Files.createDirectories(evidenceDirectory);
+        Path project = currentProjectDirectory();
+        if (project != null) {
+            copyTree(project, evidenceDirectory.resolve("project"));
+        }
         if (Files.exists(dataDirectory)) {
             copyTree(dataDirectory, evidenceDirectory.resolve("data"));
         }
+        List<JsonNode> eventSnapshot = project == null ? List.of() : events();
+        List<JsonNode> mailSnapshot = project == null ? List.of() : readAvailableMail(project);
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("scenario", scenario);
         summary.put("started_at", startedAt.toString());
         summary.put("completed_at", Instant.now().toString());
-        summary.put("project_id", project.getFileName().toString());
+        summary.put("outcome", failure == null ? "SUCCESS" : "FAILED");
+        summary.put("project_id", project == null ? null : project.getFileName().toString());
         summary.put("routing_key", routingKey);
         summary.put("selected_model", modelSelection.modelName());
         summary.put("model_selection_mode", modelSelection.selectionMode());
@@ -327,7 +354,13 @@ final class RealTeamE2EDriver implements AutoCloseable {
         summary.put("model_selection_attempts", modelSelection.attempts());
         summary.put("session_ids", responses.stream().map(TestResponse::sessionId).toList());
         summary.put("reply_count", responses.size());
-        summary.put("event_actions", events().stream().map(node -> node.path("action").asText()).toList());
+        summary.put("event_actions", eventSnapshot.stream().map(node -> node.path("action").asText()).toList());
+        summary.put("mail_statuses", mailSnapshot.stream().map(node -> Map.of(
+                "id", node.path("id").asText(""),
+                "to", node.path("to").asText(""),
+                "type", node.path("type").asText(""),
+                "status", node.path("status").asText("")
+        )).toList());
         summary.put("mcp_registrations", sandboxConfiguration.registrationStatuses().stream()
                 .map(status -> Map.of(
                         "server", status.serverName(),
@@ -336,9 +369,20 @@ final class RealTeamE2EDriver implements AutoCloseable {
                         "diagnostic", status.diagnostic()
                 )).toList());
         summary.put("called_tools", sandboxConfiguration.calledToolNames());
+        summary.put("mcp_health", sandboxConfiguration.circuitHealth());
+        summary.put("runtime_snapshot", lastRuntimeSnapshot);
+        if (failure != null) {
+            summary.put("failure_type", failure.getClass().getSimpleName());
+            summary.put("failure_message", sanitizeEvidenceText(failure.getMessage()));
+        }
         objectMapper.writerWithDefaultPrettyPrinter().writeValue(
                 evidenceDirectory.resolve("summary.json").toFile(), summary
         );
+        if (failure != null) {
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(
+                    evidenceDirectory.resolve("failure-summary.json").toFile(), summary
+            );
+        }
     }
 
     /** 场景启动后立即保存模型选择，确保后续业务失败仍可审计动态回退结果。 */
@@ -509,20 +553,277 @@ final class RealTeamE2EDriver implements AutoCloseable {
         return project;
     }
 
+    /**
+     * 每轮等待同步采集 workflow、MCP、mailbox 与 dispatch，并对不可恢复故障立即失败。
+     */
+    private void assertRuntimeHealthy() {
+        try {
+            Path project = currentProjectDirectory();
+            List<JsonNode> eventSnapshot = project == null ? List.of() : events();
+            List<JsonNode> mailSnapshot = project == null ? List.of() : readAvailableMail(project);
+            String incident = terminalIncidentReason(eventSnapshot);
+            Map<String, Integer> dispatch = new LinkedHashMap<>();
+            dispatch.put(routingKey, dispatchRegistry.pendingCount(routingKey));
+            for (String role : List.of("manager", "pm", "rd", "qa")) {
+                dispatch.put("team:" + role, dispatchRegistry.pendingCount("team:" + role));
+            }
+            String completionRejection = completionRejectionReason(eventSnapshot, mailSnapshot, dispatch);
+            String protocolDeadEnd = workflowProtocolDeadEndReason(eventSnapshot, mailSnapshot, dispatch);
+            List<Map<String, Object>> mcpHealth = new ArrayList<>();
+            Instant now = Instant.now();
+            for (McpSandboxConfiguration.CircuitHealth health : sandboxConfiguration.circuitHealth()) {
+                String key = health.serverName() + ":" + health.toolName() + ":" + mcpHealth.size();
+                mcpHealth.add(Map.of(
+                        "server", health.serverName(),
+                        "tool", health.toolName(),
+                        "state", health.state().name(),
+                        "failures", health.totalFailures()
+                ));
+                if (health.state() == McpSandboxConfiguration.CircuitState.OPEN) {
+                    Instant openedAt = circuitOpenSince.computeIfAbsent(key, ignored -> now);
+                    if (Duration.between(openedAt, now).compareTo(Duration.ofSeconds(30)) > 0) {
+                        throw new AssertionError("不可恢复 MCP 故障：circuit 持续 OPEN，tool=" + health.toolName());
+                    }
+                } else {
+                    circuitOpenSince.remove(key);
+                }
+            }
+            Map<String, Long> mailboxStatuses = new LinkedHashMap<>();
+            for (String status : List.of("unread", "in_progress", "done")) {
+                mailboxStatuses.put(status, mailSnapshot.stream()
+                        .filter(message -> status.equals(message.path("status").asText()))
+                        .count());
+            }
+            Map<String, Object> snapshot = new LinkedHashMap<>();
+            snapshot.put("event_count", eventSnapshot.size());
+            snapshot.put("mailbox_statuses", mailboxStatuses);
+            snapshot.put("dispatch_accepting", dispatchRegistry.isAccepting());
+            snapshot.put("dispatch_pending", dispatch);
+            snapshot.put("mcp_health", mcpHealth);
+            lastRuntimeSnapshot = Map.copyOf(snapshot);
+            if (incident != null) {
+                throw new AssertionError("不可恢复工具基础设施故障：" + incident);
+            }
+            if (completionRejection != null) {
+                throw new AssertionError("不可恢复工作流完成协议故障：" + completionRejection);
+            }
+            if (protocolDeadEnd != null) {
+                throw new AssertionError("不可恢复工作流完成协议故障：" + protocolDeadEnd);
+            }
+            if (!dispatchRegistry.isAccepting()) {
+                throw new AssertionError("运行时异常停止接纳 dispatch");
+            }
+        } catch (AssertionError failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new AssertionError("读取 E2E 运行时诊断失败：" + failure.getClass().getSimpleName(), failure);
+        }
+    }
+
+    /**
+     * 从事件快照中提取不可重试或 BLOCKED 的工具 incident 直接原因。
+     *
+     * @param eventSnapshot 事件快照
+     * @return 终态故障摘要；不存在时为 null
+     */
+    static String terminalIncidentReason(List<JsonNode> eventSnapshot) {
+        for (int index = eventSnapshot.size() - 1; index >= 0; index--) {
+            JsonNode event = eventSnapshot.get(index);
+            if (!"tool_execution_failed".equals(event.path("action").asText())) {
+                continue;
+            }
+            JsonNode payload = event.path("payload");
+            if (!payload.path("retryable").asBoolean(true)
+                    || "BLOCKED".equals(payload.path("runtime_status").asText())) {
+                return "tool=" + payload.path("tool").asText("unknown")
+                        + ", execution_id=" + payload.path("execution_id").asText("unknown")
+                        + ", failure_type=" + payload.path("failure_type").asText("unknown")
+                        + ", stage=" + payload.path("workflow_stage")
+                                .asText(payload.path("stage").asText("unknown"))
+                        + ", owner=" + payload.path("owner").asText("unknown");
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 识别同一阶段连续完成门禁拒绝且模型回合已结束的确定性协议故障。
+     *
+     * @param eventSnapshot 事件快照
+     * @param mailSnapshot 四角色邮件快照
+     * @param dispatchPending 各路由待处理和执行中任务数
+     * @return 直接协议故障摘要；仍可修正或已经成功回报时为 null
+     */
+    static String completionRejectionReason(
+            List<JsonNode> eventSnapshot,
+            List<JsonNode> mailSnapshot,
+            Map<String, Integer> dispatchPending
+    ) {
+        boolean hasActiveDispatch = dispatchPending.values().stream().anyMatch(count -> count != null && count > 0);
+        if (hasActiveDispatch) {
+            return null;
+        }
+        int latestTransitionIndex = -1;
+        for (int index = eventSnapshot.size() - 1; index >= 0; index--) {
+            if ("workflow_transitioned".equals(eventSnapshot.get(index).path("action").asText())) {
+                latestTransitionIndex = index;
+                break;
+            }
+        }
+        List<JsonNode> rejections = eventSnapshot.subList(latestTransitionIndex + 1, eventSnapshot.size()).stream()
+                .filter(event -> "completion_rejected".equals(event.path("action").asText()))
+                .toList();
+        if (rejections.isEmpty()) {
+            return null;
+        }
+        JsonNode latest = rejections.get(rejections.size() - 1);
+        JsonNode payload = latest.path("payload");
+        String owner = payload.path("role").asText("");
+        String stage = payload.path("workflow_stage").asText("unknown");
+        long matchingRejectionCount = rejections.stream()
+                .map(event -> event.path("payload"))
+                .filter(candidate -> owner.equals(candidate.path("role").asText()))
+                .filter(candidate -> stage.equals(candidate.path("workflow_stage").asText()))
+                .count();
+        if (matchingRejectionCount < 2) {
+            return null;
+        }
+        String rejectionTimestamp = latest.path("ts").asText("");
+        boolean hasNewerCompletion = mailSnapshot.stream()
+                .filter(message -> "task_done".equals(message.path("type").asText()))
+                .filter(message -> owner.equals(message.path("from").asText()))
+                .anyMatch(message -> message.path("timestamp").asText("").compareTo(rejectionTimestamp) >= 0);
+        if (hasNewerCompletion) {
+            return null;
+        }
+        return "stage=" + stage
+                + ", owner=" + owner
+                + ", rejection_count=" + matchingRejectionCount
+                + ", failure_type=" + payload.path("failure_type").asText("unknown")
+                + ", reason=" + payload.path("reason").asText("unknown");
+    }
+
+    /**
+     * 识别当前阶段任务已关闭但完成邮件或后续迁移缺失的静默死锁。
+     *
+     * @param eventSnapshot 事件快照
+     * @param mailSnapshot 四角色邮件快照
+     * @param dispatchPending 各路由待处理和执行中任务数
+     * @return 直接协议故障摘要；尚有工作或未形成死锁时为 null
+     */
+    static String workflowProtocolDeadEndReason(
+            List<JsonNode> eventSnapshot,
+            List<JsonNode> mailSnapshot,
+            Map<String, Integer> dispatchPending
+    ) {
+        boolean hasActiveDispatch = dispatchPending.values().stream().anyMatch(count -> count != null && count > 0);
+        boolean hasOpenMail = mailSnapshot.stream()
+                .map(message -> message.path("status").asText())
+                .anyMatch(status -> "unread".equals(status) || "in_progress".equals(status));
+        if (hasActiveDispatch || hasOpenMail) {
+            return null;
+        }
+        JsonNode transition = null;
+        for (int index = eventSnapshot.size() - 1; index >= 0; index--) {
+            if ("workflow_transitioned".equals(eventSnapshot.get(index).path("action").asText())) {
+                transition = eventSnapshot.get(index);
+                break;
+            }
+        }
+        if (transition == null) {
+            return null;
+        }
+        JsonNode transitionPayload = transition.path("payload");
+        String stage = transitionPayload.path("to_stage").asText("");
+        String owner = transitionPayload.path("assignee").asText("");
+        String subject = transitionPayload.path("subject").asText("");
+        if (stage.isBlank() || owner.isBlank()) {
+            return null;
+        }
+        JsonNode assignment = mailSnapshot.stream()
+                .filter(message -> "task_assign".equals(message.path("type").asText()))
+                .filter(message -> owner.equals(message.path("to").asText()))
+                .filter(message -> stage.equals(message.path("content").path("workflow_stage").asText())
+                        || subject.equals(message.path("subject").asText()))
+                .max(Comparator.comparing(message -> message.path("timestamp").asText("")))
+                .orElse(null);
+        if (assignment == null || !"done".equals(assignment.path("status").asText())) {
+            return null;
+        }
+        String assignmentTimestamp = assignment.path("timestamp").asText("");
+        boolean hasCompletion = mailSnapshot.stream()
+                .filter(message -> "task_done".equals(message.path("type").asText()))
+                .filter(message -> owner.equals(message.path("from").asText()))
+                .anyMatch(message -> message.path("timestamp").asText("").compareTo(assignmentTimestamp) >= 0);
+        String prefix = "stage=" + stage + ", owner=" + owner
+                + ", assignment_id=" + assignment.path("id").asText("unknown");
+        if (!hasCompletion) {
+            return prefix + ", assignment_status=done, task_done_missing=true";
+        }
+        return prefix + ", assignment_status=done, workflow_transition_missing=true";
+    }
+
+    /**
+     * 读取当前已存在的角色 mailbox，并验证 JSON 数组和三态字段。
+     *
+     * @param project 当前项目目录
+     * @return 已存在 mailbox 中的邮件快照
+     * @throws IOException mailbox JSON 读取失败
+     */
+    private List<JsonNode> readAvailableMail(Path project) throws IOException {
+        List<JsonNode> messages = new ArrayList<>();
+        for (String role : List.of("manager", "pm", "rd", "qa")) {
+            Path mailbox = project.resolve("mailboxes").resolve(role + ".json");
+            if (!Files.isRegularFile(mailbox)) {
+                continue;
+            }
+            JsonNode root = objectMapper.readTree(mailbox.toFile());
+            if (!root.isArray()) {
+                throw new IOException("mailbox 不是 JSON 数组: " + role);
+            }
+            root.forEach(message -> {
+                String status = message.path("status").asText();
+                if (!Set.of("unread", "in_progress", "done").contains(status)) {
+                    throw new IllegalStateException("mailbox 状态非法: " + role + ":" + status);
+                }
+                messages.add(message);
+            });
+        }
+        return List.copyOf(messages);
+    }
+
+    /**
+     * 对失败摘要执行凭据脱敏和长度限制。
+     *
+     * @param text 原始错误文本
+     * @return 可写入证据的安全文本
+     */
+    static String sanitizeEvidenceText(String text) {
+        if (text == null) {
+            return "";
+        }
+        String sanitized = text
+                .replaceAll("(?i)(DASHSCOPE_API_KEY|QWEN_API_KEY|authorization)\\s*[:=]\\s*[^\\s,;]+", "$1=[REDACTED]")
+                .replaceAll("(?i)Bearer\\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]");
+        return sanitized.length() <= 4_096 ? sanitized : sanitized.substring(0, 4_096) + "...[TRUNCATED]";
+    }
+
     /** 在给定上限内轮询条件；超时返回 false 供有限重试使用。 */
-    private static boolean waitUpTo(BooleanSupplier condition, Duration timeout) throws InterruptedException {
+    private boolean waitUpTo(BooleanSupplier condition, Duration timeout) throws InterruptedException {
         long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {
+            assertRuntimeHealthy();
             if (condition.getAsBoolean()) {
                 return true;
             }
             TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL.toMillis());
         }
+        assertRuntimeHealthy();
         return condition.getAsBoolean();
     }
 
     /** 在给定上限内等待条件，超时必须失败并标出业务阶段。 */
-    private static void waitUntil(BooleanSupplier condition, Duration timeout, String label) throws Exception {
+    private void waitUntil(BooleanSupplier condition, Duration timeout, String label) throws Exception {
         if (!waitUpTo(condition, timeout)) {
             throw new AssertionError("等待真实 E2E 阶段超时: " + label + "，timeout=" + timeout);
         }

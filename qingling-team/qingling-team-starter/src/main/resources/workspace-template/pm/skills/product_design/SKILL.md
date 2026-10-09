@@ -66,7 +66,7 @@ type: reference
 `send_mail(to="manager", type="task_done", subject="产品设计完成", content={json}, project_id=...)`，content 含 self_score + artifacts。
 
 ### Step 6 — 标 done
-`mark_done(project_id, msg_id)` 标记自己刚处理的 task_assign 已完成。
+`send_mail` 成功后 Java 自动标记自己刚处理的 `task_assign` 已完成；不得提前或单独调用 `mark_done`。
 
 ## 输出（最终 reply 里返回 JSON 串，供 task_callback 解析）
 

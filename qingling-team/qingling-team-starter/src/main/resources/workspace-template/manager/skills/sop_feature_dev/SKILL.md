@@ -59,6 +59,13 @@ kind: sop
 - QA 不得直接给 RD 分派任务。若邮箱中已存在相同轮次的开放修复任务，不得重复发送。
 - 每轮回归报告继续覆盖写入 `qa/test_report.md`；只有最新报告明确全通过且无开放 defect 才能进入交付。
 
+**澄清恢复的唯一协议**：
+- PM、RD 或 QA 用 `clarification_request` 报告当前阶段阻塞时，Manager 负责给出具体、非空、可执行的答复。
+- Manager 只调用 `advance_workflow(project_id=<pid>, signal="clarification_answered", from_role=<请求角色>, task_done_content={}, feedback=<澄清答复>)`；禁止直接发送 `clarification_answer`、`info` 或 `task_assign`。
+- Java 状态机必须保持当前阶段，向该阶段原 Owner 发送唯一的继续任务，并在正文写入 `protocol=clarification_answer`、`resume_current_stage=true`、`clarification_answer=<澄清答复>` 后重新唤醒该角色。
+- `advance_workflow` 成功后才可 `mark_done` 原 `clarification_request`；失败时保留请求为处理中状态并修正调用，禁止丢弃阻塞问题。
+- 原 Owner 收到继续任务后恢复原阶段工作；这不是新阶段，不得重建项目、重做已完成阶段或提前发送成功 `task_done`。
+
 **不要做的事**：
 - 🚫 subject="技术设计与实现" — 这是一条消息做两件事，RD 会漏做实现
 - 🚫 subject="测试设计与执行" — QA 会漏做执行
@@ -99,7 +106,7 @@ QA 的 test_report 到达且所有通过：
 - `send_to_human(routing_key, message, kind, project_id, checkpoint_id)` — Manager 独占
 - `append_event(project_id, action, payload)` — Manager 独占
 - `send_mail(to, type, subject, content, project_id)` / `read_inbox(project_id)` / `mark_done(project_id, msg_id)` — 全角色；`task_assign` 除外
-- `advance_workflow(project_id, signal, from_role, task_done_content, feedback)` — Manager 只提交结论，Java 决定阶段与分派
+- `advance_workflow(project_id, signal, from_role, task_done_content, feedback)` — Manager 只提交结论或 `clarification_answered`，Java 决定阶段与分派
 - `read_shared(project_id, rel_path)` / `write_shared(project_id, rel_path, content)` — 全角色（按 owner 前缀）
 
 ## 硬约束

@@ -6,6 +6,7 @@ import cn.org.chris.wake.adapter.feishu.FeishuWebSocketListener;
 import cn.org.chris.wake.app.cleanup.CleanupService;
 import cn.org.chris.wake.app.cron.CronService;
 import cn.org.chris.wake.app.cron.WakeScheduler;
+import cn.org.chris.wake.app.mailbox.MailboxLeaseWatchdog;
 import cn.org.chris.wake.app.observability.LogQueryService;
 import cn.org.chris.wake.app.runner.InboundAttachmentService;
 import cn.org.chris.wake.app.runner.RoutingKeyResolver;
@@ -400,6 +401,19 @@ public class RuntimeConfiguration {
         return new SerialDispatchRegistry();
     }
 
+    /** 创建 mailbox stale 租约恢复 watchdog，由 RuntimeLifecycle 控制启停。 */
+    @Bean(destroyMethod = "")
+    public MailboxLeaseWatchdog mailboxLeaseWatchdog(
+            MailboxService mailboxService,
+            WorkspaceRepository workspaceRepository,
+            SerialDispatchRegistry dispatchRegistry,
+            WakeScheduler wakeScheduler
+    ) {
+        return new MailboxLeaseWatchdog(
+                mailboxService, workspaceRepository, dispatchRegistry, wakeScheduler
+        );
+    }
+
     /** 创建无状态路由解析器。 */
     @Bean
     public RoutingKeyResolver routingKeyResolver() {
@@ -478,13 +492,16 @@ public class RuntimeConfiguration {
     public RuntimeLifecycle runtimeLifecycle(
             WakeScheduler wakeScheduler,
             CronService cronService,
+            MailboxLeaseWatchdog mailboxLeaseWatchdog,
             SerialDispatchRegistry dispatchRegistry,
             AgentScopeAgentGateway agentGateway,
+            McpSandboxConfiguration sandboxConfiguration,
             ObjectProvider<FeishuWebSocketListener> listenerProvider,
             RuntimeSettings settings
     ) {
         return new RuntimeLifecycle(
-                wakeScheduler, cronService, dispatchRegistry, agentGateway,
+                wakeScheduler, cronService, mailboxLeaseWatchdog, dispatchRegistry, agentGateway,
+                sandboxConfiguration,
                 listenerProvider, settings.properties()
         );
     }

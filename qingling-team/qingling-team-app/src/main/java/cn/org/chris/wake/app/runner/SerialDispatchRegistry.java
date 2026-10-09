@@ -8,9 +8,13 @@ import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
+import java.util.Optional;
+import java.util.Set;
 
 /**
  * 以 routing key 为粒度串行执行异步任务，不同 key 可由执行器并行调度。
@@ -25,6 +29,18 @@ public final class SerialDispatchRegistry {
 
     /** 启动每个异步任务供应器的执行器。 */
     private final Executor executor;
+
+    /** 串行化任务接纳与 mailbox 空闲检查，避免检查后立即接纳任务的竞态。 */
+    private final Object admissionLock = new Object();
+
+    /** 当前是否允许接纳新任务。 */
+    private final AtomicBoolean accepting = new AtomicBoolean(true);
+
+    /** 关闭超时后是否正在取消全部任务，用于阻止排队供应器继续启动。 */
+    private final AtomicBoolean cancelling = new AtomicBoolean();
+
+    /** 已接纳但尚未完成的对外 Future，用于关闭超时后的统一取消。 */
+    private final Set<CompletableFuture<?>> outstandingResults = ConcurrentHashMap.newKeySet();
 
     /**
      * 使用 JVM 公共异步执行器创建注册表。
@@ -60,25 +76,92 @@ public final class SerialDispatchRegistry {
         Objects.requireNonNull(task, "task 不能为空");
         CompletableFuture<T> result = new CompletableFuture<>();
         AtomicReference<CompletableFuture<Void>> newTail = new AtomicReference<>();
-        pendingCounts.computeIfAbsent(routingKey, ignored -> new AtomicInteger()).incrementAndGet();
-        tails.compute(routingKey, (ignored, previous) -> {
-            CompletableFuture<Void> ready = previous == null
-                    ? CompletableFuture.completedFuture(null)
-                    : previous;
-            CompletableFuture<Void> tail = ready.thenComposeAsync(
-                    unused -> invoke(task, result), executor
-            );
-            newTail.set(tail);
-            return tail;
-        });
-        CompletableFuture<Void> tail = newTail.get();
-        tail.whenComplete((unused, failure) -> {
-            tails.remove(routingKey, tail);
-            pendingCounts.computeIfPresent(routingKey, (ignored, count) ->
-                    count.decrementAndGet() == 0 ? null : count
-            );
-        });
+        synchronized (admissionLock) {
+            if (!accepting.get()) {
+                return CompletableFuture.failedFuture(new IllegalStateException("dispatch registry 已停止接纳新任务"));
+            }
+            outstandingResults.add(result);
+            pendingCounts.computeIfAbsent(routingKey, ignored -> new AtomicInteger()).incrementAndGet();
+            tails.compute(routingKey, (ignored, previous) -> {
+                CompletableFuture<Void> ready = previous == null
+                        ? CompletableFuture.completedFuture(null)
+                        : previous;
+                CompletableFuture<Void> tail = ready.thenComposeAsync(
+                        unused -> invoke(task, result), executor
+                );
+                newTail.set(tail);
+                return tail;
+            });
+            CompletableFuture<Void> tail = newTail.get();
+            tail.whenComplete((unused, failure) -> {
+                tails.remove(routingKey, tail);
+                pendingCounts.computeIfPresent(routingKey, (ignored, count) ->
+                        count.decrementAndGet() == 0 ? null : count
+                );
+                outstandingResults.remove(result);
+            });
+        }
         return result;
+    }
+
+    /** 允许运行时启动阶段接纳新任务；重复调用保持幂等。 */
+    public void startAccepting() {
+        synchronized (admissionLock) {
+            cancelling.set(false);
+            accepting.set(true);
+        }
+    }
+
+    /** 停止接纳新任务；已接纳任务仍可在有限时间内排空。 */
+    public void stopAccepting() {
+        synchronized (admissionLock) {
+            accepting.set(false);
+        }
+    }
+
+    /**
+     * 返回是否仍允许接纳新任务。
+     *
+     * @return 接纳开关状态
+     */
+    public boolean isAccepting() {
+        return accepting.get();
+    }
+
+    /**
+     * 取消所有已接纳但未完成的任务，并把取消传播给已经启动的异步 Future。
+     *
+     * @return 实际发出取消的任务数
+     */
+    public int cancelOutstanding() {
+        cancelling.set(true);
+        List<CompletableFuture<?>> snapshot = List.copyOf(outstandingResults);
+        int pending = (int) snapshot.stream().filter(result -> !result.isDone()).count();
+        for (CompletableFuture<?> result : snapshot) {
+            result.cancel(true);
+        }
+        return pending;
+    }
+
+    /**
+     * 仅在指定路由没有运行中或排队任务时执行动作，并阻止检查与动作之间接纳新任务。
+     *
+     * @param routingKey 待检查的路由键
+     * @param action 空闲时执行的动作
+     * @param <T> 动作结果类型
+     * @return 路由忙碌时为空，否则包含动作结果
+     */
+    public <T> Optional<T> executeIfIdle(String routingKey, Supplier<T> action) {
+        if (routingKey == null || routingKey.isBlank()) {
+            throw new IllegalArgumentException("routingKey 不能为空");
+        }
+        Objects.requireNonNull(action, "action 不能为空");
+        synchronized (admissionLock) {
+            if (pendingCount(routingKey) > 0) {
+                return Optional.empty();
+            }
+            return Optional.ofNullable(action.get());
+        }
     }
 
     /**
@@ -125,10 +208,17 @@ public final class SerialDispatchRegistry {
      * @param <T> 结果类型
      * @return 用于串行链接且不会异常完成的尾部
      */
-    private static <T> CompletableFuture<Void> invoke(
+    private <T> CompletableFuture<Void> invoke(
             Supplier<CompletableFuture<T>> task,
             CompletableFuture<T> result
     ) {
+        if (cancelling.get()) {
+            result.cancel(true);
+            return CompletableFuture.completedFuture(null);
+        }
+        if (result.isCancelled()) {
+            return CompletableFuture.completedFuture(null);
+        }
         CompletableFuture<T> execution;
         try {
             execution = Objects.requireNonNull(task.get(), "task Future 不能为空");
@@ -136,6 +226,11 @@ public final class SerialDispatchRegistry {
             result.completeExceptionally(failure);
             return CompletableFuture.completedFuture(null);
         }
+        result.whenComplete((unused, failure) -> {
+            if (result.isCancelled()) {
+                execution.cancel(true);
+            }
+        });
         return execution.handle((value, failure) -> {
             if (failure == null) {
                 result.complete(value);

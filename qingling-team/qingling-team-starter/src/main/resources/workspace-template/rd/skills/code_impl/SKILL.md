@@ -76,15 +76,24 @@ send_mail(
   to="manager", type="task_done",
   subject="代码实现完成",
   content={
+    "execution_id": "<run_project_tests.execution_id>",
+    "status": "<run_project_tests.status>",
+    "exit_code": 0,
+    "pytest_collected": "<run_project_tests.pytest_collected>",
+    "pytest_passed": "<run_project_tests.pytest_passed>",
+    "coverage_percent": "<run_project_tests.coverage_percent>",
+    "failure_type": "<run_project_tests.failure_type>",
+    "retryable": "<run_project_tests.retryable>",
     "artifacts": ["code/main.py", "code/tests/...", "code/requirements.txt"],
-    "metrics": {"pytest_final_status": "pass", "pytest_attempts": N, "coverage": 0.XX, "loc": ...},
+    "metrics": {"pytest_final_status": "pass", "pytest_attempts": N, "loc": ...},
     "self_score": 0.XX, "breakdown": {...},
     "rationale": "..."
   },
   project_id=pid,
 )
-mark_done(pid, <task_assign_msg_id>)
 ```
+
+`send_mail` 成功后 Java 会自动把对应 `task_assign` 标记为 `done`；不得在门禁失败后单独调用 `mark_done`。
 
 ## 输出
 
@@ -92,7 +101,15 @@ mark_done(pid, <task_assign_msg_id>)
 {
   "status": "success",
   "artifacts": [{"path": "code/main.py", "kind": "code"}, ...],
-  "metrics": {"pytest_final_status": "pass", "pytest_attempts": 1, "coverage": 0.87, "loc_total": 420, "loc_test": 180},
+  "execution_id": "test-run-...",
+  "status": "PASSED",
+  "exit_code": 0,
+  "pytest_collected": 12,
+  "pytest_passed": 12,
+  "coverage_percent": 87.0,
+  "failure_type": "NONE",
+  "retryable": false,
+  "metrics": {"pytest_final_status": "pass", "pytest_attempts": 1, "loc_total": 420, "loc_test": 180},
   "self_score": 0.88,
   "breakdown": {"completeness": 1.0, "self_review": 0.95, "hard_constraints": 1.0, "clarity": 0.7, "timeliness": 0.85}
 }

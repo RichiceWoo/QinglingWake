@@ -50,6 +50,8 @@
 | 2026-10-01 | diagnose | Java 门禁修复后第 2 次干净 happy-path 未通过 | 确定性 wake 生效；真实完成 PM、产品评审、技术方案并由 Java 状态机执行 `TECH_DESIGN → CODE_IMPLEMENTATION`，没有跳过 RD 代码。RD 生成 Python 项目后 pytest 在收集阶段失败，完成硬门禁拒绝了无 `exit_code=0`/pytest/coverage 证据的成功回报；其 Agent 调用链随后停留 pending。诊断保存于 `target/e2e-evidence/diagnostics/happy-path-20261001-2030`，无成功 `summary.json`；达到本轮两次上限，不启动第 3 次 |
 | 2026-10-01 | apply/verify | 修复 MCP 已完成结果伪 RUNNING 并强化真实工具契约 | AgentScope 2.0.3 MCP Mono 已完成且有输出时仍可能返回 `RUNNING`，现包装白名单 MCP 工具归一化为 `SUCCESS`，空输出真实 pending 不变；定向 9/9 通过。首次零模型真实工具契约在 Docker healthy、TCP 可达时仍因 MCP 60 秒无响应失败，重启 AIO-Sandbox 后以严格 `SUCCESS` 通过 `177 unit + 1 IT`，证明昂贵 E2E 前必须执行真实工具契约，不能只依赖容器健康检查 |
 | 2026-10-01 | verify | 本轮 Task 18 收尾默认回归通过 | 最终 `mvn verify` 共 177 项通过、六模块全部 SUCCESS，包含确定性 wake、MCP 完成态归一化、Java 阶段状态机、RD/QA 完成硬门禁和修正后的 Manager→RD 缺陷修复 E2E 断言；本轮未启动第 3 次真实模型 E2E，Task 18 保持未完成 |
+| 2026-10-01 | diagnose | 最新 `qwen3-max` 干净 happy-path 暴露澄清恢复协议缺口 | `177 unit + 1` 零模型真实工具契约先行通过。真实流程完成 checkpoint、PM、RD 技术方案并正确进入代码实现；RD 生成应用和测试，pytest 因相对导入失败，硬门禁拒绝虚假成功。heartbeat 后 RD 发送 `clarification_request`，Manager 领取邮件后发现 `clarification_response`/`info` 非法且直接 `task_assign` 被状态机禁止，最终只写说明文档并关闭请求，无法重新唤醒 RD。运行已终止、无遗留 E2E 进程；诊断保存于 `target/e2e-evidence/diagnostics/happy-path-20261001-2119-clarification-dead-end`，无成功 `summary.json`，Task 18 保持未完成 |
+| 2026-10-02 | apply/verify | 增加 Manager 澄清答复的同阶段恢复协议 | 新增 Java `CLARIFICATION_ANSWERED` 信号，固定保持当前阶段并向原 Owner 分派唯一继续任务，正文包含 `protocol=clarification_answer`、`resume_current_stage=true` 与非空答复；阻止 Manager 直接发送 `clarification_answer`。PM/RD/QA 模板仅恢复原阶段，Manager 仅在状态机成功后关闭请求。状态机 6/6、工作流工具 7/7、模板契约 14/14 和默认 `mvn verify` 182 项通过；按用户要求未重跑真实 E2E，Task 18 保持未完成 |
 
 ## 技术决策
 

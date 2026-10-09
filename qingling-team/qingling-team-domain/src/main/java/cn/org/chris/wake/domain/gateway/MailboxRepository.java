@@ -4,6 +4,7 @@ import cn.org.chris.wake.domain.model.MailMessage;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 定义团队邮箱文件存储的并发安全端口。
@@ -29,6 +30,25 @@ public interface MailboxRepository {
      * @return 状态切换后的快照
      */
     List<MailMessage> claimUnread(String projectId, String role);
+
+    /**
+     * 按项目、收件角色和消息标识读取当前持久化快照。
+     *
+     * @param projectId 所属项目标识
+     * @param role 邮箱角色
+     * @param messageId 邮件标识
+     * @return 命中的邮件；不存在时为空
+     */
+    Optional<MailMessage> findById(String projectId, String role, String messageId);
+
+    /**
+     * 查找角色当前全部处于处理中的流水线任务分派。
+     *
+     * @param projectId 所属项目标识
+     * @param role 邮箱角色
+     * @return 当前处理中的全部 task_assign
+     */
+    List<MailMessage> findInProgressTaskAssignments(String projectId, String role);
 
     /**
      * 将指定 in_progress 邮件标记为 done。

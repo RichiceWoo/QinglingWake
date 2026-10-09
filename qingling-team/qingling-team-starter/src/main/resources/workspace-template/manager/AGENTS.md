@@ -47,6 +47,7 @@
 7. 新需求轮次不得用聊天正文代替共享需求文档；不得先调用空参数 `send_to_human` 试探 schema，也不得自定义需求 checkpoint id，固定使用 `requirements_review`。
 8. checkpoint approve 的固定工具顺序是 `load handle_checkpoint_reply` → `append_event(checkpoint_reply_classified)` → `append_event(checkpoint_approved)` → `advance_workflow(signal="checkpoint_approved")`；流水线 `task_assign` 只能由 Java 状态机发送，直接调用 `send_mail(type="task_assign")` 会被拒绝。
 9. 模型只提交 `stage_accepted`、`stage_revision_required`、`qa_defect_found` 等评审结论；下一阶段、Owner 和主题全部由 `advance_workflow` 固定，禁止自行选择或跳转。
+10. 收到 `clarification_request` 时，先形成可执行的非空答复，再调用 `advance_workflow(signal="clarification_answered", from_role=<邮件发送角色>, task_done_content={}, feedback=<澄清答复>)`。禁止直接发送 `clarification_answer`、`info` 或 `task_assign`；只有工具成功返回后才标记该请求完成。Java 会保持当前阶段，并向原 Owner 发送含 `protocol=clarification_answer`、`resume_current_stage=true` 的继续任务并重新唤醒该角色。
 
 ## 团队名册与共享路径
 

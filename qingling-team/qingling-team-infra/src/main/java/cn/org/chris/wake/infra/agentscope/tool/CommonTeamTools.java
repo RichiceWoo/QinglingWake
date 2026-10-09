@@ -100,28 +100,72 @@ public final class CommonTeamTools {
     )
     public String sendMail(
             @ToolParam(name = "to", description = "收件角色：manager/pm/rd/qa") String to,
-            @ToolParam(name = "type", description = "邮件类型，如 task_assign/task_done/review_request") String type,
+            @ToolParam(name = "type", description = "邮件类型，如 task_done/review_request/clarification_request；流水线分派和澄清答复必须走 advance_workflow") String type,
             @ToolParam(name = "subject", description = "一行邮件标题") String subject,
             @ToolParam(name = "content", description = "字符串或结构化 JSON 正文") Object content,
             @ToolParam(name = "project_id", description = "小写项目 ID") String projectId
     ) {
         try {
             String checkedProjectId = AgentToolSupport.requireProjectId(projectId);
+            Object normalizedContent = normalizeTaskDoneContent(type, content);
             if (workflowTools != null) {
-                workflowTools.validateOutgoingMail(checkedProjectId, role, type, content);
+                workflowTools.validateOutgoingMail(checkedProjectId, role, type, normalizedContent);
+            }
+            List<MailMessage> completedAssignments = List.of();
+            if ("task_done".equals(type)) {
+                if (!"manager".equals(to)) {
+                    throw new IllegalStateException("task_done 被拒绝：流水线完成回报必须发送给 manager");
+                }
+                completedAssignments = mailboxService.findInProgressTaskAssignments(checkedProjectId, role);
+                if (completedAssignments.isEmpty()) {
+                    throw new IllegalStateException("task_done 被拒绝：当前角色没有 in_progress task_assign");
+                }
             }
             String messageId = mailboxService.send(
-                    checkedProjectId, to, role, type, subject, content
+                    checkedProjectId, to, role, type, subject, normalizedContent
             );
+            for (MailMessage completedAssignment : completedAssignments) {
+                mailboxService.markDone(checkedProjectId, role, completedAssignment.id());
+            }
             String wakeId = wakeScheduler.schedule(to, checkedProjectId);
-            return AgentToolSupport.success(objectMapper, Map.of(
-                    "msg_id", messageId,
-                    "scheduled_wake", wakeId,
-                    "to", to,
-                    "type", type
-            ));
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("msg_id", messageId);
+            response.put("scheduled_wake", wakeId);
+            response.put("to", to);
+            response.put("type", type);
+            if (!completedAssignments.isEmpty()) {
+                response.put("completed_assignment_id", completedAssignments.get(completedAssignments.size() - 1).id());
+                response.put(
+                        "completed_assignment_ids",
+                        completedAssignments.stream().map(MailMessage::id).toList()
+                );
+            }
+            return AgentToolSupport.success(objectMapper, response);
         } catch (RuntimeException exception) {
             return AgentToolSupport.error(objectMapper, exception);
+        }
+    }
+
+    /**
+     * 将 AgentScope 实际传入的 task_done JSON 字符串恢复为对象，其他正文保持原类型。
+     *
+     * @param type 邮件业务类型
+     * @param content 原始工具入参
+     * @return 可供证据门禁和邮箱共同使用的正文
+     */
+    private Object normalizeTaskDoneContent(String type, Object content) {
+        if (!"task_done".equals(type) || !(content instanceof String text)) {
+            return content;
+        }
+        String trimmed = text.trim();
+        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+            return content;
+        }
+        try {
+            Object parsed = objectMapper.readValue(trimmed, Object.class);
+            return parsed instanceof Map<?, ?> ? parsed : content;
+        } catch (com.fasterxml.jackson.core.JsonProcessingException ignored) {
+            return content;
         }
     }
 
@@ -162,7 +206,7 @@ public final class CommonTeamTools {
      */
     @Tool(
             name = "mark_done",
-            description = "把当前角色收件箱中的一封 in_progress 邮件标记为 done。",
+            description = "把当前角色收件箱中的普通 in_progress 邮件标记为 done；task_assign 仅由成功 task_done 自动完成。",
             concurrencySafe = true
     )
     public String markDone(
@@ -170,12 +214,26 @@ public final class CommonTeamTools {
             @ToolParam(name = "msg_id", description = "待完成的 msg-xxxxxxxx 标识") String messageId
     ) {
         try {
-            mailboxService.markDone(
-                    AgentToolSupport.requireProjectId(projectId), role,
-                    AgentToolSupport.requireText(messageId, "msg_id")
-            );
+            String checkedProjectId = AgentToolSupport.requireProjectId(projectId);
+            String checkedMessageId = AgentToolSupport.requireText(messageId, "msg_id");
+            MailMessage message = mailboxService.findMessage(checkedProjectId, role, checkedMessageId)
+                    .orElseThrow(() -> new IllegalStateException("msg not found: " + checkedMessageId));
+            if ("task_assign".equals(message.type())) {
+                if (message.status().name().equals("DONE")) {
+                    return AgentToolSupport.success(objectMapper, Map.of(
+                            "msg_id", checkedMessageId,
+                            "status", "done",
+                            "already_done", true,
+                            "completion_managed_by", "task_done"
+                    ));
+                }
+                throw new IllegalStateException(
+                        "task_assign 不能单独 mark_done；请先发送通过门禁的 task_done，系统将自动完成原任务"
+                );
+            }
+            mailboxService.markDone(checkedProjectId, role, checkedMessageId);
             return AgentToolSupport.success(objectMapper, Map.of(
-                    "msg_id", messageId,
+                    "msg_id", checkedMessageId,
                     "status", "done"
             ));
         } catch (RuntimeException exception) {

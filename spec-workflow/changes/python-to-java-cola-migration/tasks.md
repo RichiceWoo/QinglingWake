@@ -277,7 +277,7 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：每条都验证产物、mailbox、events、checkpoint、AgentScope session 和最终回复；失败不得只以超时忽略。
 - **验证命令**：`mvn -Pe2e -De2e.scenario=<name> verify`
 
-### 当前进度（2026-10-01）
+### 当前进度（2026-10-02）
 
 - [x] E2E 基础设施、真实百炼模型、真实 AgentScope、真实 Docker AIO-Sandbox 已接通。
 - [x] 修复 Cron 执行旧快照覆盖新 wake，并验证下一角色 wake 能在后续 tick 执行。
@@ -287,7 +287,8 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - [x] 禁用父/子 Harness 内置文件工具；在父 Toolkit 构建期注册白名单 MCP，使声明式 RD/QA Sub-Agent 可继承 `sandbox_execute_bash`；注册失败或工具缺失时启动即脱敏失败。定向 8 项与完整默认 `mvn verify` 161 项通过。
 - [x] 增加 Java 完成证据硬门禁、确定性阶段状态机和 `run_project_tests(project_id)`：RD 缺少 `exit_code=0`/pytest 数量/覆盖率、QA 缺少报告/证据矩阵时不能发送成功 `task_done`；checkpoint、PM、RD、QA、交付的目标阶段与 Owner 由 Java 固定，通用 `append_event` 不能伪造迁移；默认 `mvn verify` 175 项通过。
 - [x] 增加零模型真实工具契约 profile；真实 Docker AIO-Sandbox 健康时，RD/QA 声明式子代理均验证工具清单并执行无副作用 `pwd/test -d`。进一步把 MCP Mono 已完成且有输出的伪 `RUNNING` 归一化为 `SUCCESS`；容器重启后 `177 unit + 1 tool contract` 通过且未调用百炼。
-- [ ] `happy-path`：历史两次显式 `qwen3-max` 失败证据保留；完成工具继承与 Java 门禁后又进行了两次干净验证。修复后第 1 次完成 checkpoint 和 PM，但 RD 的 `new_mail` wake 把 Maven 模块名误作项目标识，诊断保存于 `target/e2e-evidence/diagnostics/happy-path-20261001-2011`。增加确定性 wake 提示后，第 2 次正确完成 PM、产品评审、技术方案和 `TECH_DESIGN → CODE_IMPLEMENTATION`，RD 生成完整 Python 项目并真实执行 pytest；pytest 在收集阶段失败，硬门禁成功拒绝无证据完成，但 RD 调用链随后停留在 pending 状态。诊断保存于 `target/e2e-evidence/diagnostics/happy-path-20261001-2030`。后续确认 AgentScope MCP 在 Mono 完成后仍可能返回伪 `RUNNING`，且 Docker health/nc 正常时 MCP 也可能不响应；现已增加状态归一化、严格 `SUCCESS` 契约并在重启沙盒后通过零模型真实工具验证。本轮已达到用户设定的两次干净验证上限，不启动第 3 次；两次均无 Failsafe 成功和 `summary.json`，Task 18 仍不能标记完成。
+- [x] 增加“Manager 澄清响应 → Java 状态机重新唤醒原 Owner 继续当前阶段”协议：`clarification_answered` 固定保持当前阶段、按阶段固定原 Owner、发送含 `protocol=clarification_answer`、`resume_current_stage=true` 和答复正文的唯一继续任务；空答复、错误 Owner 与绕过状态机的直发答复均被拒绝。模板已规定 Manager 成功推进后才关闭请求，PM/RD/QA 收到继续任务只恢复原阶段。状态机 6/6、工作流工具 7/7、模板契约 14/14，默认 `mvn verify` 182 项通过；本次按用户要求未重跑 E2E。
+- [ ] `happy-path`：最近一次真实运行仍未通过。显式 `qwen3-max` 完成 checkpoint、PM、RD 技术方案并正确执行 `TECH_DESIGN → CODE_IMPLEMENTATION`；RD 生成完整 Python 应用和测试，真实 pytest 暴露相对导入错误，门禁未接受虚假成功。原先无法将澄清答复交回 RD 的缺口现已由上述协议离线覆盖；诊断保存在 `target/e2e-evidence/diagnostics/happy-path-20261001-2119-clarification-dead-end`。该运行无 Failsafe 成功和 `summary.json`，Task 18 仍不能标记完成；下一次从干净目录验证该协议。
 - [ ] `checkpoint-revise`：等待 happy-path 通过后执行。
 - [ ] `qa-defect-rd-fix`：等待 happy-path 通过后执行。
 - [ ] `code-fail-recovery`：等待 happy-path 通过后执行。

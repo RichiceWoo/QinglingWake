@@ -14,7 +14,9 @@ import java.util.Set;
 public final class EventService {
 
     /** 只能由 Java 专用方法写入、禁止通用模型工具伪造的内部动作。 */
-    private static final Set<String> RESERVED_ACTIONS = Set.of("workflow_transitioned");
+    private static final Set<String> RESERVED_ACTIONS = Set.of(
+            "workflow_transitioned", "tool_execution_failed", "completion_rejected"
+    );
 
     /** 与 Python 附录 A.3 一致的固定事件动作。 */
     public static final Set<String> VALID_ACTIONS = Set.of(
@@ -24,7 +26,7 @@ public final class EventService {
             "assigned", "task_done_received", "revision_requested", "rd_delivered",
             "review_criteria_checked", "decided_insert_review", "review_requested", "review_received",
             "delivery_requested", "delivered",
-            "workflow_transitioned", "completion_rejected",
+            "workflow_transitioned", "tool_execution_failed", "completion_rejected",
             "retro_triggered", "retro_report_received", "retro_proposal_invalid",
             "retro_approved_by_manager", "retro_approved_by_human", "retro_rejected_by_human",
             "retro_apply_failed", "task_quality_adjusted", "evolved",
@@ -63,7 +65,7 @@ public final class EventService {
             throw new IllegalArgumentException("unknown action: " + action);
         }
         if (RESERVED_ACTIONS.contains(action)) {
-            throw new IllegalArgumentException("reserved action 只能由 Java 状态机写入: " + action);
+            throw new IllegalArgumentException("reserved action 只能由 Java 专用入口写入: " + action);
         }
         Map<String, Object> safePayload = payload == null ? Map.of() : Map.copyOf(payload);
         return repository.append(projectId, actor, action, safePayload);
@@ -80,6 +82,32 @@ public final class EventService {
         WorkspacePolicy.validateProjectId(projectId);
         Map<String, Object> safePayload = payload == null ? Map.of() : Map.copyOf(payload);
         return repository.append(projectId, "manager", "workflow_transitioned", safePayload);
+    }
+
+    /**
+     * 由 Java 工具边界专用入口追加结构化执行故障，模型不能用 append_event 伪造。
+     *
+     * @param projectId 所属项目
+     * @param payload 已脱敏故障字段
+     * @return 从 1 开始的项目内 seq
+     */
+    public long appendToolExecutionFailed(String projectId, Map<String, Object> payload) {
+        WorkspacePolicy.validateProjectId(projectId);
+        Map<String, Object> safePayload = payload == null ? Map.of() : Map.copyOf(payload);
+        return repository.append(projectId, "manager", "tool_execution_failed", safePayload);
+    }
+
+    /**
+     * 由 Java 完成门禁专用入口记录被拒绝的完成回报，避免模型伪造协议故障。
+     *
+     * @param projectId 所属项目
+     * @param payload 已脱敏的角色、阶段与拒绝原因
+     * @return 从 1 开始的项目内 seq
+     */
+    public long appendCompletionRejected(String projectId, Map<String, Object> payload) {
+        WorkspacePolicy.validateProjectId(projectId);
+        Map<String, Object> safePayload = payload == null ? Map.of() : Map.copyOf(payload);
+        return repository.append(projectId, "manager", "completion_rejected", safePayload);
     }
 
     /**

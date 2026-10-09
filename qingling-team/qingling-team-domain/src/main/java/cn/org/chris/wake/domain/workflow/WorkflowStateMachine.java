@@ -20,6 +20,15 @@ public final class WorkflowStateMachine {
         if (signal == WorkflowSignal.STAGE_REVISION_REQUIRED) {
             return revision(current);
         }
+        if (signal == WorkflowSignal.CLARIFICATION_ANSWERED) {
+            return resumeAfterClarification(current);
+        }
+        if (signal == WorkflowSignal.TOOL_EXECUTION_FAILED) {
+            return recoverAfterToolFailure(current);
+        }
+        if (signal == WorkflowSignal.TOOL_RETRY_EXHAUSTED) {
+            return blockAfterToolFailure(current);
+        }
         return switch (current) {
             case REQUIREMENTS_CHECKPOINT -> requirementsTransition(signal);
             case PRODUCT_DESIGN -> requireSignal(
@@ -126,6 +135,57 @@ public final class WorkflowStateMachine {
             case QA_TEST_EXECUTION -> new WorkflowTransition(current, current, "qa", "测试执行修订");
             case DEFECT_FIX -> new WorkflowTransition(current, current, "rd", "缺陷修复修订");
             default -> throw illegal(current, WorkflowSignal.STAGE_REVISION_REQUIRED);
+        };
+    }
+
+    /**
+     * 将 Manager 的澄清答复固定交回当前阶段原 Owner，且不改变阶段。
+     *
+     * @param current 当前阶段
+     * @return 同阶段继续任务
+     */
+    private static WorkflowTransition resumeAfterClarification(WorkflowStage current) {
+        return switch (current) {
+            case PRODUCT_DESIGN -> new WorkflowTransition(current, current, "pm", "继续产品设计");
+            case TECH_DESIGN -> new WorkflowTransition(current, current, "rd", "继续技术方案设计");
+            case CODE_IMPLEMENTATION -> new WorkflowTransition(current, current, "rd", "继续代码实现");
+            case QA_TEST_DESIGN -> new WorkflowTransition(current, current, "qa", "继续测试设计");
+            case QA_TEST_EXECUTION -> new WorkflowTransition(current, current, "qa", "继续测试执行");
+            case DEFECT_FIX -> new WorkflowTransition(current, current, "rd", "继续缺陷修复");
+            default -> throw illegal(current, WorkflowSignal.CLARIFICATION_ANSWERED);
+        };
+    }
+
+    /**
+     * 工具基础设施首次失败时保持当前业务阶段并重新分派原 Owner。
+     *
+     * @param current 当前业务阶段
+     * @return 同阶段恢复任务
+     */
+    private static WorkflowTransition recoverAfterToolFailure(WorkflowStage current) {
+        return switch (current) {
+            case PRODUCT_DESIGN -> new WorkflowTransition(current, current, "pm", "恢复产品设计工具执行");
+            case TECH_DESIGN -> new WorkflowTransition(current, current, "rd", "恢复技术方案工具执行");
+            case CODE_IMPLEMENTATION -> new WorkflowTransition(current, current, "rd", "恢复代码实现工具执行");
+            case QA_TEST_DESIGN -> new WorkflowTransition(current, current, "qa", "恢复测试设计工具执行");
+            case QA_TEST_EXECUTION -> new WorkflowTransition(current, current, "qa", "恢复测试执行工具执行");
+            case DEFECT_FIX -> new WorkflowTransition(current, current, "rd", "恢复缺陷修复工具执行");
+            default -> throw illegal(current, WorkflowSignal.TOOL_EXECUTION_FAILED);
+        };
+    }
+
+    /**
+     * 工具恢复耗尽时保持当前业务阶段且不再生成下游任务。
+     *
+     * @param current 当前业务阶段
+     * @return 同阶段无分派阻断结果
+     */
+    private static WorkflowTransition blockAfterToolFailure(WorkflowStage current) {
+        return switch (current) {
+            case PRODUCT_DESIGN, TECH_DESIGN, CODE_IMPLEMENTATION,
+                    QA_TEST_DESIGN, QA_TEST_EXECUTION, DEFECT_FIX ->
+                    new WorkflowTransition(current, current, "", "");
+            default -> throw illegal(current, WorkflowSignal.TOOL_RETRY_EXHAUSTED);
         };
     }
 

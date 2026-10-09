@@ -92,15 +92,22 @@ Defect 模板：
 所有 defect 和 QA 契约测试写完后逐个 `read_shared` 回读，报告写完后必须 `read_shared(pid, "qa/test_report.md")` 回读确认。任一正式产物回读失败，或证据矩阵数量校验失败时，不得发送成功状态的 `task_done` 或声称交付完成。
 
 ### Step 5 — 发 task_done
-1. `send_mail(to="manager", type="task_done", subject="测试执行完成", content={...}, project_id=pid)`
+1. `send_mail(to="manager", type="task_done", subject="测试执行完成", content={"execution_id": "<run_project_tests.execution_id>", "status": "<run_project_tests.status>", "exit_code": "<run_project_tests.exit_code>", "pytest_collected": "<run_project_tests.pytest_collected>", "pytest_passed": "<run_project_tests.pytest_passed>", "coverage_percent": "<run_project_tests.coverage_percent>", "failure_type": "<run_project_tests.failure_type>", "retryable": "<run_project_tests.retryable>", ...}, project_id=pid)`
 2. 若有 defect：在上述 `task_done` 正文中携带 `"defects": ["qa/defects/defect_c07.md", ...]`，由 Manager 唯一决定并分派修复任务。
-3. `mark_done(pid, <task_assign_msg_id>)`
+3. `send_mail` 成功后 Java 自动完成对应 `task_assign`；门禁失败时禁止单独调用 `mark_done`。
 
 ## 输出
 
 ```json
 {
   "status": "success",
+  "execution_id": "test-run-...",
+  "exit_code": 1,
+  "pytest_collected": 18,
+  "pytest_passed": 16,
+  "coverage_percent": 78.0,
+  "failure_type": "PYTEST_FAILURE",
+  "retryable": false,
   "artifacts": [{"path": "qa/test_report.md"}, {"path": "qa/defects/defect_c07.md"}, {"path": "qa/defects/defect_c12.md"}],
   "metrics": {"total": 18, "pass": 16, "fail": 2, "coverage": 0.78},
   "self_score": 0.83,

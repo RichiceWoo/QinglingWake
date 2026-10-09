@@ -184,7 +184,7 @@ Spring Boot `no-feishu` 模式启动；TestAPI 通过 CaptureSender 完成一轮
 
 | 场景 | 状态 | 已验证 | 未完成/阻断 |
 |---|---|---|---|
-| `happy-path` | 修复后两次 `qwen3-max` 干净验证仍失败，已停止 | 第 1 次完成 checkpoint 和 PM；第 2 次在确定性 `new_mail` wake 修复后完成 PM、产品评审、技术方案，并由 Java 状态机正确执行 `TECH_DESIGN → CODE_IMPLEMENTATION`；RD 生成 Python 项目并真实调用 pytest，测试失败时完成硬门禁没有接受虚假成功 | 第 1 次 RD 把 Maven 模块名误作项目标识；第 2 次 pytest 收集失败后 RD 调用链停留在 pending。随后发现 MCP 已完成结果可能错误标成 `RUNNING`，以及 Docker health/nc 正常但 MCP 不响应的假健康；状态归一化与严格工具契约已修复并通过，但按本轮两次上限不启动第 3 次。诊断在 `target/e2e-evidence/diagnostics/happy-path-20261001-2011`、`happy-path-20261001-2030`；均无最终 QA、交付、Failsafe 成功和 `summary.json` |
+| `happy-path` | 最新 `qwen3-max` 干净验证失败 | 零模型真实工具契约先行通过；真实流程完成 checkpoint、PM、RD 技术方案并正确进入代码实现。RD 生成完整 Python 应用和测试，MCP 调用正常，pytest 真实暴露导入错误，完成硬门禁没有接受虚假成功；heartbeat 能恢复 RD 并发出澄清请求 | Manager 可领取 `clarification_request`，但协议不接受 `clarification_response`/`info`，直接 `task_assign` 又被状态机禁止；Manager 只写澄清文档并关闭请求，RD 没有收到继续当前阶段的确定性指令，流程停在 `CODE_IMPLEMENTATION`。诊断位于 `target/e2e-evidence/diagnostics/happy-path-20261001-2119-clarification-dead-end`；无 QA、交付、Failsafe 成功和 `summary.json` |
 | `checkpoint-revise` | 未运行 | 驱动与断言已实现 | 等待 happy-path 通过 |
 | `qa-defect-rd-fix` | 未运行 | 驱动与断言已实现 | 等待 happy-path 通过 |
 | `code-fail-recovery` | 未运行 | 驱动与断言已实现 | 等待 happy-path 通过 |
@@ -259,3 +259,5 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 | 2026-10-01 | 重启前零模型真实工具契约 | 失败，不能计为通过 | Docker health 与 8029 TCP 均正常，但 `sandbox_execute_bash` 60 秒内没有 MCP item/terminal 信号，证明容器健康检查不能代表 MCP 工具可用 |
 | 2026-10-01 | 重启 AIO-Sandbox 后 `mvn -Ptool-contract -Dtool.contract.workspace=... verify` | 通过（177 unit + 1 real tool contract） | RD/QA 真实 Docker MCP 无副作用目录探针严格返回 `SUCCESS`；使用 `NoCallModel`，未调用百炼。`qa-defect-rd-fix` 驱动同步断言 Java 状态机的 Manager→RD `DEFECT_FIX` 分派 |
 | 2026-10-01 | 最终默认 `mvn verify` | 通过（177 tests） | 六模块全部 SUCCESS；覆盖确定性 wake、MCP 完成态归一化、Java 工作流状态机、完成证据门禁及更新后的 `qa-defect-rd-fix` 驱动断言。默认 profile 未调用真实模型 |
+| 2026-10-01 | 零模型工具契约 + 最新 `qwen3-max` 干净 `happy-path` | 工具契约通过；真实 E2E 失败，不能计为通过 | `177 unit + 1 real tool contract` 先行通过。真实流程推进至 RD 代码阶段，pytest 因 `main.py` 相对导入在顶层加载时报错；RD heartbeat 恢复并发送澄清请求，但 Manager 没有可用的澄清响应协议把指导重新交给 RD。运行已终止且无遗留 E2E 进程；诊断保存于 `target/e2e-evidence/diagnostics/happy-path-20261001-2119-clarification-dead-end` |
+| 2026-10-02 | `WorkflowStateMachineTest,DeterministicWorkflowToolsTest,WorkspaceTemplateContractTest` + `mvn verify` | 通过（定向 27 tests；默认 182 tests） | 新增 `clarification_answered` 正式协议：Java 保持当前阶段、固定原 Owner、发送唯一的带恢复标识和澄清正文的 `task_assign` 并安排 wake；重复提交复用开放任务。覆盖空答复、错误 Owner、直发 `clarification_answer` 拒绝，以及 PM/RD/QA 模板恢复契约。本次未运行真实 E2E 或调用模型 |

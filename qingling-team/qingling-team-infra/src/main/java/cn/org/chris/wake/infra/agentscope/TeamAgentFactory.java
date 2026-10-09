@@ -147,7 +147,12 @@ public final class TeamAgentFactory {
                 .disableShellTool();
         HarnessAgent.Builder configuredBuilder = sandboxConfiguration.applyTo(builder, toolkit);
         if (sandboxConfiguration.enabled() && Set.of("rd", "qa").contains(role)) {
-            toolkit.registerAgentTool(new ProjectTestAgentTool(toolkit, new com.fasterxml.jackson.databind.ObjectMapper()));
+            toolkit.registerAgentTool(new ProjectTestAgentTool(
+                    toolkit,
+                    new com.fasterxml.jackson.databind.ObjectMapper(),
+                    role,
+                    toolkitFactory::reportToolExecutionFailure
+            ));
         }
         return configuredBuilder.build();
     }

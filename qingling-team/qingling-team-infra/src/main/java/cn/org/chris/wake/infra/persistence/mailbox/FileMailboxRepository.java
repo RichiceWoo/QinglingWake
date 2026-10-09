@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -157,6 +158,42 @@ public final class FileMailboxRepository implements MailboxRepository {
             }
             return List.copyOf(claimed);
         });
+    }
+
+    /**
+     * 在邮箱文件锁内按 ID 读取消息快照，供工具层判定流水线任务能否关闭。
+     *
+     * @param projectId 所属项目标识
+     * @param role 邮箱角色
+     * @param messageId 邮件标识
+     * @return 命中的邮件；不存在时为空
+     */
+    @Override
+    public Optional<MailMessage> findById(String projectId, String role, String messageId) {
+        validateRole(role);
+        Path inbox = inboxPath(projectId, role);
+        return withLockedInbox(inbox, messages -> messages.stream()
+                .filter(message -> messageId.equals(message.get("id")))
+                .findFirst()
+                .map(message -> fromMap(new LinkedHashMap<>(message))));
+    }
+
+    /**
+     * 在邮箱文件锁内查找全部处理中流水线任务，供成功回报一次性收敛恢复任务。
+     *
+     * @param projectId 所属项目标识
+     * @param role 邮箱角色
+     * @return 当前处理中的全部 task_assign
+     */
+    @Override
+    public List<MailMessage> findInProgressTaskAssignments(String projectId, String role) {
+        validateRole(role);
+        Path inbox = inboxPath(projectId, role);
+        return withLockedInbox(inbox, messages -> messages.stream()
+                .filter(message -> "task_assign".equals(message.get("type")))
+                .filter(message -> "in_progress".equals(message.get("status")))
+                .map(message -> fromMap(new LinkedHashMap<>(message)))
+                .toList());
     }
 
     /**

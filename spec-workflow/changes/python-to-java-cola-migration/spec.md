@@ -235,7 +235,7 @@
 | Task 15 日志查询、Metrics 与结构化日志 | 已完成 | app LogQueryService、infra JSONL/Metrics、starter CLI/metrics/logback | stats/tasks/steps/l1/all-agents Python 契约、7 类 Prometheus 指标、50MB×5 滚动 JSONL 与凭据掩码通过；对应命令共 137 项测试 |
 | Task 16 Starter、配置与生命周期装配 | 已完成 | starter Application/Properties/RuntimeConfiguration、YAML 模板、生命周期与路由 Sender | 无飞书 Spring 容器启动、配置 fail-fast、四角色 heartbeat/Cron、Runner 排空与反向关闭通过；对应命令共 140 项测试，未调用真实模型 |
 | Task 17 跨语言契约与无 LLM 集成测试 | 已完成 | `contract-fixtures/generate_contract_fixture.py`、starter contract fixtures/IT、Maven `contract-it` profile | Python 源快照无 `.git`，以目录及 11 个源文件 SHA-256 追溯；140 项单测与 10 项契约/集成测试通过，未调用真实 LLM、飞书或网络 |
-| Task 18 四条真实 E2E | P0 工具链根因及流程防绕过门禁已修复，真实模型场景仍未完成 | `sandbox-docker-compose.yaml`、`E2E.md`、starter `RealTeamE2E`/Driver、模型选择器、Cron/routing/mailbox 修复、Java 工作流状态机、完成证据门禁、`run_project_tests`、MCP 完成态归一化、零模型真实工具契约、Workspace/SOP 模板 | 父/子 Harness 内置文件工具已禁用；声明式 RD/QA Sub-Agent 可继承真实 `sandbox_execute_bash` 与结构化测试包装器。Java 独占阶段迁移并拒绝无测试证据的成功回报；通用事件工具不能伪造迁移；`new_mail` wake 显式携带真实 project_id。默认回归现为 177 项，重启沙盒后的真实 Docker 零模型工具契约 1 项严格返回 `SUCCESS`。本轮两次显式 `qwen3-max` 验证分别暴露 wake 项目标识误判、pytest 收集失败后 MCP pending；均没有成功 `summary.json`。四条真实 E2E 尚未通过，Task 18 保持未完成 |
+| Task 18 四条真实 E2E | P0 工具链根因、流程防绕过门禁及澄清恢复协议已离线修复；等待真实场景复验 | `sandbox-docker-compose.yaml`、`E2E.md`、starter `RealTeamE2E`/Driver、模型选择器、Cron/routing/mailbox 修复、Java 工作流状态机、完成证据门禁、`run_project_tests`、MCP 完成态归一化、零模型真实工具契约、Workspace/SOP 模板 | Java `clarification_answered` 固定保持阶段并重新唤醒原 Owner，任务正文携带答复和恢复标识；空答复、错误 Owner、直发 `clarification_answer` 均被拒绝。状态机、工具与模板回归以及默认 `mvn verify` 182 项通过。本次未重跑 E2E，最近一次真实运行仍无成功 `summary.json`；四条真实 E2E 尚未通过，Task 18 保持未完成 |
 
 ## 12. 审查结论
 

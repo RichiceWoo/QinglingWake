@@ -1,33 +1,38 @@
 package cn.org.chris.wake.infra.agentscope.tool;
 
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
+import cn.org.chris.wake.domain.workflow.WorkflowSignal;
 import cn.org.chris.wake.domain.workflow.WorkflowStage;
+import cn.org.chris.wake.infra.agentscope.ProjectTestExecution;
+import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
 
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * 在 Java 侧校验 RD 与 QA 成功回报的不可绕过证据。
  */
 public final class TaskCompletionEvidenceGate {
 
-    /** 可从字符串覆盖率字段中提取百分比的模式。 */
-    private static final Pattern PERCENT_PATTERN = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*%");
-
     /** 共享项目文件读取端口。 */
     private final WorkspaceRepository workspaceRepository;
+
+    /** 只由真实 run_project_tests 写入的运行时执行证据账本。 */
+    private final ProjectTestExecutionRegistry executionRegistry;
 
     /**
      * 创建任务完成证据门禁。
      *
      * @param workspaceRepository 共享项目文件读取端口
+     * @param executionRegistry 真实测试执行证据账本
      */
-    public TaskCompletionEvidenceGate(WorkspaceRepository workspaceRepository) {
+    public TaskCompletionEvidenceGate(
+            WorkspaceRepository workspaceRepository,
+            ProjectTestExecutionRegistry executionRegistry
+    ) {
         this.workspaceRepository = Objects.requireNonNull(workspaceRepository, "workspaceRepository 不能为空");
+        this.executionRegistry = Objects.requireNonNull(executionRegistry, "executionRegistry 不能为空");
     }
 
     /**
@@ -41,36 +46,62 @@ public final class TaskCompletionEvidenceGate {
     public void validate(String projectId, WorkflowStage stage, String role, Object content) {
         if ((stage == WorkflowStage.CODE_IMPLEMENTATION || stage == WorkflowStage.DEFECT_FIX)
                 && "rd".equals(role)) {
-            validateRd(content);
+            ProjectTestExecution execution = requireRecordedExecution(projectId, stage, role, content);
+            validateRd(execution);
         }
         if (stage == WorkflowStage.QA_TEST_EXECUTION && "qa".equals(role)) {
-            validateQa(projectId);
+            ProjectTestExecution execution = requireRecordedExecution(projectId, stage, role, content);
+            validateQa(projectId, execution);
         }
     }
 
     /**
-     * 要求 RD 提供退出码、pytest 数量和覆盖率三类真实证据。
+     * 在 Manager 推进阶段前校验测试终态与信号语义一致，避免失败结果被当作通过。
      *
-     * @param content task_done 正文
+     * @param projectId 项目标识
+     * @param stage 当前工作流阶段
+     * @param role 当前阶段 Owner
+     * @param content 原始 task_done 结构化正文
+     * @param signal Manager 提交的工作流结论
      */
-    private static void validateRd(Object content) {
-        if (!(content instanceof Map<?, ?> values)) {
-            throw new IllegalStateException("RD task_done 被拒绝：content 必须是结构化 JSON");
+    public void validateTransition(
+            String projectId,
+            WorkflowStage stage,
+            String role,
+            Object content,
+            WorkflowSignal signal
+    ) {
+        validate(projectId, stage, role, content);
+        if (stage != WorkflowStage.QA_TEST_EXECUTION || !"qa".equals(role)) {
+            return;
         }
-        Number exitCode = findNumber(values, "exit_code", "pytest_exit_code");
-        if (exitCode == null || exitCode.intValue() != 0) {
-            throw new IllegalStateException("RD task_done 被拒绝：缺少 exit_code=0 证据");
+        ProjectTestExecution execution = requireRecordedExecution(projectId, stage, role, content);
+        if (signal == WorkflowSignal.STAGE_ACCEPTED
+                && execution.status() != ProjectTestExecution.Status.SUCCEEDED) {
+            throw new IllegalStateException("QA 阶段接受被拒绝：真实测试执行未成功");
         }
-        Number pytestCount = findNumber(
-                values, "pytest_count", "pytest_collected", "pytest_passed",
-                "tests_collected", "tests_passed", "passed"
-        );
-        if (pytestCount == null || pytestCount.intValue() <= 0) {
-            throw new IllegalStateException("RD task_done 被拒绝：缺少大于零的 pytest 数量证据");
+        if (signal == WorkflowSignal.QA_DEFECT_FOUND
+                && execution.status() != ProjectTestExecution.Status.TEST_FAILED) {
+            throw new IllegalStateException("QA 缺陷结论被拒绝：真实测试执行没有 pytest 失败");
         }
-        Double coverage = findCoverage(values);
-        if (coverage == null || coverage < 0D || coverage > 100D) {
-            throw new IllegalStateException("RD task_done 被拒绝：缺少合法覆盖率证据");
+    }
+
+    /**
+     * 要求 RD 引用的真实执行已经成功，并具有有效 pytest 与覆盖率证据。
+     *
+     * @param execution 已与当前项目、角色和阶段绑定的真实执行
+     */
+    private static void validateRd(ProjectTestExecution execution) {
+        if (execution.status() != ProjectTestExecution.Status.SUCCEEDED
+                || execution.exitCode() == null
+                || execution.exitCode() != 0) {
+            throw new IllegalStateException("RD task_done 被拒绝：真实测试执行不是 exit_code=0 的成功终态");
+        }
+        if (execution.pytestCollected() <= 0 || execution.pytestPassed() != execution.pytestCollected()) {
+            throw new IllegalStateException("RD task_done 被拒绝：真实 pytest 未全部通过");
+        }
+        if (execution.coveragePercent() < 0D || execution.coveragePercent() > 100D) {
+            throw new IllegalStateException("RD task_done 被拒绝：真实执行缺少合法覆盖率证据");
         }
     }
 
@@ -78,8 +109,16 @@ public final class TaskCompletionEvidenceGate {
      * 要求 QA 已生成非空报告，并在独立文件或报告正文中提供证据矩阵。
      *
      * @param projectId 项目标识
+     * @param execution 已与当前 QA 阶段绑定的真实执行
      */
-    private void validateQa(String projectId) {
+    private void validateQa(String projectId, ProjectTestExecution execution) {
+        if (execution.status() != ProjectTestExecution.Status.SUCCEEDED
+                && execution.status() != ProjectTestExecution.Status.TEST_FAILED) {
+            throw new IllegalStateException("QA task_done 被拒绝：真实测试执行不是 pytest 终态");
+        }
+        if (execution.pytestCollected() <= 0) {
+            throw new IllegalStateException("QA task_done 被拒绝：真实执行未收集到 pytest 用例");
+        }
         String report = readRequired(projectId, "qa/test_report.md", "QA task_done 被拒绝：缺少 qa/test_report.md");
         boolean inlineMatrix = report.contains("证据矩阵")
                 || report.toLowerCase(Locale.ROOT).contains("evidence matrix");
@@ -87,6 +126,120 @@ public final class TaskCompletionEvidenceGate {
         if (!inlineMatrix && !separateMatrix) {
             throw new IllegalStateException("QA task_done 被拒绝：缺少测试证据矩阵");
         }
+    }
+
+    /**
+     * 解析 task_done 的 execution ID，并逐字段核对真实 Test Runner 终态。
+     *
+     * @param projectId 当前项目
+     * @param stage 当前工作流阶段
+     * @param role 当前任务 Owner
+     * @param content task_done 结构化正文
+     * @return 完全匹配的真实执行终态
+     */
+    private ProjectTestExecution requireRecordedExecution(
+            String projectId,
+            WorkflowStage stage,
+            String role,
+            Object content
+    ) {
+        if (!(content instanceof Map<?, ?> values)) {
+            throw new IllegalStateException(role.toUpperCase(Locale.ROOT)
+                    + " task_done 被拒绝：content 必须是结构化 JSON");
+        }
+        String executionId = findText(values, "execution_id");
+        if (executionId == null || executionId.isBlank()) {
+            throw new IllegalStateException(role.toUpperCase(Locale.ROOT)
+                    + " task_done 被拒绝：缺少 execution_id");
+        }
+        ProjectTestExecution execution = executionRegistry.find(projectId, role, stage, executionId)
+                .map(ProjectTestExecutionRegistry.RecordedExecution::execution)
+                .orElseThrow(() -> new IllegalStateException(role.toUpperCase(Locale.ROOT)
+                        + " task_done 被拒绝：execution_id 不属于当前项目、角色和阶段的真实执行"));
+        assertText(values, "status", execution.status().name());
+        assertNullableInteger(values, "exit_code", execution.exitCode());
+        assertInteger(values, "pytest_collected", execution.pytestCollected());
+        assertInteger(values, "pytest_passed", execution.pytestPassed());
+        assertDouble(values, "coverage_percent", execution.coveragePercent());
+        assertText(values, "failure_type", execution.failureType().name());
+        assertBoolean(values, "retryable", execution.retryable());
+        return execution;
+    }
+
+    /** 校验字符串证据字段与真实执行完全一致。 */
+    private static void assertText(Map<?, ?> values, String key, String expected) {
+        String actual = findText(values, key);
+        if (!expected.equals(actual)) {
+            throw evidenceMismatch(key);
+        }
+    }
+
+    /** 校验可空整数证据字段与真实执行完全一致。 */
+    private static void assertNullableInteger(Map<?, ?> values, String key, Integer expected) {
+        Number actual = findNumber(values, key);
+        if (actual == null || expected == null || actual.intValue() != expected) {
+            throw evidenceMismatch(key);
+        }
+    }
+
+    /** 校验整数证据字段与真实执行完全一致。 */
+    private static void assertInteger(Map<?, ?> values, String key, int expected) {
+        Number actual = findNumber(values, key);
+        if (actual == null || actual.intValue() != expected) {
+            throw evidenceMismatch(key);
+        }
+    }
+
+    /** 校验浮点证据字段与真实执行完全一致。 */
+    private static void assertDouble(Map<?, ?> values, String key, double expected) {
+        Number actual = findNumber(values, key);
+        if (actual == null || Math.abs(actual.doubleValue() - expected) > 0.0001D) {
+            throw evidenceMismatch(key);
+        }
+    }
+
+    /** 校验布尔证据字段与真实执行完全一致。 */
+    private static void assertBoolean(Map<?, ?> values, String key, boolean expected) {
+        Object actual = findValue(values, key);
+        boolean parsed;
+        if (actual instanceof Boolean bool) {
+            parsed = bool;
+        } else if (actual instanceof String text && ("true".equalsIgnoreCase(text)
+                || "false".equalsIgnoreCase(text))) {
+            parsed = Boolean.parseBoolean(text);
+        } else {
+            throw evidenceMismatch(key);
+        }
+        if (parsed != expected) {
+            throw evidenceMismatch(key);
+        }
+    }
+
+    /** 构造不暴露运行时内部值的字段不匹配异常。 */
+    private static IllegalStateException evidenceMismatch(String key) {
+        return new IllegalStateException("task_done 被拒绝：" + key + " 与真实 run_project_tests 结果不一致");
+    }
+
+    /** 递归查找首个候选文本字段。 */
+    private static String findText(Map<?, ?> values, String key) {
+        Object value = findValue(values, key);
+        return value == null ? null : value.toString();
+    }
+
+    /** 递归查找字段值，优先使用当前对象的直接字段。 */
+    private static Object findValue(Map<?, ?> values, String key) {
+        if (values.containsKey(key)) {
+            return values.get(key);
+        }
+        for (Object value : values.values()) {
+            if (value instanceof Map<?, ?> nested) {
+                Object found = findValue(nested, key);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -98,49 +251,10 @@ public final class TaskCompletionEvidenceGate {
      */
     private static Number findNumber(Map<?, ?> values, String... keys) {
         for (String key : keys) {
-            Object value = values.get(key);
+            Object value = findValue(values, key);
             Number number = toNumber(value);
             if (number != null) {
                 return number;
-            }
-        }
-        for (Object value : values.values()) {
-            if (value instanceof Map<?, ?> nested) {
-                Number number = findNumber(nested, keys);
-                if (number != null) {
-                    return number;
-                }
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 递归提取 coverage 或 coverage_percent 字段。
-     *
-     * @param values 待搜索结构
-     * @return 覆盖率百分比；不存在时返回 null
-     */
-    private static Double findCoverage(Map<?, ?> values) {
-        for (String key : List.of("coverage", "coverage_percent", "line_coverage")) {
-            Object value = values.get(key);
-            Number number = toNumber(value);
-            if (number != null) {
-                return number.doubleValue();
-            }
-            if (value instanceof String text) {
-                Matcher matcher = PERCENT_PATTERN.matcher(text);
-                if (matcher.find()) {
-                    return Double.parseDouble(matcher.group(1));
-                }
-            }
-        }
-        for (Object value : values.values()) {
-            if (value instanceof Map<?, ?> nested) {
-                Double coverage = findCoverage(nested);
-                if (coverage != null) {
-                    return coverage;
-                }
             }
         }
         return null;

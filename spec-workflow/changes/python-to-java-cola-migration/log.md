@@ -52,6 +52,9 @@
 | 2026-10-01 | verify | 本轮 Task 18 收尾默认回归通过 | 最终 `mvn verify` 共 177 项通过、六模块全部 SUCCESS，包含确定性 wake、MCP 完成态归一化、Java 阶段状态机、RD/QA 完成硬门禁和修正后的 Manager→RD 缺陷修复 E2E 断言；本轮未启动第 3 次真实模型 E2E，Task 18 保持未完成 |
 | 2026-10-01 | diagnose | 最新 `qwen3-max` 干净 happy-path 暴露澄清恢复协议缺口 | `177 unit + 1` 零模型真实工具契约先行通过。真实流程完成 checkpoint、PM、RD 技术方案并正确进入代码实现；RD 生成应用和测试，pytest 因相对导入失败，硬门禁拒绝虚假成功。heartbeat 后 RD 发送 `clarification_request`，Manager 领取邮件后发现 `clarification_response`/`info` 非法且直接 `task_assign` 被状态机禁止，最终只写说明文档并关闭请求，无法重新唤醒 RD。运行已终止、无遗留 E2E 进程；诊断保存于 `target/e2e-evidence/diagnostics/happy-path-20261001-2119-clarification-dead-end`，无成功 `summary.json`，Task 18 保持未完成 |
 | 2026-10-02 | apply/verify | 增加 Manager 澄清答复的同阶段恢复协议 | 新增 Java `CLARIFICATION_ANSWERED` 信号，固定保持当前阶段并向原 Owner 分派唯一继续任务，正文包含 `protocol=clarification_answer`、`resume_current_stage=true` 与非空答复；阻止 Manager 直接发送 `clarification_answer`。PM/RD/QA 模板仅恢复原阶段，Manager 仅在状态机成功后关闭请求。状态机 6/6、工作流工具 7/7、模板契约 14/14 和默认 `mvn verify` 182 项通过；按用户要求未重跑真实 E2E，Task 18 保持未完成 |
+| 2026-10-11 | apply/verify | 完成 Task 19 迁移收尾与 README | 新增根 README，覆盖项目概览、COLA 架构、团队工作流、运行/部署、配置迁移、数据兼容、AgentScope 2.0.3、外部 AIO-Sandbox、Python Skill 产物、可选 pgvector DDL、升级/回滚、未完全等价项和 27 行迁移证据；starter 增加 Spring Boot repackage。`mvn verify` 六模块 SUCCESS，225 tests、0 failure/error/skipped；可执行 JAR Manifest 入口正确。未运行真实 E2E，Task 18 继续保持未完成 |
+| 2026-10-11 | e2e/fail | Task 18 最新单次 `qwen3.8-flash happy-path` 在 PM Shell 工作目录边界失败 | 先修复 Task 19 repackage 覆盖普通 JAR 导致模板资源不可见的问题，并重新通过默认 225 项和零模型真实 Docker 1 IT。随后严格只执行一次 E2E：checkpoint 正常批准并进入 `PRODUCT_DESIGN/PM`；PM 首次 `sandbox_execute_bash` 使用宿主机模块目录作为容器 working directory，服务端返回目录不存在，当前 MCP 健康层将其计为基础设施失败并打开 circuit。Driver 在 190.2 秒直接失败，未伪装为下游产物超时；未重试或启动后三个场景。脱敏证据在 `target/e2e-evidence/happy-path`，清理后 AIO session=0 且无孤儿进程；Task 18 继续未完成 |
+| 2026-10-12 | apply/verify | 修复 Task 18 最新 cwd 泄漏与熔断误分类，不运行 E2E | `McpSandboxConfiguration` 现在按生产配置将宿主 workspace 与 Maven/AgentScope `user.dir` 归一化到容器 `/workspace`，缺省 cwd 也固定到挂载点；cwd/参数校验错误原样返回但不打开 circuit。定向 15 项、完整 227 项及真实 Docker 1 IT 通过；契约 10 次宿主 cwd Shell、5 次 pytest、一次连接恢复全部成功，AIO session=0 且无孤儿进程。未调用百炼，Task 18 保持未完成 |
 
 ## 技术决策
 
@@ -125,6 +128,7 @@
 | 图片工具名称 | Python 工具名 `Add image to content Local` 含空格 | Java AgentScope 工具名改为 `add_image_to_content_local`，参数 `image_url` 与行为保持兼容 | 满足模型函数名安全格式；避免后续模型 API 拒绝非法名称 |
 | infra 调用邮件唤醒 | Task 9 工具需要调用 app 层 `WakeScheduler`，但 COLA 依赖禁止 infra → app | `CommonTeamTools.MailWakeScheduler` 窄接口由 starter 后续以方法引用注入 | 保持模块依赖方向，Task 16 装配时绑定 `WakeScheduler::scheduleMailWake` |
 | Runner 异常返回 | Python worker 记录错误后吞掉异常 | Java 当前消息 Future 保留异常，串行队列内部吸收异常后继续 | 让 Cron `last_status` 可感知失败；外部消息仍尝试发送统一错误提示 |
+| 部署产物 | Task 16 已有 Spring Boot 入口，但 starter 只生成普通 JAR | Task 19 为 `spring-boot-maven-plugin` 增加 `repackage` 并使用 `exec` classifier，默认 `mvn verify` 同时生成普通主 JAR与含依赖的可执行 JAR | README 的 `java -jar *-exec.jar` 命令有真实产物支撑；普通主 JAR继续用于 Failsafe 类路径，避免 Boot 嵌套布局遮蔽 workspace 模板资源 |
 
 ## 代码质量备忘
 

@@ -98,6 +98,12 @@ public class RuntimeConfiguration {
         requirePositive(properties.agent().maxInputTokens(), "qingling.agent.max-input-tokens");
         requirePositive(properties.agent().maxOutputTokens(), "qingling.agent.max-output-tokens");
         requirePositive(properties.agent().subAgentMaxIterations(), "qingling.agent.sub-agent-max-iterations");
+        requirePositive(properties.agent().asyncToolOffloadTimeout(), "qingling.agent.async-tool-offload-timeout");
+        if (properties.agent().asyncToolOffloadTimeout().compareTo(Duration.ofMinutes(4)) > 0) {
+            throw new IllegalStateException(
+                    "qingling.agent.async-tool-offload-timeout 必须不大于 PT4M，以早于 AgentScope 核心 PT5M 超时卸载"
+            );
+        }
         requirePositive(properties.agent().timeout(), "qingling.agent.timeout");
         requirePositive(properties.debug().replyTimeout(), "qingling.debug.reply-timeout");
         requirePositive(properties.cron().tickInterval(), "qingling.cron.tick-interval");
@@ -118,6 +124,10 @@ public class RuntimeConfiguration {
         }
         if (properties.sandbox().enabled()) {
             requireText(properties.sandbox().url(), "qingling.sandbox.url 未配置");
+            requireText(properties.sandbox().workspaceDir(), "qingling.sandbox.workspace-dir 未配置");
+            if (!Path.of(properties.sandbox().workspaceDir()).normalize().isAbsolute()) {
+                throw new IllegalStateException("qingling.sandbox.workspace-dir 必须是容器内绝对路径");
+            }
             requirePositive(properties.sandbox().timeout(), "qingling.sandbox.timeout");
             requirePositive(properties.sandbox().initializationTimeout(), "qingling.sandbox.initialization-timeout");
             requireNonNegative(properties.sandbox().maxRetries(), "qingling.sandbox.max-retries");
@@ -323,7 +333,8 @@ public class RuntimeConfiguration {
         }
         return McpSandboxConfiguration.streamableHttp(
                 "aio-sandbox", sandbox.url(), sandbox.headers(), Map.of(), sandbox.enabledTools(),
-                sandbox.timeout(), sandbox.initializationTimeout()
+                sandbox.timeout(), sandbox.initializationTimeout(),
+                settings.workspaceRoot(), sandbox.workspaceDir()
         );
     }
 
@@ -361,7 +372,7 @@ public class RuntimeConfiguration {
                 Map.of(),
                 settings.properties().agent().maxIterations(),
                 settings.properties().agent().maxInputTokens(),
-                settings.properties().agent().timeout()
+                settings.properties().agent().asyncToolOffloadTimeout()
         );
         return new AgentScopeAgentGateway(factory.createAll(), memoryIndexer);
     }

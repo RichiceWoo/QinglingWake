@@ -76,7 +76,16 @@ class RealSandboxToolContractIT {
         workspaceRepository.initializeProject("tool-contract");
         Path codeDirectory = workspaceRoot.resolve("shared/projects/tool-contract/code");
         Files.createDirectories(codeDirectory);
-        Files.writeString(codeDirectory.resolve("test_contract.py"), "def test_contract():\n    assert 2 + 2 == 4\n");
+        Files.writeString(codeDirectory.resolve("test_contract.py"),
+                "# 验证 RD 受控回归测试能够在真实沙盒执行。\n"
+                        + "def test_contract():\n    assert 2 + 2 == 4\n");
+        Path qaContractDirectory = workspaceRoot.resolve(
+                "shared/projects/tool-contract/qa/contract_tests"
+        );
+        Files.createDirectories(qaContractDirectory);
+        Files.writeString(qaContractDirectory.resolve("test_contract.py"),
+                "# 验证 QA 独立契约测试使用角色限定的真实沙盒入口。\n"
+                        + "def test_qa_contract():\n    assert 'qa'.upper() == 'QA'\n");
         MailboxService mailbox = new MailboxService(
                 new FileMailboxRepository(workspaceRoot, objectMapper)
         );
@@ -96,7 +105,9 @@ class RealSandboxToolContractIT {
                 Map.of(),
                 List.of("sandbox_execute_bash"),
                 Duration.ofSeconds(60),
-                Duration.ofSeconds(30)
+                Duration.ofSeconds(30),
+                workspaceRoot,
+                "/workspace"
         );
         NoCallModel noCallModel = new NoCallModel();
         TeamAgentFactory factory = new TeamAgentFactory(
@@ -197,9 +208,11 @@ class RealSandboxToolContractIT {
                         "shell-" + role + "-" + index,
                         "sandbox_execute_bash",
                         Map.of(
-                                "cmd", "pwd && test -d /workspace/shared/projects/tool-contract/code "
+                                "cmd", "test \"$(pwd)\" = /workspace "
+                                        + "&& test -d /workspace/shared/projects/tool-contract/code "
                                         + "&& printf '__QINGLING_TOOL_CONTRACT_OK__'",
-                                "timeout", 30
+                                "timeout", 30,
+                                "cwd", System.getProperty("user.dir")
                         )
                 );
                 assertThat(shellResult.getState())

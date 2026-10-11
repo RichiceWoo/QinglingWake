@@ -11,15 +11,21 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ToolSchema;
 import io.agentscope.core.permission.PermissionMode;
 import io.agentscope.core.tool.Tool;
+import io.agentscope.core.tool.ToolCallParam;
 import io.agentscope.core.tool.ToolParam;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
+import io.agentscope.harness.agent.subagent.task.BackgroundTask;
+import io.agentscope.harness.agent.subagent.task.TaskRunSpec;
+import io.agentscope.harness.agent.subagent.task.TaskStatus;
 import io.agentscope.harness.agent.tools.McpServerConfig;
 import io.agentscope.harness.agent.tools.McpServerRegistrationResult;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,11 +37,14 @@ import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 验证四角色 HarnessAgent 的 workspace、Skill、Toolkit 和声明式 Sub-Agent 装配。
@@ -183,6 +192,103 @@ class TeamAgentFactoryTest {
             if (codeSubagent != null) {
                 codeSubagent.close();
             }
+            rd.close();
+        }
+    }
+
+    /** 异步工具卸载阈值不得达到核心五分钟超时，否则父工具先超时会遗留后台子任务。 */
+    @Test
+    void shouldRejectAsyncToolOffloadTimeoutThatCannotBeatCoreTimeout() {
+        assertThatThrownBy(() -> new TeamAgentFactory(
+                new NoCallModel(),
+                toolkitFactory,
+                new RoleSubagentFactory(workspaceRoot),
+                McpSandboxConfiguration.disabled(),
+                Map.of(),
+                30,
+                30_000,
+                Duration.ofMinutes(5)
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("PT4M")
+                .hasMessageContaining("PT5M");
+    }
+
+    /** 清理真实 Harness session 时必须取消 TaskRepository 中仍运行的子任务，不能只清父状态。 */
+    @Test
+    void shouldCancelRealHarnessChildTaskWhenParentSessionIsCleared() {
+        HarnessAgent rd = factory.create("rd");
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(Map.of("rd", rd));
+        RuntimeContext context = RuntimeContext.builder()
+                .userId("team-rd")
+                .sessionId("session-cancel")
+                .put(AgentScopeAgentGateway.ROLE_ATTRIBUTE, "rd")
+                .put(AgentScopeAgentGateway.PROJECT_ID_ATTRIBUTE, "todo-mvp")
+                .build();
+        CompletableFuture<String> childFuture = new CompletableFuture<>();
+        BackgroundTask child = rd.getTaskRepository().putTask(
+                context,
+                "task-cancel",
+                "code_impl",
+                context.getSessionId(),
+                new TaskRunSpec.AdoptedTaskRunSpec(childFuture)
+        );
+
+        try {
+            gateway.clearSession("rd", context.getUserId(), context.getSessionId());
+
+            assertThat(child.getTaskStatus()).isEqualTo(TaskStatus.CANCELLED);
+            assertThat(childFuture).isCancelled();
+        } finally {
+            gateway.close();
+        }
+    }
+
+    /** 即使模型沿用 block=true 和十分钟 timeout，替换后的 task_output 也必须立即返回运行中快照。 */
+    @Test
+    void shouldKeepTaskOutputNonBlockingForLegacyBlockingArguments() {
+        HarnessAgent rd = factory.create("rd");
+        RuntimeContext context = RuntimeContext.builder()
+                .userId("team-rd")
+                .sessionId("session-task-output")
+                .put(AgentScopeAgentGateway.ROLE_ATTRIBUTE, "rd")
+                .build();
+        CompletableFuture<String> childFuture = new CompletableFuture<>();
+        BackgroundTask child = rd.getTaskRepository().putTask(
+                context,
+                "task-running",
+                "code_impl",
+                context.getSessionId(),
+                new TaskRunSpec.AdoptedTaskRunSpec(childFuture)
+        );
+        Map<String, Object> input = Map.of(
+                "task_id", child.getTaskId(),
+                "block", true,
+                "timeout", 600_000L
+        );
+        ToolUseBlock use = new ToolUseBlock(
+                "call-task-output", "task_output", input, "{\"task_id\":\"task-running\"}", Map.of()
+        );
+
+        try {
+            assertThat(rd.getToolkit().getToolSchemas())
+                    .filteredOn(schema -> "task_output".equals(schema.getName()))
+                    .singleElement()
+                    .extracting(ToolSchema::getDescription)
+                    .asString()
+                    .contains("始终非阻塞")
+                    .doesNotContain("default: 30000", "max: 600000");
+            ToolResultBlock result = rd.getToolkit().callTool(ToolCallParam.builder()
+                    .toolUseBlock(use)
+                    .input(input)
+                    .agent(rd)
+                    .runtimeContext(context)
+                    .build()).block(Duration.ofSeconds(1));
+
+            assertThat(result).isNotNull();
+            assertThat(result.getOutput().toString()).contains("task-running");
+            assertThat(childFuture).isNotDone();
+        } finally {
+            childFuture.cancel(true);
             rd.close();
         }
     }

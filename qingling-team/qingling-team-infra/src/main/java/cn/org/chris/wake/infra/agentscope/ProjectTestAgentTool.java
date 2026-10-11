@@ -1,6 +1,7 @@
 package cn.org.chris.wake.infra.agentscope;
 
 import cn.org.chris.wake.domain.workspace.WorkspacePolicy;
+import cn.org.chris.wake.domain.workflow.WorkflowStage;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.message.ToolResultBlock;
@@ -56,6 +57,12 @@ public final class ProjectTestAgentTool implements AgentTool {
     /** Java 工作流 incident 上报器。 */
     private final ToolFailureReporter failureReporter;
 
+    /** 将最终测试结果登记到 Java 运行时证据账本的观察器。 */
+    private final ProjectTestExecutionObserver executionObserver;
+
+    /** 在工具启动瞬间解析 Java 工作流阶段，避免异步完成后发生阶段漂移。 */
+    private final ExecutionStageResolver executionStageResolver;
+
     /**
      * 创建固定目录的项目测试包装器。
      *
@@ -69,7 +76,9 @@ public final class ProjectTestAgentTool implements AgentTool {
                 DEFAULT_POLL_INTERVAL,
                 DEFAULT_COMPLETION_TIMEOUT,
                 "rd",
-                ToolFailureReporter.NO_OP
+                ToolFailureReporter.NO_OP,
+                ExecutionStageResolver.NO_OP,
+                ProjectTestExecutionObserver.NO_OP
         );
     }
 
@@ -88,12 +97,44 @@ public final class ProjectTestAgentTool implements AgentTool {
             ToolFailureReporter failureReporter
     ) {
         this(
-                new McpProjectTestRunner(toolkit, objectMapper),
+                new McpProjectTestRunner(toolkit, objectMapper, role),
                 objectMapper,
                 DEFAULT_POLL_INTERVAL,
                 DEFAULT_COMPLETION_TIMEOUT,
                 role,
-                failureReporter
+                failureReporter,
+                ExecutionStageResolver.NO_OP,
+                ProjectTestExecutionObserver.NO_OP
+        );
+    }
+
+    /**
+     * 创建同时接入 Java incident 与真实执行证据登记的生产测试工具。
+     *
+     * @param toolkit 已包含可恢复 sandbox_execute_bash 的父 Toolkit
+     * @param objectMapper JSON 编解码器
+     * @param role rd 或 qa 当前 Owner
+     * @param failureReporter 工具故障确定性上报器
+     * @param executionStageResolver 调用开始时的 Java 阶段解析器
+     * @param executionObserver 测试终态观察器
+     */
+    public ProjectTestAgentTool(
+            Toolkit toolkit,
+            ObjectMapper objectMapper,
+            String role,
+            ToolFailureReporter failureReporter,
+            ExecutionStageResolver executionStageResolver,
+            ProjectTestExecutionObserver executionObserver
+    ) {
+        this(
+                new McpProjectTestRunner(toolkit, objectMapper, role),
+                objectMapper,
+                DEFAULT_POLL_INTERVAL,
+                DEFAULT_COMPLETION_TIMEOUT,
+                role,
+                failureReporter,
+                executionStageResolver,
+                executionObserver
         );
     }
 
@@ -117,7 +158,9 @@ public final class ProjectTestAgentTool implements AgentTool {
                 pollInterval,
                 completionTimeout,
                 "rd",
-                ToolFailureReporter.NO_OP
+                ToolFailureReporter.NO_OP,
+                ExecutionStageResolver.NO_OP,
+                ProjectTestExecutionObserver.NO_OP
         );
     }
 
@@ -139,12 +182,82 @@ public final class ProjectTestAgentTool implements AgentTool {
             String role,
             ToolFailureReporter failureReporter
     ) {
+        this(
+                testRunner,
+                objectMapper,
+                pollInterval,
+                completionTimeout,
+                role,
+                failureReporter,
+                ExecutionStageResolver.NO_OP,
+                ProjectTestExecutionObserver.NO_OP
+        );
+    }
+
+    /**
+     * 创建保留旧测试调用面的 incident 与证据登记包装器；未提供阶段解析器时阶段为空。
+     *
+     * @param testRunner 可查询 Test Runner
+     * @param objectMapper JSON 编解码器
+     * @param pollInterval 轮询间隔
+     * @param completionTimeout 完成上限
+     * @param role 当前工作流 Owner
+     * @param failureReporter 故障上报器
+     * @param executionObserver 测试终态观察器
+     */
+    ProjectTestAgentTool(
+            ProjectTestRunner testRunner,
+            ObjectMapper objectMapper,
+            Duration pollInterval,
+            Duration completionTimeout,
+            String role,
+            ToolFailureReporter failureReporter,
+            ProjectTestExecutionObserver executionObserver
+    ) {
+        this(
+                testRunner,
+                objectMapper,
+                pollInterval,
+                completionTimeout,
+                role,
+                failureReporter,
+                ExecutionStageResolver.NO_OP,
+                executionObserver
+        );
+    }
+
+    /**
+     * 创建可完全注入恢复、incident 和证据登记行为的测试包装器。
+     *
+     * @param testRunner 可查询 Test Runner
+     * @param objectMapper JSON 编解码器
+     * @param pollInterval 轮询间隔
+     * @param completionTimeout 完成上限
+     * @param role 当前工作流 Owner
+     * @param failureReporter 故障上报器
+     * @param executionStageResolver 调用开始时的阶段解析器
+     * @param executionObserver 测试终态观察器
+     */
+    ProjectTestAgentTool(
+            ProjectTestRunner testRunner,
+            ObjectMapper objectMapper,
+            Duration pollInterval,
+            Duration completionTimeout,
+            String role,
+            ToolFailureReporter failureReporter,
+            ExecutionStageResolver executionStageResolver,
+            ProjectTestExecutionObserver executionObserver
+    ) {
         this.testRunner = Objects.requireNonNull(testRunner, "testRunner 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
         this.pollInterval = requirePositive(pollInterval, "pollInterval");
         this.completionTimeout = requirePositive(completionTimeout, "completionTimeout");
         this.role = Objects.requireNonNull(role, "role 不能为空");
         this.failureReporter = Objects.requireNonNull(failureReporter, "failureReporter 不能为空");
+        this.executionStageResolver = Objects.requireNonNull(
+                executionStageResolver, "executionStageResolver 不能为空"
+        );
+        this.executionObserver = Objects.requireNonNull(executionObserver, "executionObserver 不能为空");
     }
 
     /** 返回结构化工具名。 */
@@ -183,10 +296,17 @@ public final class ProjectTestAgentTool implements AgentTool {
         String executionId = UUID.randomUUID().toString();
         try {
             String projectId = WorkspacePolicy.validateProjectId(text(param.getInput().get("project_id")));
+            validateInheritedContext(param, projectId);
+            WorkflowStage executionStage = executionStageResolver.resolve(projectId, role);
             Semaphore permit = PROJECT_PERMITS.computeIfAbsent(projectId, ignored -> new Semaphore(1));
             return acquire(permit).flatMap(acquired -> executeWithSingleRecovery(executionId, projectId)
+                    .doOnNext(execution -> observeExecution(projectId, executionStage, execution))
                     .map(this::structuredResult)
-                    .onErrorResume(failure -> Mono.just(structuredResult(infrastructureFailure(executionId, false))))
+                    .onErrorResume(failure -> {
+                        ProjectTestExecution terminal = terminalFailure(executionId, failure);
+                        observeExecution(projectId, executionStage, terminal);
+                        return Mono.just(structuredResult(terminal));
+                    })
                     .doFinally(ignored -> acquired.release()));
         } catch (RuntimeException exception) {
             return Mono.just(structuredResult(infrastructureFailure(executionId, false)));
@@ -203,15 +323,36 @@ public final class ProjectTestAgentTool implements AgentTool {
     private Mono<ProjectTestExecution> executeWithSingleRecovery(String executionId, String projectId) {
         return executeOnce(executionId, projectId)
                 .onErrorResume(firstFailure -> {
-                    reportFailure(projectId, executionId, true, 1);
-                    return testRunner.recoverConnection().flatMap(recovered -> {
+                    ProjectTestExecution.FailureType firstFailureType = failureType(firstFailure);
+                    reportFailure(projectId, executionId, firstFailureType, true, 1);
+                    return testRunner.recoverConnection().onErrorReturn(false).flatMap(recovered -> {
                         if (!recovered) {
-                            reportFailure(projectId, executionId, false, 2);
+                            reportFailure(projectId, executionId, firstFailureType, false, 2);
                             return Mono.error(firstFailure);
                         }
                         return executeOnce(executionId, projectId)
+                                .flatMap(secondExecution -> {
+                                    if (secondExecution.status() == ProjectTestExecution.Status.SUCCEEDED
+                                            || secondExecution.status() == ProjectTestExecution.Status.TEST_FAILED) {
+                                        return Mono.just(secondExecution);
+                                    }
+                                    reportFailure(
+                                            projectId,
+                                            executionId,
+                                            secondExecution.failureType(),
+                                            false,
+                                            2
+                                    );
+                                    return Mono.just(withoutRetry(secondExecution));
+                                })
                                 .onErrorResume(secondFailure -> {
-                                    reportFailure(projectId, executionId, false, 2);
+                                    reportFailure(
+                                            projectId,
+                                            executionId,
+                                            failureType(secondFailure),
+                                            false,
+                                            2
+                                    );
                                     return Mono.error(secondFailure);
                                 });
                     });
@@ -219,21 +360,49 @@ public final class ProjectTestAgentTool implements AgentTool {
     }
 
     /**
+     * 把连接恢复后查到的非业务终态固化为不可重试结果，确保状态机进入 BLOCKED。
+     *
+     * @param execution 恢复后查询到的基础设施或取消终态
+     * @return retryable 固定为 false 的同一执行结果
+     */
+    private static ProjectTestExecution withoutRetry(ProjectTestExecution execution) {
+        return new ProjectTestExecution(
+                execution.executionId(),
+                execution.status(),
+                execution.exitCode(),
+                execution.pytestCollected(),
+                execution.pytestPassed(),
+                execution.coveragePercent(),
+                execution.failureType(),
+                false,
+                execution.stdout(),
+                execution.stderr()
+        );
+    }
+
+    /**
      * 上报不含命令、输出或凭据的结构化工具 incident；上报失败不覆盖原工具结果。
      *
      * @param projectId 项目标识
      * @param executionId 稳定执行标识
+     * @param failureType 结构化失败分类
      * @param retryable 是否仍可恢复
      * @param attempt 尝试序号
      */
-    private void reportFailure(String projectId, String executionId, boolean retryable, int attempt) {
+    private void reportFailure(
+            String projectId,
+            String executionId,
+            ProjectTestExecution.FailureType failureType,
+            boolean retryable,
+            int attempt
+    ) {
         try {
             failureReporter.report(
                     projectId,
                     role,
                     TOOL_NAME,
                     executionId,
-                    ProjectTestExecution.FailureType.MCP_TRANSPORT.name(),
+                    failureType.name(),
                     retryable,
                     attempt
             );
@@ -252,10 +421,69 @@ public final class ProjectTestAgentTool implements AgentTool {
     private Mono<ProjectTestExecution> executeOnce(String executionId, String projectId) {
         return testRunner.start(executionId, projectId)
                 .flatMap(started -> awaitTerminal(executionId, started, Instant.now().plus(completionTimeout)))
-                .flatMap(execution -> execution.status() == ProjectTestExecution.Status.INFRASTRUCTURE_FAILED
-                        && execution.retryable()
-                        ? Mono.error(new RecoverableExecutionException())
+                .flatMap(execution -> execution.retryable()
+                        && execution.status() != ProjectTestExecution.Status.SUCCEEDED
+                        && execution.status() != ProjectTestExecution.Status.TEST_FAILED
+                        ? Mono.error(new RecoverableExecutionException(execution))
                         : Mono.just(execution));
+    }
+
+    /**
+     * 从内部恢复信号提取真实失败类型，未知异常统一归类为 MCP 传输失败。
+     *
+     * @param failure Test Runner 或 MCP 异常
+     * @return 稳定失败分类
+     */
+    private static ProjectTestExecution.FailureType failureType(Throwable failure) {
+        if (failure instanceof RecoverableExecutionException recoverable) {
+            return recoverable.execution().failureType();
+        }
+        return ProjectTestExecution.FailureType.MCP_TRANSPORT;
+    }
+
+    /**
+     * 保留 Test Runner 已知终态并关闭重试标记；未知异常才归一为传输失败。
+     *
+     * @param executionId 稳定执行标识
+     * @param failure 最终未恢复异常
+     * @return 可安全返回模型的不可重试终态
+     */
+    private static ProjectTestExecution terminalFailure(String executionId, Throwable failure) {
+        if (failure instanceof RecoverableExecutionException recoverable) {
+            ProjectTestExecution execution = recoverable.execution();
+            return new ProjectTestExecution(
+                    execution.executionId(),
+                    execution.status(),
+                    execution.exitCode(),
+                    execution.pytestCollected(),
+                    execution.pytestPassed(),
+                    execution.coveragePercent(),
+                    execution.failureType(),
+                    false,
+                    execution.stdout(),
+                    execution.stderr()
+            );
+        }
+        return infrastructureFailure(executionId, false);
+    }
+
+    /**
+     * 旁路登记测试终态；证据账本异常不能覆盖原始工具结果。
+     *
+     * @param projectId 项目标识
+     * @param executionStage 工具开始时的工作流阶段
+     * @param execution 最终执行结果
+     */
+    private void observeExecution(
+            String projectId,
+            WorkflowStage executionStage,
+            ProjectTestExecution execution
+    ) {
+        try {
+            executionObserver.record(projectId, role, executionStage, execution);
+        } catch (RuntimeException ignored) {
+            // 证据观察器故障由完成门禁安全拒绝，不能把真实测试结果篡改成另一类异常。
+        }
     }
 
     /**
@@ -289,18 +517,24 @@ public final class ProjectTestAgentTool implements AgentTool {
             return Mono.just(current);
         }
         if (!Instant.now().isBefore(deadline)) {
-            return testRunner.cancel(executionId).map(cancelled -> new ProjectTestExecution(
-                    executionId,
-                    ProjectTestExecution.Status.TIMED_OUT,
-                    cancelled.exitCode(),
-                    cancelled.pytestCollected(),
-                    cancelled.pytestPassed(),
-                    cancelled.coveragePercent(),
-                    ProjectTestExecution.FailureType.COMMAND_TIMEOUT,
-                    true,
-                    cancelled.stdout(),
-                    cancelled.stderr()
-            ));
+            return testRunner.cancel(executionId).map(cancelled -> {
+                if (cancelled.status() == ProjectTestExecution.Status.SUCCEEDED
+                        || cancelled.status() == ProjectTestExecution.Status.TEST_FAILED) {
+                    return cancelled;
+                }
+                return new ProjectTestExecution(
+                        executionId,
+                        ProjectTestExecution.Status.TIMED_OUT,
+                        cancelled.exitCode(),
+                        cancelled.pytestCollected(),
+                        cancelled.pytestPassed(),
+                        cancelled.coveragePercent(),
+                        ProjectTestExecution.FailureType.COMMAND_TIMEOUT,
+                        true,
+                        cancelled.stdout(),
+                        cancelled.stderr()
+                );
+            });
         }
         return Mono.delay(pollInterval)
                 .then(testRunner.query(executionId))
@@ -368,6 +602,31 @@ public final class ProjectTestAgentTool implements AgentTool {
     }
 
     /**
+     * 校验 AgentScope 从父 Agent 传给 Sub-Agent 的项目和角色上下文与工具参数一致。
+     *
+     * @param param AgentScope 工具调用上下文
+     * @param projectId 已校验工具项目参数
+     */
+    private void validateInheritedContext(ToolCallParam param, String projectId) {
+        if (param.getRuntimeContext() == null) {
+            return;
+        }
+        String inheritedProjectId = param.getRuntimeContext().get(
+                AgentScopeAgentGateway.PROJECT_ID_ATTRIBUTE, String.class
+        );
+        if (inheritedProjectId != null && !inheritedProjectId.isBlank()
+                && !projectId.equals(inheritedProjectId)) {
+            throw new IllegalArgumentException("run_project_tests project_id 与父任务执行上下文不一致");
+        }
+        String inheritedRole = param.getRuntimeContext().get(
+                AgentScopeAgentGateway.ROLE_ATTRIBUTE, String.class
+        );
+        if (inheritedRole != null && !inheritedRole.isBlank() && !role.equals(inheritedRole)) {
+            throw new IllegalArgumentException("run_project_tests role 与父任务执行上下文不一致");
+        }
+    }
+
+    /**
      * 校验持续时间为正数。
      *
      * @param value 待校验持续时间
@@ -385,9 +644,22 @@ public final class ProjectTestAgentTool implements AgentTool {
     /** 表示同一 execution ID 尚可在重建连接后安全找回或幂等启动。 */
     private static final class RecoverableExecutionException extends RuntimeException {
 
-        /** 创建不携带底层工具正文的内部恢复信号。 */
-        private RecoverableExecutionException() {
+        /** 触发本次恢复的完整受限执行终态。 */
+        private final ProjectTestExecution execution;
+
+        /**
+         * 创建不携带底层工具正文的内部恢复信号。
+         *
+         * @param execution 触发恢复的执行终态
+         */
+        private RecoverableExecutionException(ProjectTestExecution execution) {
             super("recoverable project test infrastructure failure");
+            this.execution = Objects.requireNonNull(execution, "execution 不能为空");
+        }
+
+        /** 返回触发恢复的受限执行终态。 */
+        private ProjectTestExecution execution() {
+            return execution;
         }
     }
 
@@ -418,5 +690,40 @@ public final class ProjectTestAgentTool implements AgentTool {
                 boolean retryable,
                 int attempt
         );
+    }
+
+    /** 将最终测试执行登记到 Java 运行时证据账本的窄接口。 */
+    @FunctionalInterface
+    public interface ProjectTestExecutionObserver {
+
+        /** 不执行任何登记的默认实现，用于独立工具单测。 */
+        ProjectTestExecutionObserver NO_OP = (projectId, role, stage, execution) -> { };
+
+        /**
+         * 登记一次已经结束的真实测试执行。
+         *
+         * @param projectId 项目标识
+         * @param role 执行角色
+         * @param stage 工具启动时的 Java 工作流阶段
+         * @param execution Test Runner 终态
+         */
+        void record(String projectId, String role, WorkflowStage stage, ProjectTestExecution execution);
+    }
+
+    /** 在测试执行开始时解析并冻结 Java 工作流阶段的窄接口。 */
+    @FunctionalInterface
+    public interface ExecutionStageResolver {
+
+        /** 独立工具测试不绑定状态机阶段。 */
+        ExecutionStageResolver NO_OP = (projectId, role) -> null;
+
+        /**
+         * 解析当前执行所属阶段。
+         *
+         * @param projectId 项目标识
+         * @param role 执行角色
+         * @return 调用开始时的 Java 工作流阶段
+         */
+        WorkflowStage resolve(String projectId, String role);
     }
 }

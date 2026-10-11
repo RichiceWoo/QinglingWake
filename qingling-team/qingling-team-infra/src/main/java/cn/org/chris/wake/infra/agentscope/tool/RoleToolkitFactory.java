@@ -4,6 +4,8 @@ import cn.org.chris.wake.domain.event.EventService;
 import cn.org.chris.wake.domain.gateway.SenderGateway;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
+import cn.org.chris.wake.infra.agentscope.ProjectTestAgentTool;
+import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.tool.Toolkit;
 
@@ -66,6 +68,9 @@ public final class RoleToolkitFactory {
     /** 四角色共享的 Java 确定性流程控制器。 */
     private final DeterministicWorkflowTools workflowTools;
 
+    /** RD/QA 共享的真实项目测试执行证据账本。 */
+    private final ProjectTestExecutionRegistry projectTestExecutionRegistry;
+
     /**
      * 创建角色 Toolkit 工厂。
      *
@@ -93,11 +98,12 @@ public final class RoleToolkitFactory {
         this.senderGateway = senderGateway;
         this.imageAndSearchTools = Objects.requireNonNull(imageAndSearchTools, "imageAndSearchTools 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
+        this.projectTestExecutionRegistry = new ProjectTestExecutionRegistry();
         this.workflowTools = new DeterministicWorkflowTools(
                 eventService,
                 mailboxService,
                 wakeScheduler,
-                new TaskCompletionEvidenceGate(workspaceRepository),
+                new TaskCompletionEvidenceGate(workspaceRepository, projectTestExecutionRegistry),
                 objectMapper
         );
     }
@@ -161,6 +167,32 @@ public final class RoleToolkitFactory {
     ) {
         workflowTools.reportToolExecutionFailure(
                 projectId, role, tool, executionId, failureType, retryable, attempt
+        );
+    }
+
+    /**
+     * 创建与当前工作流状态和证据门禁共享执行账本的受控项目测试工具。
+     *
+     * @param toolkit 已注册原始 AIO-Sandbox 工具的角色 Toolkit
+     * @param role 当前角色，只允许 rd 或 qa
+     * @return 已接入 incident 与真实证据登记的项目测试工具
+     */
+    public ProjectTestAgentTool createProjectTestTool(Toolkit toolkit, String role) {
+        if (!Set.of("rd", "qa").contains(role)) {
+            throw new IllegalArgumentException("run_project_tests 只允许 rd 或 qa 使用");
+        }
+        return new ProjectTestAgentTool(
+                toolkit,
+                objectMapper,
+                role,
+                this::reportToolExecutionFailure,
+                (projectId, owner) -> workflowTools.currentStage(projectId),
+                (projectId, owner, stage, execution) -> projectTestExecutionRegistry.record(
+                        projectId,
+                        owner,
+                        stage,
+                        execution
+                )
         );
     }
 

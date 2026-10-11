@@ -4,6 +4,8 @@ import cn.org.chris.wake.domain.event.EventService;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.MailMessage;
 import cn.org.chris.wake.domain.workflow.WorkflowStage;
+import cn.org.chris.wake.infra.agentscope.ProjectTestExecution;
+import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
 import cn.org.chris.wake.infra.persistence.event.JsonlEventRepository;
 import cn.org.chris.wake.infra.persistence.mailbox.FileMailboxRepository;
 import cn.org.chris.wake.infra.persistence.workspace.FileWorkspaceRepository;
@@ -44,6 +46,9 @@ class DeterministicWorkflowToolsTest {
     /** 真实文件事件服务，用于核对结构化 incident。 */
     private EventService events;
 
+    /** 仅由测试 fixture 模拟真实 Runner 写入的执行证据账本。 */
+    private ProjectTestExecutionRegistry executionRegistry;
+
     /** 已调度 wake 的角色列表。 */
     private final List<String> scheduledRoles = new ArrayList<>();
 
@@ -56,6 +61,7 @@ class DeterministicWorkflowToolsTest {
         workspace.initializeProject("flow-project");
         mailbox = new MailboxService(new FileMailboxRepository(temporaryDirectory, objectMapper));
         events = new EventService(new JsonlEventRepository(temporaryDirectory, objectMapper));
+        executionRegistry = new ProjectTestExecutionRegistry();
         tools = new DeterministicWorkflowTools(
                 events,
                 mailbox,
@@ -63,7 +69,7 @@ class DeterministicWorkflowToolsTest {
                     scheduledRoles.add(role);
                     return "wake-" + role;
                 },
-                new TaskCompletionEvidenceGate(workspace),
+                new TaskCompletionEvidenceGate(workspace, executionRegistry),
                 objectMapper
         );
     }
@@ -109,7 +115,7 @@ class DeterministicWorkflowToolsTest {
 
         assertThat(code.path("to_stage").asText()).isEqualTo("CODE_IMPLEMENTATION");
         assertThat(rejected.path("errcode").asInt()).isEqualTo(1);
-        assertThat(rejected.path("errmsg").asText()).contains("exit_code=0");
+        assertThat(rejected.path("errmsg").asText()).contains("execution_id");
         assertThat(tools.currentStage("flow-project")).isEqualTo(WorkflowStage.CODE_IMPLEMENTATION);
     }
 
@@ -161,29 +167,25 @@ class DeterministicWorkflowToolsTest {
                 Map.of("exit_code", 0, "pytest_passed", 0, "coverage_percent", 88),
                 "flow-project"
         ));
+        ProjectTestExecution rdSuccess = successfulExecution("execution-complete", 12, 88D);
+        executionRegistry.record(
+                "flow-project", "rd", WorkflowStage.CODE_IMPLEMENTATION, rdSuccess
+        );
         JsonNode wrongRecipient = json(rdTools.sendMail(
                 "qa", "task_done", "代码实现完成",
-                Map.of("exit_code", 0, "pytest_passed", 12, "coverage_percent", 88),
+                evidence(rdSuccess),
                 "flow-project"
         ));
         JsonNode prematureDone = json(rdTools.markDone("flow-project", codeAssignment.id()));
         JsonNode accepted = json(rdTools.sendMail(
                 "manager", "task_done", "代码实现完成",
-                objectMapper.writeValueAsString(Map.of(
-                        "execution_id", "execution-complete",
-                        "status", "SUCCEEDED",
-                        "exit_code", 0,
-                        "pytest_passed", 12,
-                        "coverage_percent", 88,
-                        "failure_type", "NONE",
-                        "retryable", false
-                )),
+                objectMapper.writeValueAsString(evidence(rdSuccess)),
                 "flow-project"
         ));
         JsonNode repeatedDone = json(rdTools.markDone("flow-project", codeAssignment.id()));
 
         assertThat(rejected.path("errcode").asInt()).isEqualTo(1);
-        assertThat(rejected.path("errmsg").asText()).contains("pytest");
+        assertThat(rejected.path("errmsg").asText()).contains("execution_id");
         assertThat(wrongRecipient.path("errcode").asInt()).isEqualTo(1);
         assertThat(wrongRecipient.path("errmsg").asText()).contains("必须发送给 manager");
         assertThat(prematureDone.path("errcode").asInt()).isEqualTo(1);
@@ -233,9 +235,13 @@ class DeterministicWorkflowToolsTest {
         tools.advanceWorkflow("flow-project", "stage_accepted", "rd", Map.of(), "");
         MailMessage codeAssignment = mailbox.readInbox("flow-project", "rd").get(0);
         mailbox.markDone("flow-project", "rd", codeAssignment.id());
+        ProjectTestExecution rdSuccess = successfulExecution("rd-code-success", 12, 88D);
+        executionRegistry.record(
+                "flow-project", "rd", WorkflowStage.CODE_IMPLEMENTATION, rdSuccess
+        );
         tools.advanceWorkflow(
                 "flow-project", "stage_accepted", "rd",
-                Map.of("exit_code", 0, "pytest_passed", 12, "coverage_percent", 88), ""
+                evidence(rdSuccess), ""
         );
         MailMessage designAssignment = mailbox.readInbox("flow-project", "qa").get(0);
         mailbox.markDone("flow-project", "qa", designAssignment.id());
@@ -247,14 +253,18 @@ class DeterministicWorkflowToolsTest {
                 objectMapper, tools
         );
         assertThat(tools.currentStage("flow-project")).isEqualTo(WorkflowStage.QA_TEST_EXECUTION);
+        ProjectTestExecution qaSuccess = successfulExecution("qa-contract-success", 6, 91D);
+        executionRegistry.record(
+                "flow-project", "qa", WorkflowStage.QA_TEST_EXECUTION, qaSuccess
+        );
 
         JsonNode rejected = json(qaTools.sendMail(
-                "manager", "task_done", "测试执行完成", Map.of("status", "passed"), "flow-project"
+                "manager", "task_done", "测试执行完成", evidence(qaSuccess), "flow-project"
         ));
         workspace.write("flow-project", "qa", "qa/test_report.md", "# 测试报告\n全部通过\n");
         workspace.write("flow-project", "qa", "qa/evidence_matrix.md", "# 证据矩阵\n| 用例 | 证据 |\n");
         JsonNode accepted = json(qaTools.sendMail(
-                "manager", "task_done", "测试执行完成", Map.of("status", "passed"), "flow-project"
+                "manager", "task_done", "测试执行完成", evidence(qaSuccess), "flow-project"
         ));
 
         assertThat(rejected.path("errcode").asInt())
@@ -394,5 +404,51 @@ class DeterministicWorkflowToolsTest {
      */
     private JsonNode json(String value) throws Exception {
         return objectMapper.readTree(value);
+    }
+
+    /**
+     * 创建 pytest 全绿的真实执行 fixture。
+     *
+     * @param executionId 执行标识
+     * @param testCount 收集并通过的用例数
+     * @param coverage 覆盖率百分比
+     * @return 成功执行终态
+     */
+    private static ProjectTestExecution successfulExecution(
+            String executionId,
+            int testCount,
+            double coverage
+    ) {
+        return new ProjectTestExecution(
+                executionId,
+                ProjectTestExecution.Status.SUCCEEDED,
+                0,
+                testCount,
+                testCount,
+                coverage,
+                ProjectTestExecution.FailureType.NONE,
+                false,
+                "",
+                ""
+        );
+    }
+
+    /**
+     * 把真实执行转换为模型必须原样回传的完成证据。
+     *
+     * @param execution 已登记测试终态
+     * @return 结构化 task_done 证据
+     */
+    private static Map<String, Object> evidence(ProjectTestExecution execution) {
+        return Map.of(
+                "execution_id", execution.executionId(),
+                "status", execution.status().name(),
+                "exit_code", execution.exitCode(),
+                "pytest_collected", execution.pytestCollected(),
+                "pytest_passed", execution.pytestPassed(),
+                "coverage_percent", execution.coveragePercent(),
+                "failure_type", execution.failureType().name(),
+                "retryable", execution.retryable()
+        );
     }
 }

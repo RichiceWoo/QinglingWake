@@ -330,7 +330,13 @@ public final class DeterministicWorkflowTools {
             Map<String, Object> content
     ) {
         if (signal == WorkflowSignal.STAGE_ACCEPTED || signal == WorkflowSignal.QA_DEFECT_FOUND) {
-            completionEvidenceGate.validate(projectId, current, Objects.requireNonNullElse(fromRole, ""), content);
+            completionEvidenceGate.validateTransition(
+                    projectId,
+                    current,
+                    Objects.requireNonNullElse(fromRole, ""),
+                    content,
+                    signal
+            );
         }
     }
 

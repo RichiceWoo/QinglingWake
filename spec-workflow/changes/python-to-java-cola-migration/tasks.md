@@ -288,7 +288,8 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - [x] 增加 Java 完成证据硬门禁、确定性阶段状态机和 `run_project_tests(project_id)`：RD 缺少 `exit_code=0`/pytest 数量/覆盖率、QA 缺少报告/证据矩阵时不能发送成功 `task_done`；checkpoint、PM、RD、QA、交付的目标阶段与 Owner 由 Java 固定，通用 `append_event` 不能伪造迁移；默认 `mvn verify` 175 项通过。
 - [x] 增加零模型真实工具契约 profile；真实 Docker AIO-Sandbox 健康时，RD/QA 声明式子代理均验证工具清单并执行无副作用 `pwd/test -d`。进一步把 MCP Mono 已完成且有输出的伪 `RUNNING` 归一化为 `SUCCESS`；容器重启后 `177 unit + 1 tool contract` 通过且未调用百炼。
 - [x] 增加“Manager 澄清响应 → Java 状态机重新唤醒原 Owner 继续当前阶段”协议：`clarification_answered` 固定保持当前阶段、按阶段固定原 Owner、发送含 `protocol=clarification_answer`、`resume_current_stage=true` 和答复正文的唯一继续任务；空答复、错误 Owner 与绕过状态机的直发答复均被拒绝。模板已规定 Manager 成功推进后才关闭请求，PM/RD/QA 收到继续任务只恢复原阶段。状态机 6/6、工作流工具 7/7、模板契约 14/14，默认 `mvn verify` 182 项通过；本次按用户要求未重跑 E2E。
-- [ ] `happy-path`：最近一次真实运行仍未通过。显式 `qwen3-max` 完成 checkpoint、PM、RD 技术方案并正确执行 `TECH_DESIGN → CODE_IMPLEMENTATION`；RD 生成完整 Python 应用和测试，真实 pytest 暴露相对导入错误，门禁未接受虚假成功。原先无法将澄清答复交回 RD 的缺口现已由上述协议离线覆盖；诊断保存在 `target/e2e-evidence/diagnostics/happy-path-20261001-2119-clarification-dead-end`。该运行无 Failsafe 成功和 `summary.json`，Task 18 仍不能标记完成；下一次从干净目录验证该协议。
+- [ ] `happy-path`：最新一次真实运行仍未通过。2026-10-11 在默认 225 项和零模型真实 Docker 1 IT 通过后，仅运行一次干净的显式 `qwen3.8-flash` 场景；需求 checkpoint 正常完成并迁移到 `PRODUCT_DESIGN/PM`。PM 首次 `sandbox_execute_bash` 把宿主机 `qingling-team-starter` 目录作为容器 working directory，AIO-Sandbox 返回目录不存在；当前 MCP 健康层又把该确定性调用参数错误计为连接故障并将 PM client 的 circuit 置为 OPEN。Driver 在 190.2 秒时报告直接 MCP 根因，未伪装成文件超时。证据在 `target/e2e-evidence/happy-path`；未重试或启动后三个场景，清理后 AIO session=0 且无 pytest/pip/tmux/Maven/Java 残留。Task 18 不能标记完成，下轮前需修复沙盒 working directory 归一化与熔断错误分类。
+- [x] 2026-10-12 离线修复上述最新阻断：MCP Bash 包装器把宿主 workspace 子路径和 Maven/AgentScope `user.dir` 映射到容器 `/workspace`，缺省 cwd 也固定为挂载根；cwd/参数 validation ERROR 不再增加连接失败或打开 circuit，连接异常与取消仍熔断。定向 15 项、`mvn verify` 227 项、零模型真实 Docker 1 IT 均通过；真实契约 10 次 Shell 故意携带宿主 cwd 且实际 `pwd=/workspace`，5 次 pytest 与一次恢复通过。未运行 E2E，`happy-path` 与 Task 18 仍保持未完成。
 - [ ] `checkpoint-revise`：等待 happy-path 通过后执行。
 - [ ] `qa-defect-rd-fix`：等待 happy-path 通过后执行。
 - [ ] `code-fail-recovery`：等待 happy-path 通过后执行。
@@ -303,7 +304,13 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **验收标准**：`mvn verify` 通过；迁移矩阵每行有实现或明确证据；`spec.md` 执行日志与偏差同步。
 - **验证命令**：`mvn verify`
 
-- [ ] 完成
+- [x] 新增项目根 `README.md`，覆盖项目定位、COLA 五模块、四角色端到端工作流、启动/部署、配置迁移、数据兼容、可选 pgvector、升级/回滚、测试入口和未完全等价项。
+- [x] README 明确 AgentScope `2.0.3`、AIO-Sandbox 外部 Docker/Python 依赖，以及 Python Skill/交付产物继续保留的边界。
+- [x] 迁移矩阵 27 行全部给出 Java 实现、AgentScope 替代、外部保留策略或具体测试证据；Task 18 未通过的真实状态没有被文档收尾掩盖。
+- [x] starter 增加 Spring Boot `repackage`，以 `exec` classifier 生成含 `JarLauncher` 和 `QinglingTeamApplication` 入口的可执行 JAR，同时保留普通主 JAR供 Failsafe 使用。
+- [x] 2026-10-11 执行 `mvn verify`：六模块全部 SUCCESS，225 tests，0 failure / 0 error / 0 skipped；未运行真实 E2E、未调用百炼。
+
+- [x] 完成
 
 ---
 

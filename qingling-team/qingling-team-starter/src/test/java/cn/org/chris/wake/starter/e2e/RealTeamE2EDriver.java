@@ -4,6 +4,7 @@ import cn.org.chris.wake.adapter.api.TestApiController;
 import cn.org.chris.wake.adapter.api.dto.TestRequest;
 import cn.org.chris.wake.adapter.api.dto.TestResponse;
 import cn.org.chris.wake.infra.agentscope.McpSandboxConfiguration;
+import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
 import cn.org.chris.wake.starter.QinglingTeamApplication;
 import cn.org.chris.wake.starter.config.DashScopeModelSelector;
@@ -51,6 +52,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 等待文件和事件时的轮询间隔。 */
     private static final Duration POLL_INTERVAL = Duration.ofSeconds(2);
 
+    /** 失败或取消子任务全部终态后允许父 Agent 收尾的短暂窗口。 */
+    private static final Duration TERMINAL_CHILD_DISPATCH_GRACE = Duration.ofSeconds(20);
+
     /** 从 task_done 正文提取 pytest 重试次数。 */
     private static final Pattern PYTEST_ATTEMPTS = Pattern.compile(
             "pytest_attempts[\\\"']?\\s*[:=]\\s*(\\d+)", Pattern.CASE_INSENSITIVE
@@ -83,6 +87,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 提供 E2E 轮询期间的 dispatch 接纳和积压快照。 */
     private final SerialDispatchRegistry dispatchRegistry;
 
+    /** 提供父 Agent 与 Sub-Agent 任务终态的脱敏诊断。 */
+    private final AgentScopeAgentGateway agentGateway;
+
     /** 记录本场景启动时动态选中的免费模型和脱敏探测结果。 */
     private final DashScopeModelSelector.Selection modelSelection;
 
@@ -100,6 +107,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
 
     /** 记录 MCP OPEN 首次观察时间，避免把短暂自动恢复误报为终态故障。 */
     private final Map<String, Instant> circuitOpenSince = new LinkedHashMap<>();
+
+    /** 记录各路由首次观察到失败子任务全部终态的时间，避免瞬时收尾窗口误报。 */
+    private final Map<String, Instant> terminalChildFailureSince = new LinkedHashMap<>();
 
     /** 最近一次轮询采集的脱敏运行时诊断。 */
     private Map<String, Object> lastRuntimeSnapshot = Map.of();
@@ -124,6 +134,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
         this.testApi = applicationContext.getBean(TestApiController.class);
         this.sandboxConfiguration = applicationContext.getBean(McpSandboxConfiguration.class);
         this.dispatchRegistry = applicationContext.getBean(SerialDispatchRegistry.class);
+        this.agentGateway = applicationContext.getBean(AgentScopeAgentGateway.class);
         this.modelSelection = applicationContext.getBean(DashScopeModelSelector.Selection.class);
         this.routingKey = "test:e2e-" + scenario;
         this.startedAt = Instant.now();
@@ -151,25 +162,37 @@ final class RealTeamE2EDriver implements AutoCloseable {
         Files.createDirectories(dataDirectory);
         Files.createDirectories(evidenceDirectory);
 
-        ConfigurableApplicationContext context = new SpringApplicationBuilder(QinglingTeamApplication.class)
-                .web(WebApplicationType.NONE)
-                .run(
-                        "--qingling.workspace.root=" + workspaceRoot,
-                        "--qingling.data-dir=" + dataDirectory,
-                        "--qingling.memory.context-dir=" + dataDirectory.resolve("ctx"),
-                        "--qingling.memory.db-dsn=",
-                        "--qingling.feishu.enabled=false",
-                        "--qingling.debug.test-api-enabled=true",
-                        "--qingling.debug.reply-timeout=30m",
-                        "--qingling.agent.timeout=30m",
-                        "--qingling.sandbox.enabled=true",
-                        "--qingling.sandbox.url=" + sandboxUrl,
-                        "--qingling.sandbox.timeout=10m",
-                        "--qingling.sandbox.initialization-timeout=30s",
-                        "--qingling.cleanup.enabled=false",
-                        "--qingling.cron.heartbeat-interval=10m",
-                        "--qingling.cron.heartbeat-stagger-seconds=600,607,614,621"
-                );
+        Instant startupAt = Instant.now();
+        ConfigurableApplicationContext context;
+        try {
+            context = new SpringApplicationBuilder(QinglingTeamApplication.class)
+                    .web(WebApplicationType.NONE)
+                    .run(
+                            "--qingling.workspace.root=" + workspaceRoot,
+                            "--qingling.data-dir=" + dataDirectory,
+                            "--qingling.memory.context-dir=" + dataDirectory.resolve("ctx"),
+                            "--qingling.memory.db-dsn=",
+                            "--qingling.feishu.enabled=false",
+                            "--qingling.debug.test-api-enabled=true",
+                            "--qingling.debug.reply-timeout=30m",
+                            "--qingling.agent.timeout=30m",
+                            "--qingling.agent.validate-explicit-model=true",
+                            "--qingling.sandbox.enabled=true",
+                            "--qingling.sandbox.url=" + sandboxUrl,
+                            "--qingling.sandbox.timeout=10m",
+                            "--qingling.sandbox.initialization-timeout=30s",
+                            "--qingling.cleanup.enabled=false",
+                            "--qingling.cron.heartbeat-interval=10m",
+                            "--qingling.cron.heartbeat-stagger-seconds=600,607,614,621"
+                    );
+        } catch (RuntimeException | AssertionError startupFailure) {
+            try {
+                saveStartupFailureEvidence(evidenceDirectory, scenario, startupAt, startupFailure);
+            } catch (IOException evidenceFailure) {
+                startupFailure.addSuppressed(evidenceFailure);
+            }
+            throw startupFailure;
+        }
         RealTeamE2EDriver driver = new RealTeamE2EDriver(
                 scenario, workspaceRoot, dataDirectory, evidenceDirectory,
                 context.getBean(ObjectMapper.class), context
@@ -398,6 +421,50 @@ final class RealTeamE2EDriver implements AutoCloseable {
         );
     }
 
+    /**
+     * Spring 运行时尚未构造完成时也保存脱敏失败摘要，避免启动故障没有 E2E 证据。
+     *
+     * @param evidenceDirectory 当前场景证据目录
+     * @param scenario 当前场景名称
+     * @param startedAt 启动尝试时间
+     * @param failure 启动失败
+     * @throws IOException 证据写入失败
+     */
+    static void saveStartupFailureEvidence(
+            Path evidenceDirectory,
+            String scenario,
+            Instant startedAt,
+            Throwable failure
+    ) throws IOException {
+        Files.createDirectories(evidenceDirectory);
+        Throwable root = rootCause(failure);
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("scenario", scenario);
+        summary.put("started_at", startedAt.toString());
+        summary.put("completed_at", Instant.now().toString());
+        summary.put("outcome", "FAILED");
+        summary.put("phase", "startup");
+        summary.put("configured_model", sanitizeEvidenceText(System.getenv("QINGLING_AGENT_MODEL")));
+        summary.put("failure_type", root.getClass().getSimpleName());
+        summary.put("failure_message", sanitizeEvidenceText(root.getMessage()));
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.writerWithDefaultPrettyPrinter().writeValue(
+                evidenceDirectory.resolve("summary.json").toFile(), summary
+        );
+        mapper.writerWithDefaultPrettyPrinter().writeValue(
+                evidenceDirectory.resolve("failure-summary.json").toFile(), summary
+        );
+    }
+
+    /** 返回异常链最深处的直接原因，并对循环 cause 做上限保护。 */
+    private static Throwable rootCause(Throwable failure) {
+        Throwable current = failure;
+        for (int depth = 0; depth < 32 && current.getCause() != null && current.getCause() != current; depth++) {
+            current = current.getCause();
+        }
+        return current;
+    }
+
     /** 关闭 Spring、Cron 和四角色 AgentScope 资源；证据目录保留供审阅。 */
     @Override
     public void close() {
@@ -563,14 +630,27 @@ final class RealTeamE2EDriver implements AutoCloseable {
             List<JsonNode> mailSnapshot = project == null ? List.of() : readAvailableMail(project);
             String incident = terminalIncidentReason(eventSnapshot);
             Map<String, Integer> dispatch = new LinkedHashMap<>();
+            Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates = new LinkedHashMap<>();
             dispatch.put(routingKey, dispatchRegistry.pendingCount(routingKey));
+            dispatchStates.put(routingKey, dispatchRegistry.snapshot(routingKey));
             for (String role : List.of("manager", "pm", "rd", "qa")) {
-                dispatch.put("team:" + role, dispatchRegistry.pendingCount("team:" + role));
+                String teamRoute = "team:" + role;
+                dispatch.put(teamRoute, dispatchRegistry.pendingCount(teamRoute));
+                dispatchStates.put(teamRoute, dispatchRegistry.snapshot(teamRoute));
             }
             String completionRejection = completionRejectionReason(eventSnapshot, mailSnapshot, dispatch);
             String protocolDeadEnd = workflowProtocolDeadEndReason(eventSnapshot, mailSnapshot, dispatch);
             List<Map<String, Object>> mcpHealth = new ArrayList<>();
             Instant now = Instant.now();
+            List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics =
+                    agentGateway.activeExecutionDiagnostics();
+            String hangingDispatch = hangingDispatchReason(
+                    dispatchStates,
+                    agentDiagnostics,
+                    terminalChildFailureSince,
+                    now,
+                    TERMINAL_CHILD_DISPATCH_GRACE
+            );
             for (McpSandboxConfiguration.CircuitHealth health : sandboxConfiguration.circuitHealth()) {
                 String key = health.serverName() + ":" + health.toolName() + ":" + mcpHealth.size();
                 mcpHealth.add(Map.of(
@@ -599,10 +679,15 @@ final class RealTeamE2EDriver implements AutoCloseable {
             snapshot.put("mailbox_statuses", mailboxStatuses);
             snapshot.put("dispatch_accepting", dispatchRegistry.isAccepting());
             snapshot.put("dispatch_pending", dispatch);
+            snapshot.put("dispatch_states", dispatchStateEvidence(dispatchStates));
+            snapshot.put("agentscope_active", agentDiagnosticEvidence(agentDiagnostics));
             snapshot.put("mcp_health", mcpHealth);
             lastRuntimeSnapshot = Map.copyOf(snapshot);
             if (incident != null) {
                 throw new AssertionError("不可恢复工具基础设施故障：" + incident);
+            }
+            if (hangingDispatch != null) {
+                throw new AssertionError("不可恢复 AgentScope dispatch 悬挂：" + hangingDispatch);
             }
             if (completionRejection != null) {
                 throw new AssertionError("不可恢复工作流完成协议故障：" + completionRejection);
@@ -618,6 +703,90 @@ final class RealTeamE2EDriver implements AutoCloseable {
         } catch (Exception failure) {
             throw new AssertionError("读取 E2E 运行时诊断失败：" + failure.getClass().getSimpleName(), failure);
         }
+    }
+
+    /**
+     * 当失败或取消的子任务已全部终态、父 dispatch 却持续活跃时返回直接诊断原因。
+     *
+     * @param dispatchStates dispatch 活跃快照
+     * @param agentDiagnostics AgentScope 父子任务快照
+     * @param firstObservedAt 各路由首次观察到异常终态的时间
+     * @param now 当前时间
+     * @param grace 父 Agent 收尾宽限
+     * @return 悬挂直接原因；仍在运行或尚处于宽限期时为 null
+     */
+    static String hangingDispatchReason(
+            Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates,
+            List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics,
+            Map<String, Instant> firstObservedAt,
+            Instant now,
+            Duration grace
+    ) {
+        Set<String> unhealthyRoutes = new LinkedHashSet<>();
+        for (AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic : agentDiagnostics) {
+            String route = diagnostic.routingKey();
+            SerialDispatchRegistry.DispatchSnapshot dispatch = dispatchStates.get(route);
+            List<AgentScopeAgentGateway.ChildTaskDiagnostic> tasks = diagnostic.childTasks();
+            boolean allTerminal = !tasks.isEmpty()
+                    && tasks.stream().allMatch(AgentScopeAgentGateway.ChildTaskDiagnostic::terminal);
+            boolean hasFailedOrCancelled = tasks.stream()
+                    .map(AgentScopeAgentGateway.ChildTaskDiagnostic::status)
+                    .anyMatch(status -> "FAILED".equals(status) || "CANCELLED".equals(status));
+            if (dispatch == null || !dispatch.active() || !allTerminal || !hasFailedOrCancelled) {
+                continue;
+            }
+            unhealthyRoutes.add(route);
+            Instant observedAt = firstObservedAt.computeIfAbsent(route, ignored -> now);
+            if (Duration.between(observedAt, now).compareTo(grace) < 0) {
+                continue;
+            }
+            String taskStates = tasks.stream()
+                    .map(task -> task.taskId() + "=" + task.status())
+                    .sorted()
+                    .reduce((left, right) -> left + "," + right)
+                    .orElse("none");
+            return "route=" + route
+                    + ", role=" + diagnostic.role()
+                    + ", project_id=" + diagnostic.projectId()
+                    + ", dispatch_active_since=" + dispatch.activeSince()
+                    + ", terminal_child_tasks=" + taskStates;
+        }
+        firstObservedAt.keySet().removeIf(route -> !unhealthyRoutes.contains(route));
+        return null;
+    }
+
+    /** 将 dispatch 快照转换为可序列化且不含 null 的证据。 */
+    private static Map<String, Map<String, Object>> dispatchStateEvidence(
+            Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates
+    ) {
+        Map<String, Map<String, Object>> evidence = new LinkedHashMap<>();
+        dispatchStates.forEach((route, state) -> {
+            Map<String, Object> values = new LinkedHashMap<>();
+            values.put("pending", state.pendingCount());
+            values.put("active", state.active());
+            values.put("active_since", state.activeSince() == null ? "" : state.activeSince().toString());
+            evidence.put(route, Map.copyOf(values));
+        });
+        return Map.copyOf(evidence);
+    }
+
+    /** 将 AgentScope 活跃回合转换为仅含项目、路由和任务状态的证据。 */
+    private static List<Map<String, Object>> agentDiagnosticEvidence(
+            List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> diagnostics
+    ) {
+        return diagnostics.stream().map(diagnostic -> Map.<String, Object>of(
+                "role", diagnostic.role(),
+                "session_id", diagnostic.sessionId(),
+                "routing_key", diagnostic.routingKey(),
+                "project_id", diagnostic.projectId(),
+                "started_at", diagnostic.startedAt().toString(),
+                "child_tasks", diagnostic.childTasks().stream().map(task -> Map.of(
+                        "task_id", task.taskId(),
+                        "agent_id", task.agentId(),
+                        "status", task.status(),
+                        "terminal", task.terminal()
+                )).toList()
+        )).toList();
     }
 
     /**

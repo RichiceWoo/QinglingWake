@@ -5,6 +5,9 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.time.Duration;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CancellationException;
@@ -133,5 +136,26 @@ class SerialDispatchRegistryTest {
         assertThat(queuedStarted).isFalse();
         assertThatThrownBy(first::join).isInstanceOf(CancellationException.class);
         assertThat(registry.awaitDrained(Duration.ofSeconds(1))).isTrue();
+    }
+
+    /** 活跃快照必须区分正在执行与仅排队任务，并在执行结束后立即清空起点。 */
+    @Test
+    void shouldExposeActiveDispatchStartForFastDiagnosis() {
+        Instant startedAt = Instant.parse("2026-10-11T08:00:00Z");
+        SerialDispatchRegistry registry = new SerialDispatchRegistry(
+                Runnable::run, Clock.fixed(startedAt, ZoneOffset.UTC)
+        );
+        CompletableFuture<String> active = new CompletableFuture<>();
+        registry.submit("team:rd", () -> active);
+        registry.submit("team:rd", () -> CompletableFuture.completedFuture("queued"));
+
+        SerialDispatchRegistry.DispatchSnapshot running = registry.snapshot("team:rd");
+
+        assertThat(running.pendingCount()).isEqualTo(2);
+        assertThat(running.active()).isTrue();
+        assertThat(running.activeSince()).isEqualTo(startedAt);
+        active.complete("done");
+        assertThat(registry.snapshot("team:rd").pendingCount()).isZero();
+        assertThat(registry.snapshot("team:rd").active()).isFalse();
     }
 }

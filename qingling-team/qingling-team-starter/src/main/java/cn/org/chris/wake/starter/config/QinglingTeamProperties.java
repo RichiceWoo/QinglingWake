@@ -48,6 +48,8 @@ public record QinglingTeamProperties(
             /** 关闭免费模型选择时主 Agent 使用的显式模型名称。 */ @DefaultValue("qwen3-max") String model,
             /** 声明式 Sub-Agent 使用的模型名称。 */ @DefaultValue("qwen3-max") String subAgentModel,
             /** 是否在启动时按优先级探测免费模型。 */ @DefaultValue("false") boolean freeModelSelectionEnabled,
+            /** 是否在启动时验证显式模型可用且支持 Function Calling。 */
+            @DefaultValue("false") boolean validateExplicitModel,
             /** 免费模型候选列表，按智能体适配度从高到低排列。 */
             @DefaultValue({
                     "qwen3.8-27b", "qwen3.8-2.4t-a95b", "deepseek-v4.1-flash", "glm-5.3",
@@ -60,6 +62,8 @@ public record QinglingTeamProperties(
             /** 主模型上下文窗口上限。 */ @DefaultValue("30000") int maxInputTokens,
             /** 单次模型响应最大 token，避免复杂工具编排在调用前被截断。 */ @DefaultValue("8192") int maxOutputTokens,
             /** Sub-Agent 最大迭代次数。 */ @DefaultValue("20") int subAgentMaxIterations,
+            /** 长工具转入 AgentScope 后台任务前的等待时间，必须短于核心五分钟工具超时。 */
+            @DefaultValue("30s") Duration asyncToolOffloadTimeout,
             /** 单次 Agent 调用超时。 */ @DefaultValue("300s") Duration timeout,
             /** DashScope API Key，优先 DASHSCOPE_API_KEY、回退 QWEN_API_KEY。 */ @DefaultValue("") String apiKey
     ) { }

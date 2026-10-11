@@ -24,6 +24,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
@@ -31,6 +32,7 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -47,6 +49,22 @@ public final class McpSandboxConfiguration implements AutoCloseable {
 
     /** 只用于同步受控 MCP 输入与 ToolUse content，不序列化凭据或工具输出。 */
     private static final ObjectMapper TOOL_INPUT_MAPPER = new ObjectMapper();
+
+    /** AIO-Sandbox 明确表示调用参数无效的错误片段；匹配时不得污染连接健康度。 */
+    private static final List<String> CALL_ARGUMENT_ERROR_MARKERS = List.of(
+            "working directory does not exist",
+            "invalid argument",
+            "invalid arguments",
+            "validation error",
+            "error validating",
+            "input should be",
+            "field required",
+            "missing required",
+            "extra inputs are not permitted",
+            "is not a valid",
+            "unknown field",
+            "unexpected keyword"
+    );
 
     /** 不需要服务端会话清理的禁用或 stdio 配置使用的空操作。 */
     private static final McpSessionCleaner NO_OP_SESSION_CLEANER = () -> {
@@ -76,6 +94,9 @@ public final class McpSandboxConfiguration implements AutoCloseable {
     /** 在全部 MCP client 关闭后释放 AIO-Sandbox 服务端 shell 会话。 */
     private final McpSessionCleaner sessionCleaner;
 
+    /** 可选的宿主工作区到容器挂载点映射，用于修正模型或客户端泄漏的宿主 cwd。 */
+    private final Optional<WorkspacePathMapping> workspacePathMapping;
+
     /** 保证客户端和服务端会话只执行一次关闭。 */
     private boolean closed;
 
@@ -86,6 +107,7 @@ public final class McpSandboxConfiguration implements AutoCloseable {
         this.toolsConfig = null;
         this.toolRegistrar = McpServerRegistrar::register;
         this.sessionCleaner = NO_OP_SESSION_CLEANER;
+        this.workspacePathMapping = Optional.empty();
     }
 
     /**
@@ -114,6 +136,32 @@ public final class McpSandboxConfiguration implements AutoCloseable {
     }
 
     /**
+     * 创建带宿主/容器工作区映射且可替换注册器的配置，供参数边界测试使用。
+     *
+     * @param serverName MCP 服务名称
+     * @param serverConfig AgentScope MCP 服务配置
+     * @param toolRegistrar MCP 工具注册器
+     * @param hostWorkspaceRoot 宿主机共享工作区根目录
+     * @param sandboxWorkspaceRoot 容器内对应挂载点
+     */
+    McpSandboxConfiguration(
+            String serverName,
+            McpServerConfig serverConfig,
+            McpToolRegistrar toolRegistrar,
+            Path hostWorkspaceRoot,
+            String sandboxWorkspaceRoot
+    ) {
+        this(
+                serverName,
+                serverConfig,
+                toolRegistrar,
+                NO_OP_SESSION_CLEANER,
+                hostWorkspaceRoot,
+                sandboxWorkspaceRoot
+        );
+    }
+
+    /**
      * 创建可替换注册器和服务端会话清理器的配置。
      *
      * @param serverName MCP 服务名称
@@ -127,6 +175,27 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             McpToolRegistrar toolRegistrar,
             McpSessionCleaner sessionCleaner
     ) {
+        this(serverName, serverConfig, toolRegistrar, sessionCleaner, null, null);
+    }
+
+    /**
+     * 创建包含全部可替换边界的 MCP 配置。
+     *
+     * @param serverName MCP 服务名称
+     * @param serverConfig AgentScope MCP 服务配置
+     * @param toolRegistrar MCP 工具注册器
+     * @param sessionCleaner 服务端 shell 会话清理器
+     * @param hostWorkspaceRoot 宿主机共享工作区根目录；不配置映射时为 null
+     * @param sandboxWorkspaceRoot 容器内对应挂载点；不配置映射时为 null
+     */
+    private McpSandboxConfiguration(
+            String serverName,
+            McpServerConfig serverConfig,
+            McpToolRegistrar toolRegistrar,
+            McpSessionCleaner sessionCleaner,
+            Path hostWorkspaceRoot,
+            String sandboxWorkspaceRoot
+    ) {
         if (serverName == null || serverName.isBlank()) {
             throw new IllegalArgumentException("MCP serverName 不能为空");
         }
@@ -135,6 +204,16 @@ public final class McpSandboxConfiguration implements AutoCloseable {
         this.toolsConfig = config;
         this.toolRegistrar = Objects.requireNonNull(toolRegistrar, "toolRegistrar 不能为空");
         this.sessionCleaner = Objects.requireNonNull(sessionCleaner, "sessionCleaner 不能为空");
+        if ((hostWorkspaceRoot == null) != (sandboxWorkspaceRoot == null)) {
+            throw new IllegalArgumentException("宿主工作区和沙盒挂载点必须同时配置");
+        }
+        this.workspacePathMapping = hostWorkspaceRoot == null
+                ? Optional.empty()
+                : Optional.of(new WorkspacePathMapping(
+                        hostWorkspaceRoot,
+                        Path.of(System.getProperty("user.dir")),
+                        Path.of(sandboxWorkspaceRoot)
+                ));
     }
 
     /**
@@ -200,6 +279,44 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             Duration timeout,
             Duration initializationTimeout
     ) {
+        return streamableHttp(
+                serverName,
+                url,
+                headers,
+                queryParams,
+                enabledTools,
+                timeout,
+                initializationTimeout,
+                null,
+                null
+        );
+    }
+
+    /**
+     * 创建带宿主工作区到容器挂载点映射的 streamable HTTP MCP 配置。
+     *
+     * @param serverName MCP 服务名称
+     * @param url MCP 服务地址
+     * @param headers 请求 Header，可能包含凭据且不会进入状态快照
+     * @param queryParams 查询参数
+     * @param enabledTools 允许注册的 MCP 工具名
+     * @param timeout 单次调用超时
+     * @param initializationTimeout 初始化超时
+     * @param hostWorkspaceRoot 宿主机共享工作区根目录
+     * @param sandboxWorkspaceRoot 容器内对应挂载点
+     * @return 启用 HTTP MCP 且具备 cwd 归一化的配置
+     */
+    public static McpSandboxConfiguration streamableHttp(
+            String serverName,
+            String url,
+            Map<String, String> headers,
+            Map<String, String> queryParams,
+            List<String> enabledTools,
+            Duration timeout,
+            Duration initializationTimeout,
+            Path hostWorkspaceRoot,
+            String sandboxWorkspaceRoot
+    ) {
         if (url == null || url.isBlank()) {
             throw new IllegalArgumentException("MCP url 不能为空");
         }
@@ -213,7 +330,9 @@ public final class McpSandboxConfiguration implements AutoCloseable {
                 serverName,
                 server,
                 McpServerRegistrar::register,
-                httpSessionCleaner(url, headers)
+                httpSessionCleaner(url, headers),
+                hostWorkspaceRoot,
+                sandboxWorkspaceRoot
         );
     }
 
@@ -533,6 +652,78 @@ public final class McpSandboxConfiguration implements AutoCloseable {
         void cleanup();
     }
 
+    /**
+     * 将已知的宿主工作区和 Java 进程 cwd 映射到容器工作区，阻止这两类路径泄漏给沙盒。
+     *
+     * @param hostWorkspaceRoot 宿主机共享工作区根目录
+     * @param hostProcessWorkingDirectory 当前 Java 进程工作目录
+     * @param sandboxWorkspaceRoot 容器内共享工作区挂载点
+     */
+    private record WorkspacePathMapping(
+            Path hostWorkspaceRoot,
+            Path hostProcessWorkingDirectory,
+            Path sandboxWorkspaceRoot
+    ) {
+        /** 规范化三端路径，并要求容器挂载点使用绝对路径。 */
+        private WorkspacePathMapping {
+            hostWorkspaceRoot = Objects.requireNonNull(hostWorkspaceRoot, "hostWorkspaceRoot 不能为空")
+                    .toAbsolutePath().normalize();
+            hostProcessWorkingDirectory = Objects.requireNonNull(
+                    hostProcessWorkingDirectory,
+                    "hostProcessWorkingDirectory 不能为空"
+            ).toAbsolutePath().normalize();
+            sandboxWorkspaceRoot = Objects.requireNonNull(sandboxWorkspaceRoot, "sandboxWorkspaceRoot 不能为空")
+                    .normalize();
+            if (!sandboxWorkspaceRoot.isAbsolute()) {
+                throw new IllegalArgumentException("沙盒工作区挂载点必须为绝对路径");
+            }
+        }
+
+        /**
+         * 把宿主 cwd 映射到容器挂载点；容器绝对路径保持原样，安全相对路径落在挂载点内。
+         *
+         * @param rawCwd MCP 调用提供的原始 cwd
+         * @return 可直接交给 AIO-Sandbox 的容器路径
+         */
+        private String normalize(String rawCwd) {
+            if (rawCwd == null || rawCwd.isBlank()) {
+                return sandboxWorkspaceRoot.toString();
+            }
+            final Path requested;
+            try {
+                requested = Path.of(rawCwd).normalize();
+            } catch (RuntimeException failure) {
+                throw new IllegalArgumentException("sandbox_execute_bash.cwd 路径无效", failure);
+            }
+            if (!requested.isAbsolute()) {
+                return requireInsideSandbox(sandboxWorkspaceRoot.resolve(requested)).toString();
+            }
+            if (requested.startsWith(hostWorkspaceRoot)) {
+                Path relative = hostWorkspaceRoot.relativize(requested);
+                return requireInsideSandbox(sandboxWorkspaceRoot.resolve(relative)).toString();
+            }
+            if (requested.startsWith(hostProcessWorkingDirectory)) {
+                Path relative = hostProcessWorkingDirectory.relativize(requested);
+                return requireInsideSandbox(sandboxWorkspaceRoot.resolve(relative)).toString();
+            }
+            return requested.toString();
+        }
+
+        /**
+         * 验证解析后的相对路径没有通过父目录跳出容器工作区。
+         *
+         * @param candidate 待验证容器路径
+         * @return 已规范化且位于挂载点内的路径
+         */
+        private Path requireInsideSandbox(Path candidate) {
+            Path normalized = candidate.normalize();
+            if (!normalized.startsWith(sandboxWorkspaceRoot)) {
+                throw new IllegalArgumentException("sandbox_execute_bash.cwd 不得跳出沙盒工作区");
+            }
+            return normalized;
+        }
+    }
+
     /** 将 MCP 委托工具的完成态归一化，并负责熔断、关闭旧 client 与受控重建。 */
     private final class CircuitBreakingMcpAgentTool
             implements AgentTool, McpProjectTestRunner.RecoverableMcpTool {
@@ -618,7 +809,12 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             if (state.get() != CircuitState.CLOSED) {
                 return Mono.just(ToolResultBlock.error("AIO-Sandbox MCP circuit is open"));
             }
-            ToolCallParam safeParam = forceStatelessShell(param);
+            ToolCallParam safeParam;
+            try {
+                safeParam = normalizeShellInput(param);
+            } catch (IllegalArgumentException failure) {
+                return Mono.just(ToolResultBlock.error("AIO-Sandbox tool arguments invalid"));
+            }
             return delegate.callAsync(safeParam)
                     .map(CircuitBreakingMcpAgentTool::normalizeResult)
                     .map(result -> {
@@ -637,18 +833,19 @@ public final class McpSandboxConfiguration implements AutoCloseable {
         }
 
         /**
-         * 强制通用 Bash 工具使用无状态调用，避免模型参数或服务端默认值遗留 tmux 会话。
+         * 强制通用 Bash 工具使用无状态调用，并把宿主 cwd 转换为容器挂载路径。
          *
          * @param param 原始 AgentScope 工具调用
-         * @return Bash 工具的无状态副本；其他 MCP 工具保持原样
+         * @return Bash 工具的受控参数副本；其他 MCP 工具保持原样
          */
-        private ToolCallParam forceStatelessShell(ToolCallParam param) {
+        private ToolCallParam normalizeShellInput(ToolCallParam param) {
             Objects.requireNonNull(param, "param 不能为空");
             if (!"sandbox_execute_bash".equals(getName())) {
                 return param;
             }
             Map<String, Object> input = new LinkedHashMap<>(param.getInput());
             input.put("new_session", false);
+            workspacePathMapping.ifPresent(mapping -> normalizeWorkingDirectory(input, mapping));
             Map<String, Object> safeInput = Collections.unmodifiableMap(input);
             ToolUseBlock originalUse = Objects.requireNonNull(param.getToolUseBlock(), "toolUseBlock 不能为空");
             ToolUseBlock safeUse = new ToolUseBlock(
@@ -663,6 +860,27 @@ public final class McpSandboxConfiguration implements AutoCloseable {
                     .toolUseBlock(safeUse)
                     .input(safeInput)
                     .build();
+        }
+
+        /**
+         * 将 Bash 的 cwd 限定到真实容器路径；缺省值使用容器工作区根目录。
+         *
+         * @param input 待委托的可变参数副本
+         * @param mapping 宿主机与容器工作区映射
+         */
+        private static void normalizeWorkingDirectory(
+                Map<String, Object> input,
+                WorkspacePathMapping mapping
+        ) {
+            Object rawCwd = input.get("cwd");
+            if (rawCwd == null) {
+                input.put("cwd", mapping.sandboxWorkspaceRoot().toString());
+                return;
+            }
+            if (!(rawCwd instanceof String cwd)) {
+                throw new IllegalArgumentException("sandbox_execute_bash.cwd 必须为字符串");
+            }
+            input.put("cwd", mapping.normalize(cwd));
         }
 
         /**
@@ -775,13 +993,27 @@ public final class McpSandboxConfiguration implements AutoCloseable {
          * 判断 AgentScope 返回是否表示连接层失败。
          *
          * @param result 已归一化结果
-         * @return 错误、中断、拒绝或空结果时为 true
+         * @return 空结果、中断或无法识别为参数错误的 ERROR 结果为 true
          */
         private static boolean isConnectionFailure(ToolResultBlock result) {
-            return result == null
-                    || result.getState() == ToolResultState.ERROR
-                    || result.getState() == ToolResultState.INTERRUPTED
-                    || result.getState() == ToolResultState.DENIED;
+            if (result == null || result.getState() == ToolResultState.INTERRUPTED) {
+                return true;
+            }
+            if (result.getState() != ToolResultState.ERROR) {
+                return false;
+            }
+            return !isCallArgumentFailure(result);
+        }
+
+        /**
+         * 识别服务端已明确返回的调用参数错误，避免把业务请求错误误判为连接失效。
+         *
+         * @param result MCP 错误结果
+         * @return 错误正文表明参数或 cwd 无效时为 true
+         */
+        private static boolean isCallArgumentFailure(ToolResultBlock result) {
+            String diagnostic = String.valueOf(result.getOutput()).toLowerCase(Locale.ROOT);
+            return CALL_ARGUMENT_ERROR_MARKERS.stream().anyMatch(diagnostic::contains);
         }
 
         /**

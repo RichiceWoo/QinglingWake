@@ -41,8 +41,14 @@
 | mailbox watchdog | stale 且无 dispatch | 超过 lease | fake clock/registry | 恢复 unread 并安排唯一 wake |
 | mailbox watchdog | stale 但 dispatch 活跃 | 超过 lease | fake clock/registry | 不回收，不重复执行 |
 | `SerialDispatchRegistry` | shutdown | 停止后 submit | controllable executor | 明确拒绝新任务；在途任务有限排空/取消 |
+| `SerialDispatchRegistry` | 悬挂诊断快照 | 同路由一项执行中、一项排队 | fake clock/controllable executor | 只记录真实执行的 `active_since`，排队等待不提前计时，终止后快照归零 |
+| `AgentScopeAgentGateway` | 父调用取消 | 父 Future 被取消且存在非终态子任务 | fake runtime + 真实 Harness TaskRepository | 取消钩子只执行一次；真实仓库子任务进入 CANCELLED，并 interrupt 父 Agent |
+| `TeamAgentFactory` | 兼容旧阻塞参数 | 运行中子任务 + `task_output(block=true, timeout=600000)` | 真实 HarnessAgent + TaskRepository | 1 秒测试上限内返回当前状态；底层子 Future 保持运行，不等待 600 秒 |
+| `AgentScopeAgentGateway` | 子任务取消后父回合悬挂 | 全部子任务 terminal 且包含 CANCELLED，父 Mono 永不结束 | fake runtime + 毫秒级轮询/宽限 | 父 Future 明确失败、取消只传播一次、active execution 清空 |
+| AgentScope execution 上下文 | new_mail 唤醒并启动测试 | project/role/stage 在异步期间变化 | RuntimeContext + controllable runner | 继承 project ID，并以工具调用开始时冻结的 project/role/stage 注册 execution |
 | `RuntimeLifecycle` | 关闭顺序 | 有在途 Agent 与 Cron | ordered fakes | Listener/Cron 停止先于 drain，最后关闭 Gateway |
 | E2E Driver | 工具终态失败 | workflow incident | 临时证据目录 | 快速失败并指出上游工具原因，不报假 `qa/test_plan` 根因 |
+| E2E Driver | AgentScope 子任务终态但 dispatch 悬挂 | 子任务 FAILED/CANCELLED，父路由持续 active | fake clock + 诊断快照 | 宽限 20 秒后报告直接悬挂原因；子任务仍运行时不误报 |
 | 完成协议 | task_done 门禁失败后单独 mark_done | in_progress task_assign | 真实文件 mailbox | 拒绝关闭，任务继续保持 in_progress |
 | 完成协议 | 合规 task_done | 原任务与同阶段恢复任务均 in_progress | 真实文件 mailbox | 先写入完成邮件，再由 Java 自动把全部关联分派置为 done |
 | E2E Driver | 当前任务 done 但缺少 task_done | mailbox/dispatch 均空闲 | JSON 快照 | 直接报告 stage、Owner、assignment ID 与 `task_done_missing`，不等待下游文件 |
@@ -92,12 +98,12 @@ Task 6 实测：`mvn -pl qingling-team-app,qingling-team-starter -am test` 通�
 
 ## 4. 真实 E2E
 
-当前配置：
+原始基线配置为 `qwen3-max`。经用户确认，2026-10-11 当前单次运行使用以下进程级显式覆盖，未打印或改写环境文件：
 
 ```bash
 QINGLING_FREE_MODEL_SELECTION_ENABLED=false
-QINGLING_AGENT_MODEL=qwen3-max
-QINGLING_SUB_AGENT_MODEL=qwen3-max
+QINGLING_AGENT_MODEL=qwen3.8-flash
+QINGLING_SUB_AGENT_MODEL=qwen3.8-flash
 ```
 
 依次执行：
@@ -178,3 +184,32 @@ git diff --check
 | 2026-10-09 | `mvn -pl qingling-team-domain,qingling-team-infra,qingling-team-starter -am -Dtest=EventServiceTest,DeterministicWorkflowToolsTest,RealTeamE2EDriverTest -Dsurefire.failIfNoSpecifiedTests=false test` | 通过（18 tests） | 验证真实 AgentScope 形态的 JSON 字符串可被恢复为 Map 后通过门禁并结构化落盘；拒绝事件不可由通用工具伪造；Driver 对连续拒绝直接报告原因，并对活跃 dispatch/更新 task_done 不误报 |
 | 2026-10-09 | `mvn verify` | 通过（210 tests） | domain 43、app 30、infra 91、adapter 13、starter 33；0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
 | 2026-10-09 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（1 IT） | 真实 Docker AIO-Sandbox + AgentScope + NoCallModel；结束后活动 shell=0，pytest/pip/tmux=0；未调用百炼、未进入 E2E |
+| 2026-10-10 | `mvn -pl qingling-team-infra -am -Dsurefire.failIfNoSpecifiedTests=false -Dtest=ProjectTestAgentToolTest,McpProjectTestRunnerTest,TaskCompletionEvidenceGateTest,DeterministicWorkflowToolsTest,RoleToolkitFactoryTest,TeamAgentFactoryTest test` | 通过（30 tests） | 验证 execution ID 必须绑定当前 project/role/stage 和真实终态；模型回报的状态、退出码、pytest、覆盖率、失败类型及可重试性必须逐字段匹配；超时/传输故障最多恢复一次；QA 缺少独立契约时不能借用 RD 测试通过 |
+| 2026-10-10 | 首次加强后的 `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 失败，未进入 E2E | 真实发现 RD 代码测试与 QA 契约都名为 `test_contract.py` 时，pytest 默认导入模式发生 module import mismatch；这是测试收集基础设施问题，不是业务失败。改为固定 `--import-mode=importlib`，未放宽断言 |
+| 2026-10-10 | `mvn verify` | 通过（212 tests） | domain 43、app 30、infra 93、adapter 13、starter 33；0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
+| 2026-10-10 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（1 IT） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；连续 10 次 Shell、5 次结构化测试、一次受控连接失效/重建全部通过，QA 契约独立执行，结束后无 pending tool 和 pytest/pip/tmux 孤儿进程；未调用百炼 |
+| 2026-10-10 | E2E 启动诊断（未形成场景执行结果） | 当前显式模型前置不可用，诊断后人工中止 | 兼容端点对配置的 `qwen3-max` 返回 HTTP 404 `model_not_found`；只记录模型名和状态分类，未记录 API Key、鉴权 Header 或响应正文。该结果证明当前密钥/区域/端点/模型组合不可用，不代表模型全局下线；未进入业务工作流，未启动后续场景 |
+| 2026-10-10 | 首次新增显式模型预检后的 `mvn verify` | 失败（配置回归，未进入 E2E） | 显式模型预检最初无条件启用，导致使用假密钥的 `RuntimeBootstrapTest` 发起网络探测；改为默认关闭、仅由 E2E 驱动强制开启，保持普通启动和默认回归无网络副作用 |
+| 2026-10-10 | `mvn -pl qingling-team-starter -am -Dsurefire.failIfNoSpecifiedTests=false -Dtest=DashScopeModelSelectorTest,RuntimeBootstrapTest,RealTeamE2EDriverTest test` | 通过（16 tests） | 验证普通显式模式不探测、E2E 显式模式对不可用/缺少 Function Calling 快速失败、启动异常保存脱敏 `summary.json` 与 `failure-summary.json` |
+| 2026-10-10 | 最终 `mvn verify` | 通过（215 tests） | domain 43、app 30、infra 93、adapter 13、starter 36；0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
+| 2026-10-10 | 最终 `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（1 IT） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；连续 10 次 Shell、5 次结构化测试、一次受控断线恢复，且无 pending tool 或 pytest/pip/tmux 孤儿进程；未调用百炼、未进入 E2E |
+| 2026-10-11 | `mvn -pl qingling-team-infra -am -Dsurefire.failIfNoSpecifiedTests=false -Dtest=ProjectTestAgentToolTest,DeterministicWorkflowToolsTest test` | 通过（16 tests） | 验证重连后同一 execution ID 已取消时仍上报 attempt=2、`retryable=false` 并触发 Java BLOCKED；另验证取消锁定进程前 pytest 已完成时保留真实成功终态，不产生虚假 incident；不调用模型 |
+| 2026-10-11 | `mvn verify` | 通过（217 tests） | domain 43、app 30、infra 95、adapter 13、starter 36；0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
+| 2026-10-11 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（1 IT） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；连续 10 次 Shell、5 次结构化测试、一次受控断线恢复全部通过。外部复核 AIO 活动会话为 0，未发现 pytest/pip/tmux 进程；未进入 E2E |
+| 2026-10-11 | `mvn -Pe2e -De2e.scenario=happy-path verify` | 失败（1 E2E，0 failures、1 error、0 skipped），未启动后续场景 | 未打印环境文件或凭据；显式配置检查通过后，E2E Function Calling 启动预检对 `qwen3-max` 收到 HTTP 404，Spring 在进入业务工作流前快速失败。脱敏 `summary.json` 与 `failure-summary.json` 均记录 `configured_model=qwen3-max`、`failure_type=IllegalStateException` 和 `status=http_404`；AIO 活动会话为 0，未发现 pytest/pip/tmux 进程 |
+| 2026-10-11 | 一请求最小 Function Calling 探针（`qwen3.8-flash`） | 通过（仅 1 请求） | HTTP 200，返回预期 `qingling_model_probe` 工具调用；未启动 E2E、未重试，未记录密钥或鉴权 Header |
+| 2026-10-11 | `QINGLING_AGENT_MODEL=qwen3.8-flash QINGLING_SUB_AGENT_MODEL=qwen3.8-flash mvn -Pe2e -De2e.scenario=happy-path verify` | 失败（1 E2E，1 failure、0 errors、0 skipped；Maven 44 分 29 秒），未启动后续场景 | `model-selection.json` 为 `selected_model=qwen3.8-flash`、`selection_mode=explicit`、`available`。workflow 到达 `CODE_IMPLEMENTATION/RD`；AgentScope 的 `agent_spawn`、`agent_send`、`task_output` 多次 5 分钟超时，但子任务仍继续写文件。execution `44068f07-e3ca-470d-bfee-aae24e73eeef` 终态 `FINISHED/exit_code=5`，pytest 收集 0 项；task_done 因 execution 归属不匹配被拒绝，且没有 `tool_execution_failed`/BLOCKED。最终直接测试错误仍是等待 `code/main.py` 30 分钟超时。`finally` 保存脱敏证据；AIO session=0，pytest/pip/tmux 与宿主 Maven/Java 均无残留；没有自动重试 |
+| 2026-10-11 | `mvn -pl qingling-team-app,qingling-team-infra,qingling-team-starter -am -Dtest=SerialDispatchRegistryTest,RunnerTest,AgentScopeAgentGatewayTest,ProjectTestAgentToolTest,TeamAgentFactoryTest,RealTeamE2EDriverTest -Dsurefire.failIfNoSpecifiedTests=false test` | 通过（37 tests） | 覆盖异步工具转后台阈值上限、父调用取消钩子幂等、active execution 脱敏诊断、new_mail project ID 传播、测试 stage 启动时冻结、dispatch `active_since` 和 Driver 悬挂宽限；未调用模型 |
+| 2026-10-11 | `mvn -pl qingling-team-infra -am -Dtest=TeamAgentFactoryTest -Dsurefire.failIfNoSpecifiedTests=false test` | 通过（4 tests） | 使用真实 HarnessAgent 与 TaskRepository 放入已接管子 Future，调用 `clearSession` 后验证 BackgroundTask 为 CANCELLED 且底层 Future 已取消；证明父取消可真实级联到 AgentScope 子任务 |
+| 2026-10-11 | 最终 `mvn verify` | 通过（223 tests） | domain 43、app 31、infra 99、adapter 13、starter 37；0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
+| 2026-10-11 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（1 IT） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；连续 10 次无副作用 Shell、5 次结构化测试和一次受控连接失效/恢复全部通过，结束后无 pending tool 或 pytest/pip/tmux 孤儿进程；本轮未运行 E2E |
+| 2026-10-11 | `QINGLING_AGENT_MODEL=qwen3.8-flash QINGLING_SUB_AGENT_MODEL=qwen3.8-flash mvn -Pe2e -De2e.scenario=happy-path verify`（父子生命周期修复后，仅一次） | 失败（1 E2E，1 failure、0 errors、0 skipped；场景 1021 秒，Maven 17 分 31 秒），未启动后续场景 | `model-selection.json` 确认为显式 `qwen3.8-flash` 且免费选择关闭。workflow 完成 checkpoint、产品设计和技术设计，进入 `CODE_IMPLEMENTATION/RD`；30 秒 async-tool 卸载生效，但后台 `task_output` 仍触发 AgentScope PT5M 超时。两个真实 `code_impl` 子任务被级联取消为 CANCELLED，父 `team:rd` dispatch 仍为 active/pending=1；Driver 直接报告 `不可恢复 AgentScope dispatch 悬挂`，没有伪装为下游文件超时。无代码文件、无 Test Runner execution。`finally` 保存脱敏 summary/failure-summary/runtime snapshot；清理后 AIO session=0，pytest/pip/tmux 与宿主 Maven/Java 均无残留；没有重试 |
+| 2026-10-11 | `mvn -pl qingling-team-infra -am -Dtest=AgentScopeAgentGatewayTest,TeamAgentFactoryTest -Dsurefire.failIfNoSpecifiedTests=false test` | 通过（10 tests） | 新增验证 `task_output(block=true, timeout=600000)` 仍立即返回，以及子任务全部 CANCELLED 后父 Future 失败、取消仅传播一次、active execution 清空；未调用模型 |
+| 2026-10-11 | 修复后 `mvn verify` | 通过（225 tests） | domain 43、app 31、infra 101、adapter 13、starter 37；0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
+| 2026-10-11 | 修复后 `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（1 IT） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；连续 10 次 Shell、5 次结构化测试及一次受控断线恢复通过；未运行 E2E |
+| 2026-10-11 | Task 19 打包回归修复后 `mvn verify` | 通过（225 tests） | Spring Boot repackage 改用 `exec` classifier；普通 starter JAR 含根路径 `workspace-template/file-manifest.txt`，`*-exec.jar` 的 `Main-Class` 为 JarLauncher、`Start-Class` 为 `QinglingTeamApplication`；0 failures、0 errors、0 skipped |
+| 2026-10-11 | Task 19 打包回归修复后 `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT -Dtool.contract.workspace="$(pwd)/target/e2e-workspace" verify` | 通过（1 IT） | 真实 Docker AIO-Sandbox + AgentScope + NoCallModel；重新证明模板资源可由 Failsafe 普通 classpath 加载并完成压力契约，未调用百炼 |
+| 2026-10-11 | `mvn -Pe2e -De2e.scenario=happy-path verify`（后台查询修复后，仅一次） | 失败（1 E2E，1 failure、0 errors、0 skipped；场景 190.2 秒，Maven 3 分 19 秒），未启动后续场景 | 显式 `qwen3.8-flash` 可用且免费选择关闭。workflow 完成需求、checkpoint 请求/批准并迁移到 `PRODUCT_DESIGN/PM`；PM 首次 `sandbox_execute_bash` 将宿主机 `qingling-team-starter` 目录作为沙盒 working directory，AIO-Sandbox 返回目录不存在。当前 MCP 健康层将确定性的调用参数错误计为基础设施失败并使该 PM client 的 circuit OPEN；Driver 直接报告 `不可恢复 MCP 故障：circuit 持续 OPEN`，没有等待下游文件超时。`finally` 保存脱敏 summary/failure-summary/model-selection/项目证据；外部复核 AIO session=0，宿主与容器均无 pytest/pip/tmux/Maven/Java 残留；没有自动重试 |
+| 2026-10-12 | `mvn -pl qingling-team-infra,qingling-team-starter -am -Dsurefire.failIfNoSpecifiedTests=false -Dtest=McpSandboxConfigurationTest,RuntimeBootstrapTest test` | 通过（15 tests） | 验证宿主 workspace 子路径映射、Maven `user.dir → /workspace`、ToolUse content 同步，以及真实形态 `Working directory does not exist` 连续两次 ERROR 后 circuit 仍 CLOSED、失败计数仍为 0；启动配置回归通过 |
+| 2026-10-12 | `mvn verify` | 通过（227 tests） | 六模块全部 SUCCESS，0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
+| 2026-10-12 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT -Dtool.contract.workspace="$(pwd)/target/e2e-workspace" verify` | 通过（1 IT） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；10 次 Shell 均故意传入宿主 Maven `user.dir` 并断言实际 `pwd=/workspace`，5 次结构化 pytest 和一次受控连接恢复通过。AIO session=0，宿主与容器均无 pytest/pip/tmux/Maven/Java 残留；未运行 E2E |

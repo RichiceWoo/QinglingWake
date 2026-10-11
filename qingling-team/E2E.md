@@ -10,10 +10,10 @@ cd /Users/qingling/workspace/IdeaProjects/QinglingWake/qingling-team
 # 必填：阿里云百炼 DashScope API Key。不要写入 config.yaml 或提交到 Git。
 export DASHSCOPE_API_KEY='sk-替换为真实值'
 
-# 当前使用百炼节省计划：关闭免费候选探测并显式选择 qwen3-max。
+# 当前真实 E2E：关闭免费候选探测并显式选择 qwen3.8-flash。
 export QINGLING_FREE_MODEL_SELECTION_ENABLED=false
-export QINGLING_AGENT_MODEL=qwen3-max
-export QINGLING_SUB_AGENT_MODEL=qwen3-max
+export QINGLING_AGENT_MODEL=qwen3.8-flash
+export QINGLING_SUB_AGENT_MODEL=qwen3.8-flash
 
 # 可选：覆盖沙盒地址。
 export QINGLING_SANDBOX_URL='http://localhost:8029/mcp'
@@ -21,7 +21,7 @@ export QINGLING_SANDBOX_URL='http://localhost:8029/mcp'
 
 兼容旧环境变量 `QWEN_API_KEY`，但优先使用 `DASHSCOPE_API_KEY`。
 
-`QINGLING_FREE_MODEL_SELECTION_ENABLED=false` 时，应用直接使用 `QINGLING_AGENT_MODEL`，不会读取免费候选列表，也不会发起任何候选网络探测。启动日志和 `model-selection.json` 会明确记录“免费模型选择关闭”、`selection_mode=explicit` 与最终模型，但不会记录 API Key。
+`QINGLING_FREE_MODEL_SELECTION_ENABLED=false` 时，普通应用启动直接使用 `QINGLING_AGENT_MODEL`，不会读取免费候选列表；可通过 `QINGLING_VALIDATE_EXPLICIT_MODEL=true` 单独开启显式模型 Function Calling 探测。真实 E2E 驱动始终强制开启该探测：模型未开通、区域不匹配、不可访问或不支持 Function Calling 时会在 Spring 启动阶段快速失败，并在场景证据目录写入脱敏 `summary.json` 与 `failure-summary.json`，不会进入 30 分钟 Agent 等待。日志和证据只记录模型名及 `available`、HTTP 状态分类或 `transport_error`，不会记录 API Key、鉴权 Header 或响应正文。
 
 节省计划用完后，如需切换到免费候选模式，显式设置：
 
@@ -30,7 +30,7 @@ export QINGLING_FREE_MODEL_SELECTION_ENABLED=true
 export QINGLING_AGENT_MODEL_CANDIDATES='qwen3.8-27b,qwen3.8-2.4t-a95b,deepseek-v4.1-flash,glm-5.3,kimi-k3,deepseek-v4-flash-0731,qwen3.7-flash-2026-07-15,qwen3.7-flash'
 ```
 
-只有开关为 `true` 时，应用才按上述顺序发起最小 Function Calling 探测。额度耗尽、未开通、限流、不可访问或工具调用不兼容时继续下一候选；全部失败则明确终止启动，绝不切换到列表外模型。已耗尽免费额度的 `qwen3.8-max-0902` 和 `qwen3.8-flash` 不在默认候选中。旧变量 `QINGLING_DYNAMIC_MODEL_SELECTION_ENABLED` 仅在新开关未设置时作为兼容回退；新开关始终优先。
+只有开关为 `true` 时，应用才按上述顺序发起最小 Function Calling 探测。额度耗尽、未开通、限流、不可访问或工具调用不兼容时继续下一候选；全部失败则明确终止启动，绝不切换到列表外模型。`qwen3.8-flash` 是本轮真实 E2E 的显式模型，不加入免费候选列表；已耗尽免费额度的 `qwen3.8-max-0902` 同样不在默认候选中。旧变量 `QINGLING_DYNAMIC_MODEL_SELECTION_ENABLED` 仅在新开关未设置时作为兼容回退；新开关始终优先。
 
 ## 2. 启动沙盒
 
@@ -44,7 +44,7 @@ docker compose -f sandbox-docker-compose.yaml ps
 
 沙盒把 `target/e2e-workspace` 挂载为容器内 `/workspace`，仅绑定本机 `127.0.0.1:8029`；按官方要求启用 `seccomp:unconfined` 和 2GB shared memory。
 
-应用只从 MCP 注册 `sandbox_execute_bash`，随后在 Java 侧为 RD/QA 包装 `run_project_tests(project_id)`。包装器固定使用 `/workspace/shared/projects/{projectId}/code`，模型不能提供命令或 cwd，并返回 `exit_code`、pytest 数量与覆盖率证据。声明式 RD/QA Sub-Agent 同时继承原始工具和结构化工具；原始工具只用于无副作用探测与依赖安装。Harness 自带的文件工具和本地 Shell 均关闭。MCP 连接失败或白名单工具缺失会直接阻止启动。
+应用只从 MCP 注册 `sandbox_execute_bash`，随后在 Java 侧为 RD/QA 包装 `run_project_tests(project_id)`。包装器固定使用 `/workspace/shared/projects/{projectId}/code`，模型不能提供命令或 cwd，并返回 `execution_id`、`status`、`exit_code`、pytest 数量、覆盖率、失败类型和可重试性。RD 固定执行代码测试，并在 QA 契约存在时一并回归；QA 固定执行 `qa/contract_tests/test_contract.py`，缺失 QA 契约会直接失败。pytest 使用 importlib 导入模式，允许代码测试与 QA 契约使用相同文件名。Java 运行时按 project、role、stage 记录真实终态，`task_done` 必须逐字段匹配该 execution ID，不能由模型自行声明通过。声明式 RD/QA Sub-Agent 同时继承原始工具和结构化工具；原始工具只用于无副作用探测与依赖安装。Harness 自带的文件工具和本地 Shell 均关闭。MCP 连接失败或白名单工具缺失会直接阻止启动。
 
 ## 3. 零模型真实工具契约
 

@@ -1,5 +1,7 @@
 package cn.org.chris.wake.starter.e2e;
 
+import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
+import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -7,6 +9,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -176,6 +180,38 @@ class RealTeamE2EDriverTest {
         )).isNull();
     }
 
+    /** 失败子任务全部终态后父 dispatch 持续活跃，应快速报告真实任务状态而不是等待文件超时。 */
+    @Test
+    void shouldDescribeHangingDispatchAfterCancelledChildGraceExpires() {
+        Instant activeSince = Instant.parse("2026-10-11T08:00:00Z");
+        AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic =
+                new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
+                        "rd",
+                        "session-rd",
+                        "team:rd",
+                        "todo-mvp",
+                        activeSince,
+                        List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                                "task-code", "code_impl", "CANCELLED", true, activeSince
+                        ))
+                );
+        Map<String, Instant> observed = new java.util.LinkedHashMap<>();
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatch = Map.of(
+                "team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)
+        );
+
+        assertThat(RealTeamE2EDriver.hangingDispatchReason(
+                dispatch, List.of(diagnostic), observed, activeSince.plusSeconds(1), Duration.ofSeconds(20)
+        )).isNull();
+        String reason = RealTeamE2EDriver.hangingDispatchReason(
+                dispatch, List.of(diagnostic), observed, activeSince.plusSeconds(22), Duration.ofSeconds(20)
+        );
+
+        assertThat(reason)
+                .contains("team:rd", "role=rd", "todo-mvp", "task-code=CANCELLED")
+                .doesNotContain("qa/test_plan.md");
+    }
+
     /** 失败证据必须脱敏 API Key、Authorization 与 Bearer，并限制异常长度。 */
     @Test
     void shouldRedactFailureEvidence() {
@@ -185,5 +221,29 @@ class RealTeamE2EDriverTest {
 
         assertThat(sanitized).doesNotContain("secret", "token", "abc.def").contains("[REDACTED]", "[TRUNCATED]");
         assertThat(sanitized.length()).isLessThan(4_200);
+    }
+
+    /** Spring 启动失败时也必须保存直接原因且不得泄漏凭据。 */
+    @Test
+    void shouldSaveSanitizedStartupFailureEvidence() throws Exception {
+        Path evidence = projectRoot.resolve("target/e2e-evidence/happy-path");
+        IllegalStateException failure = new IllegalStateException(
+                "startup wrapper",
+                new IllegalArgumentException("model unavailable Authorization:secret Bearer abc.def")
+        );
+
+        RealTeamE2EDriver.saveStartupFailureEvidence(
+                evidence, "happy-path", Instant.parse("2026-10-10T13:00:00Z"), failure
+        );
+
+        JsonNode summary = new ObjectMapper().readTree(evidence.resolve("failure-summary.json").toFile());
+        assertThat(summary.path("scenario").asText()).isEqualTo("happy-path");
+        assertThat(summary.path("phase").asText()).isEqualTo("startup");
+        assertThat(summary.path("outcome").asText()).isEqualTo("FAILED");
+        assertThat(summary.path("failure_type").asText()).isEqualTo("IllegalArgumentException");
+        assertThat(summary.path("failure_message").asText())
+                .contains("model unavailable", "[REDACTED]")
+                .doesNotContain("secret", "abc.def");
+        assertThat(evidence.resolve("summary.json")).isRegularFile();
     }
 }

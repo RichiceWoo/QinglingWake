@@ -1,6 +1,7 @@
 package cn.org.chris.wake.app.runner;
 
 import java.util.Objects;
+import java.time.Clock;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
@@ -8,6 +9,7 @@ import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -27,8 +29,14 @@ public final class SerialDispatchRegistry {
     /** 每个 routing key 尚未完成的任务数量。 */
     private final ConcurrentHashMap<String, AtomicInteger> pendingCounts = new ConcurrentHashMap<>();
 
+    /** 每个 routing key 当前真正开始执行的任务起始时间，不把排队等待误算为悬挂。 */
+    private final ConcurrentHashMap<String, Instant> activeSince = new ConcurrentHashMap<>();
+
     /** 启动每个异步任务供应器的执行器。 */
     private final Executor executor;
+
+    /** 生成可测试 dispatch 活跃时间的时钟。 */
+    private final Clock clock;
 
     /** 串行化任务接纳与 mailbox 空闲检查，避免检查后立即接纳任务的竞态。 */
     private final Object admissionLock = new Object();
@@ -46,7 +54,7 @@ public final class SerialDispatchRegistry {
      * 使用 JVM 公共异步执行器创建注册表。
      */
     public SerialDispatchRegistry() {
-        this(ForkJoinPool.commonPool());
+        this(ForkJoinPool.commonPool(), Clock.systemUTC());
     }
 
     /**
@@ -55,7 +63,18 @@ public final class SerialDispatchRegistry {
      * @param executor 不同 routing key 的并行执行器
      */
     public SerialDispatchRegistry(Executor executor) {
+        this(executor, Clock.systemUTC());
+    }
+
+    /**
+     * 使用指定执行器和时钟创建注册表，供悬挂诊断执行确定性测试。
+     *
+     * @param executor 不同 routing key 的并行执行器
+     * @param clock dispatch 活跃时间时钟
+     */
+    SerialDispatchRegistry(Executor executor, Clock clock) {
         this.executor = Objects.requireNonNull(executor, "executor 不能为空");
+        this.clock = Objects.requireNonNull(clock, "clock 不能为空");
     }
 
     /**
@@ -87,7 +106,7 @@ public final class SerialDispatchRegistry {
                         ? CompletableFuture.completedFuture(null)
                         : previous;
                 CompletableFuture<Void> tail = ready.thenComposeAsync(
-                        unused -> invoke(task, result), executor
+                        unused -> invoke(routingKey, task, result), executor
                 );
                 newTail.set(tail);
                 return tail;
@@ -176,6 +195,19 @@ public final class SerialDispatchRegistry {
     }
 
     /**
+     * 返回指定路由的排队数量和真实活跃起点，供 watchdog 与 E2E 直接定位悬挂 dispatch。
+     *
+     * @param routingKey 路由键
+     * @return 不含任务正文的脱敏 dispatch 快照
+     */
+    public DispatchSnapshot snapshot(String routingKey) {
+        if (routingKey == null || routingKey.isBlank()) {
+            throw new IllegalArgumentException("routingKey 不能为空");
+        }
+        return new DispatchSnapshot(pendingCount(routingKey), activeSince.get(routingKey));
+    }
+
+    /**
      * 等待调用时已经进入队列的全部路由尾部完成，新入站应在调用前停止。
      *
      * @param timeout 最长排空时间
@@ -203,12 +235,14 @@ public final class SerialDispatchRegistry {
     /**
      * 安全调用任务供应器，并把业务成功或失败复制给结果 Future；队列尾部总是正常完成。
      *
+     * @param routingKey 当前串行路由键
      * @param task 延迟异步任务
      * @param result 当前任务对外结果
      * @param <T> 结果类型
      * @return 用于串行链接且不会异常完成的尾部
      */
     private <T> CompletableFuture<Void> invoke(
+            String routingKey,
             Supplier<CompletableFuture<T>> task,
             CompletableFuture<T> result
     ) {
@@ -220,9 +254,11 @@ public final class SerialDispatchRegistry {
             return CompletableFuture.completedFuture(null);
         }
         CompletableFuture<T> execution;
+        activeSince.put(routingKey, clock.instant());
         try {
             execution = Objects.requireNonNull(task.get(), "task Future 不能为空");
         } catch (Throwable failure) {
+            activeSince.remove(routingKey);
             result.completeExceptionally(failure);
             return CompletableFuture.completedFuture(null);
         }
@@ -232,6 +268,7 @@ public final class SerialDispatchRegistry {
             }
         });
         return execution.handle((value, failure) -> {
+            activeSince.remove(routingKey);
             if (failure == null) {
                 result.complete(value);
             } else {
@@ -253,5 +290,25 @@ public final class SerialDispatchRegistry {
             current = current.getCause();
         }
         return current;
+    }
+
+    /**
+     * 表示单个路由不含业务正文的运行状态。
+     *
+     * @param pendingCount 正在执行和排队的任务总数
+     * @param activeSince 当前任务真正开始执行的时间；只有排队任务或空闲时为空
+     */
+    public record DispatchSnapshot(
+            /** 正在执行和排队的任务总数。 */ int pendingCount,
+            /** 当前任务真正开始执行的时间；只有排队任务或空闲时为空。 */ Instant activeSince
+    ) {
+        /**
+         * 判断路由当前是否正在实际执行任务。
+         *
+         * @return 存在活跃起点时为 true
+         */
+        public boolean active() {
+            return activeSince != null;
+        }
     }
 }

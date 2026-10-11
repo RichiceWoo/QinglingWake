@@ -1,5 +1,6 @@
 package cn.org.chris.wake.infra.agentscope;
 
+import cn.org.chris.wake.domain.workflow.WorkflowStage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.message.TextBlock;
@@ -26,6 +27,60 @@ class ProjectTestAgentToolTest {
 
     /** JSON 结果解析器。 */
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /** 测试执行必须绑定调用开始时的阶段，异步完成期间发生迁移也不能改写证据归属。 */
+    @Test
+    void shouldFreezeWorkflowStageBeforeAsyncExecutionStarts() throws Exception {
+        AtomicReference<WorkflowStage> currentStage = new AtomicReference<>(WorkflowStage.CODE_IMPLEMENTATION);
+        AtomicReference<WorkflowStage> recordedStage = new AtomicReference<>();
+        ProjectTestExecution success = execution(
+                ProjectTestExecution.Status.SUCCEEDED,
+                0,
+                3,
+                3,
+                90D,
+                ProjectTestExecution.FailureType.NONE,
+                false,
+                "3 passed",
+                ""
+        );
+        ProjectTestRunner delegate = immediateRunner(new AtomicReference<>(), success);
+        ProjectTestRunner runner = new ProjectTestRunner() {
+            /** 启动后模拟工作流并发迁移到 QA。 */
+            @Override
+            public Mono<ProjectTestExecution> start(String executionId, String projectId) {
+                currentStage.set(WorkflowStage.QA_TEST_EXECUTION);
+                return delegate.start(executionId, projectId);
+            }
+
+            /** 委托结果查询。 */
+            @Override
+            public Mono<ProjectTestExecution> query(String executionId) {
+                return delegate.query(executionId);
+            }
+
+            /** 委托执行取消。 */
+            @Override
+            public Mono<ProjectTestExecution> cancel(String executionId) {
+                return delegate.cancel(executionId);
+            }
+        };
+        ProjectTestAgentTool tool = new ProjectTestAgentTool(
+                runner,
+                objectMapper,
+                Duration.ofMillis(1),
+                Duration.ofSeconds(1),
+                "rd",
+                ProjectTestAgentTool.ToolFailureReporter.NO_OP,
+                (projectId, role) -> currentStage.get(),
+                (projectId, role, stage, execution) -> recordedStage.set(stage)
+        );
+
+        invoke(tool, "demo-project");
+
+        assertThat(recordedStage).hasValue(WorkflowStage.CODE_IMPLEMENTATION);
+        assertThat(currentStage).hasValue(WorkflowStage.QA_TEST_EXECUTION);
+    }
 
     /**
      * pytest 成功时应返回完整结构化证据，且只向 Runner 传递 project ID。
@@ -135,6 +190,8 @@ class ProjectTestAgentToolTest {
     @Test
     void shouldCancelWhenCompletionDeadlineExpires() throws Exception {
         AtomicInteger cancellations = new AtomicInteger();
+        List<String> incidents = new ArrayList<>();
+        AtomicReference<ProjectTestExecution> observed = new AtomicReference<>();
         ProjectTestRunner runner = new ProjectTestRunner() {
             /** 返回持续运行状态。 */
             @Override
@@ -170,7 +227,11 @@ class ProjectTestAgentToolTest {
                 runner,
                 objectMapper,
                 Duration.ofMillis(1),
-                Duration.ofMillis(5)
+                Duration.ofMillis(5),
+                "rd",
+                (projectId, role, toolName, executionId, failureType, retryable, attempt) ->
+                        incidents.add(failureType + ":" + retryable + ":" + attempt),
+                (projectId, role, stage, execution) -> observed.set(execution)
         );
 
         JsonNode evidence = invoke(tool, "demo-project");
@@ -178,7 +239,74 @@ class ProjectTestAgentToolTest {
         assertThat(cancellations).hasValue(1);
         assertThat(evidence.path("status").asText()).isEqualTo("TIMED_OUT");
         assertThat(evidence.path("failure_type").asText()).isEqualTo("COMMAND_TIMEOUT");
-        assertThat(evidence.path("retryable").asBoolean()).isTrue();
+        assertThat(evidence.path("retryable").asBoolean()).isFalse();
+        assertThat(incidents).containsExactly(
+                "COMMAND_TIMEOUT:true:1",
+                "COMMAND_TIMEOUT:false:2"
+        );
+        assertThat(observed.get()).isNotNull();
+        assertThat(observed.get().status()).isEqualTo(ProjectTestExecution.Status.TIMED_OUT);
+        assertThat(observed.get().retryable()).isFalse();
+    }
+
+    /**
+     * 等待上限与 pytest 完成竞态时，应保留取消查询取得的真实业务终态，不能伪造超时。
+     *
+     * @throws Exception JSON 解析失败
+     */
+    @Test
+    void shouldKeepTerminalResultFoundWhileCancellingAtDeadline() throws Exception {
+        AtomicInteger cancellations = new AtomicInteger();
+        List<String> incidents = new ArrayList<>();
+        ProjectTestRunner runner = new ProjectTestRunner() {
+            /** 首次快照仍为运行中。 */
+            @Override
+            public Mono<ProjectTestExecution> start(String executionId, String projectId) {
+                return Mono.just(running(executionId));
+            }
+
+            /** 上限到达前的最后一次轮询仍返回运行中。 */
+            @Override
+            public Mono<ProjectTestExecution> query(String executionId) {
+                return Mono.just(running(executionId));
+            }
+
+            /** 模拟取消锁定进程前 pytest 已完成并持久化成功终态。 */
+            @Override
+            public Mono<ProjectTestExecution> cancel(String executionId) {
+                cancellations.incrementAndGet();
+                return Mono.just(new ProjectTestExecution(
+                        executionId,
+                        ProjectTestExecution.Status.SUCCEEDED,
+                        0,
+                        4,
+                        4,
+                        93D,
+                        ProjectTestExecution.FailureType.NONE,
+                        false,
+                        "4 passed",
+                        ""
+                ));
+            }
+        };
+        ProjectTestAgentTool tool = new ProjectTestAgentTool(
+                runner,
+                objectMapper,
+                Duration.ofMillis(5),
+                Duration.ofMillis(1),
+                "rd",
+                (projectId, role, toolName, executionId, failureType, retryable, attempt) ->
+                        incidents.add(failureType + ":" + retryable + ":" + attempt)
+        );
+
+        JsonNode evidence = invoke(tool, "demo-project");
+
+        assertThat(cancellations).hasValue(1);
+        assertThat(incidents).isEmpty();
+        assertThat(evidence.path("status").asText()).isEqualTo("SUCCEEDED");
+        assertThat(evidence.path("exit_code").asInt()).isZero();
+        assertThat(evidence.path("pytest_passed").asInt()).isEqualTo(4);
+        assertThat(evidence.path("failure_type").asText()).isEqualTo("NONE");
     }
 
     /**
@@ -306,6 +434,90 @@ class ProjectTestAgentToolTest {
         assertThat(incidents).containsExactly("true:1", "false:2");
         assertThat(evidence.path("status").asText()).isEqualTo("INFRASTRUCTURE_FAILED");
         assertThat(evidence.path("failure_type").asText()).isEqualTo("MCP_TRANSPORT");
+        assertThat(evidence.path("retryable").asBoolean()).isFalse();
+    }
+
+    /**
+     * 重连后同一 execution ID 若已被取消，必须上报恢复耗尽，不能静默返回而遗漏 BLOCKED。
+     *
+     * @throws Exception JSON 解析失败
+     */
+    @Test
+    void shouldReportExhaustionWhenRecoveredExecutionIsCancelled() throws Exception {
+        AtomicInteger starts = new AtomicInteger();
+        AtomicInteger recoveries = new AtomicInteger();
+        List<String> incidents = new ArrayList<>();
+        ProjectTestRunner runner = new ProjectTestRunner() {
+            /** 首次返回可恢复超时，重连后的幂等查询返回取消终态。 */
+            @Override
+            public Mono<ProjectTestExecution> start(String executionId, String projectId) {
+                if (starts.incrementAndGet() == 1) {
+                    return Mono.just(new ProjectTestExecution(
+                            executionId,
+                            ProjectTestExecution.Status.TIMED_OUT,
+                            124,
+                            0,
+                            0,
+                            -1D,
+                            ProjectTestExecution.FailureType.COMMAND_TIMEOUT,
+                            true,
+                            "",
+                            ""
+                    ));
+                }
+                return Mono.just(new ProjectTestExecution(
+                        executionId,
+                        ProjectTestExecution.Status.CANCELLED,
+                        143,
+                        0,
+                        0,
+                        -1D,
+                        ProjectTestExecution.FailureType.CANCELLED,
+                        false,
+                        "",
+                        ""
+                ));
+            }
+
+            /** 本替身直接由 start 返回持久终态，不进入轮询。 */
+            @Override
+            public Mono<ProjectTestExecution> query(String executionId) {
+                return Mono.error(new AssertionError("不应查询"));
+            }
+
+            /** 本替身直接返回超时终态，不需要额外取消。 */
+            @Override
+            public Mono<ProjectTestExecution> cancel(String executionId) {
+                return Mono.error(new AssertionError("不应取消"));
+            }
+
+            /** 允许唯一一次连接重建。 */
+            @Override
+            public Mono<Boolean> recoverConnection() {
+                recoveries.incrementAndGet();
+                return Mono.just(true);
+            }
+        };
+        ProjectTestAgentTool tool = new ProjectTestAgentTool(
+                runner,
+                objectMapper,
+                Duration.ofMillis(1),
+                Duration.ofSeconds(1),
+                "rd",
+                (projectId, role, toolName, executionId, failureType, retryable, attempt) ->
+                        incidents.add(failureType + ":" + retryable + ":" + attempt)
+        );
+
+        JsonNode evidence = invoke(tool, "demo-project");
+
+        assertThat(starts).hasValue(2);
+        assertThat(recoveries).hasValue(1);
+        assertThat(incidents).containsExactly(
+                "COMMAND_TIMEOUT:true:1",
+                "CANCELLED:false:2"
+        );
+        assertThat(evidence.path("status").asText()).isEqualTo("CANCELLED");
+        assertThat(evidence.path("failure_type").asText()).isEqualTo("CANCELLED");
         assertThat(evidence.path("retryable").asBoolean()).isFalse();
     }
 

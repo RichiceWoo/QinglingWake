@@ -58,6 +58,8 @@
 6. 如果 AIO-Sandbox 当前 MCP 工具不支持 execution ID/状态查询，需要增加受控的无状态 Test Runner 适配层；不得用宿主机任意 Shell 绕开沙盒边界。
 7. 自动重试只允许用于具有稳定 execution ID 或已证明幂等的测试执行，不能盲目重放任意 Shell。
 8. 后续真实运行还暴露出独立的完成协议断点：RD 的结构化 `task_done` 被 Java 证据门禁拒绝后，模型仍可单独调用 `mark_done` 关闭 `task_assign`，使状态机停在 `CODE_IMPLEMENTATION`、Owner 保持 RD，但 mailbox 与 dispatch 都为空。该问题不是 MCP 故障，必须由工具层阻止而非依赖提示词。
+9. AgentScope 2.0.3 内置 `task_output` 默认阻塞 30 秒，并允许模型把等待参数提高到 600 秒；后台卸载后仍受核心 PT5M ToolExecutor 上限约束，因此不能仅靠缩短异步卸载阈值解决。
+10. `task_cancel` 只改变 Sub-Agent 任务终态，不会使仍在执行的父 Agent `Mono` 结束；若父模型不再返回，`SerialDispatchRegistry` 会持续保持 active/pending，必须由 Java 根据同 session 子任务终态主动终止父调用。
 
 ## 3. 功能点
 
@@ -73,6 +75,8 @@
 - [x] E2E 驱动同时监测阶段、incident、MCP 状态、mailbox 和 dispatch，遇到终态故障快速失败。
 - [x] 成功或失败均在 `finally` 保存脱敏证据，失败摘要必须给出真实上游原因。
 - [x] 流水线 `task_assign` 只能在合规 `task_done` 成功写入后由 Java 自动完成；门禁失败时禁止单独 `mark_done`，恢复任务并存时一次性收敛全部处理中分派。
+- [x] 构建 Harness 后用同名无阻塞实现替换内置 `task_output`；即使模型传入 `block=true` 或 600 秒 timeout，也只读取一次当前快照。
+- [x] 当前 session 的全部子任务进入终态且存在 FAILED/CANCELLED 时，Java 在短宽限后终止父调用、级联清理并释放 dispatch。
 - [ ] 完成四条真实 E2E 后回写父需求；未全部通过时不得标记父 Task 18 完成。
 
 ## 4. 业务规则
@@ -88,8 +92,10 @@
 9. API Key、Header、完整连接 URL 查询参数不得出现在日志、异常、`summary.json` 或测试证据中。
 10. E2E 不得 mock 模型或沙盒，不得放宽断言、跳过阶段或延长超时来掩盖失败。
 11. 任一真实场景连续两次从干净目录失败后必须暂停，不启动第三次，并完整记录两次根因。
-12. 当前真实 E2E 使用：`QINGLING_FREE_MODEL_SELECTION_ENABLED=false`、`QINGLING_AGENT_MODEL=qwen3-max`、`QINGLING_SUB_AGENT_MODEL=qwen3-max`；不得打印环境文件内容。
+12. 原始真实 E2E 基线使用 `qwen3-max`；经用户确认，2026-10-11 当前单次运行以进程级覆盖切换为 `QINGLING_FREE_MODEL_SELECTION_ENABLED=false`、`QINGLING_AGENT_MODEL=qwen3.8-flash`、`QINGLING_SUB_AGENT_MODEL=qwen3.8-flash`。不得打印环境文件内容，也不得把凭据写入证据。
 13. `task_done` 的证据门禁与原 `task_assign` 完成必须形成单向协议：先通过门禁并成功发送完成邮件，再由 Java 自动关闭任务；任何角色不得在完成回报失败后单独关闭流水线任务。
+14. `task_output` 是只读状态查询，不得接受模型参数重新引入分钟级阻塞；长任务等待由异步通知和后续非阻塞查询完成。
+15. 同一父 session 中所有子任务均已终止且至少一个失败或取消时，父 dispatch 不得无限占用串行队列；父 Agent 未在宽限期内自行结束时由运行时主动失败并取消。
 
 ## 5. 数据变更
 
@@ -113,8 +119,12 @@
 | 扩展 | `run_project_tests(project_id)` | 返回结构化成功、业务失败和基础设施失败，不再只返回普通错误文本 |
 | 新增/扩展 | 沙盒执行适配器 | 支持 execution ID、状态查询、取消、熔断和重建 |
 | 扩展 | workflow signal/event | 接收工具执行失败与运行时阻断，不推进业务阶段 |
-| 扩展 | `SerialDispatchRegistry` | 停止接收、活动查询、有限排空和取消 |
-| 扩展 | 运行时健康快照 | 暴露脱敏 MCP 可用状态、连续失败次数和最近恢复时间 |
+| 扩展 | `SerialDispatchRegistry` | 停止接收、活动查询、真实执行起始时间快照、有限排空和取消 |
+| 扩展 | AgentScope 父子执行生命周期 | 父调用取消时取消同 session 的非终态子任务，再 interrupt 父 Agent；上下文携带 project/role/stage，诊断快照只暴露脱敏状态 |
+| 替换 | `task_output` | 保留原工具名及兼容参数，但强制使用 `block=false` 的单次状态读取，消除 30 秒/600 秒内置等待与 PT5M 冲突 |
+| 扩展 | `AgentScopeAgentGateway` | 并行监控同 session 子任务；全部终态且含 FAILED/CANCELLED 时，在 2 秒收尾宽限后结束父调用并释放 dispatch |
+| 新增 | `async-tool-offload-timeout` | 将异步工具转后台阈值与业务 Agent 总等待时长解耦；默认 30 秒且强制小于 AgentScope 固定 5 分钟 ToolExecutor 上限 |
+| 扩展 | 运行时健康快照 | 暴露脱敏 MCP 可用状态、连续失败次数、最近恢复时间、AgentScope 子任务终态和 dispatch 活跃时长 |
 
 ## 7. 影响范围
 
@@ -160,7 +170,7 @@
 | 工作流故障 | Java 自动记录 incident 并恢复原 Owner | 不依赖模型在工具异常后自行发澄清 |
 | 停机顺序 | 先停止生产新任务，再排空/取消消费者 | 防止 shutdown 期间继续产生工作 |
 | 前置验证 | 零模型真实 Docker 连续工具契约 | 在消耗模型额度前发现通道耐久性问题 |
-| 模型 | 暂时保持显式 `qwen3-max` | 当前证据不足以说明更昂贵模型能解决工具故障 |
+| 模型 | 当前单次 E2E 显式使用 `qwen3.8-flash` | 最小 Function Calling 探针已证明模型可用；是否能完成全流程必须由真实 E2E 验证，不能用模型切换掩盖运行时故障 |
 
 ## 11. 执行日志
 
@@ -175,10 +185,30 @@
 | Task 6 dispatch 与 shutdown | 完成 | `SerialDispatchRegistry.java`、`WakeScheduler.java`、`RuntimeLifecycle.java`、`SerialDispatchRegistryTest.java`、`WakeSchedulerTest.java`、`RuntimeLifecycleTest.java` | shutdown 顺序固定为关闭入站、停止 watchdog、禁止一次性 wake、停止 Cron、停止 dispatch 接纳、有限排空、超时取消、关闭 Agent/MCP；取消会传播到活跃 Future 并阻止排队供应器启动；相关模块 201 项测试通过 |
 | Task 7 零模型压力契约与 E2E 诊断 | 完成 | `RealSandboxToolContractIT.java`、`RealTeamE2EDriver.java`、`RealTeamE2EDriverTest.java`、`McpSandboxConfiguration.java`、`McpProjectTestRunner.java`、`ProjectTestAgentTool.java`、`sandbox-docker-compose.yaml`、`pom.xml`、`E2E.md` 及对应测试 | 通用 Bash 强制 `new_session=false`，外层取消会打开熔断；关闭时先移除 AgentScope MCP client，再调用 AIO-Sandbox 1.11.0 原生 `DELETE /v1/shell/sessions`。E2E 专用容器禁用 shell 预热池，干净镜像的 pytest 依赖由固定 Docker 参数受控预置。`mvn verify` 通过 206 项；最终真实契约 1 IT 通过，完成 10 次 Shell、5 次 pytest、1 次连接恢复，NoCallModel 为 0，关闭后活动 shell 与 pytest/pip/tmux 均为 0 |
 | Task 8 前置修复 | 修复完成；等待再次确认重测 | `EventService.java`、`CommonTeamTools.java`、`DeterministicWorkflowTools.java`、`RealTeamE2EDriver.java` 及对应测试 | Java 边界兼容真实 AgentScope 的 task_done JSON 字符串并统一为 Map；完成门禁拒绝写入保留事件，Driver 对同阶段连续拒绝且 dispatch 空闲的情况直接报告原因。定向 18 项、默认 210 项和零模型真实 Docker 1 IT 均通过；按用户要求未启动新 E2E |
+| Task 8 根因复审与二次加固 | 代码修复完成；按用户要求暂停 E2E | `ProjectTestExecutionRegistry.java`、`McpProjectTestRunner.java`、`ProjectTestAgentTool.java`、`RoleToolkitFactory.java`、`TaskCompletionEvidenceGate.java`、`DeterministicWorkflowTools.java`、QA 模板、`RealSandboxToolContractIT.java`、`DashScopeModelSelector.java`、`RealTeamE2EDriver.java`、`E2E.md` 及对应测试 | 将 execution ID 与 project/role/stage 的真实终态绑定；门禁逐字段核对模型回报；QA 只运行真实 QA 契约，RD 在缺陷回修阶段一并运行该契约；所有基础设施终态（含超时）都进入一次受控重建，重连后若同一执行已取消或仍为基础设施终态，也会上报第二次不可重试 incident 并进入 BLOCKED；取消与 pytest 完成竞态时保留查询到的真实业务终态，不伪造超时；pytest 使用 importlib 模式消除跨目录同名模块冲突；E2E 启动前有界验证显式模型并保存脱敏启动失败证据。最新恢复定向 16 项通过，最终 `mvn verify` 通过 217 项，零模型真实 Docker 1 IT 通过 |
+| Task 8 单次 E2E（2026-10-11） | 未完成；启动预检失败 | `target/e2e-evidence/happy-path/summary.json`、`target/e2e-evidence/happy-path/failure-summary.json`、`test-spec.md`、`tasks.md`、`log.md` | 仅运行一次干净 `happy-path`；显式配置校验通过，但 `qwen3-max` Function Calling 预检返回 HTTP 404。Failsafe 为 1 test、0 failures、1 error、0 skipped，工作流与后续三个场景均未启动；没有自动重试。清理后活动 shell=0，pytest/pip/tmux=0 |
+| Task 8 `qwen3.8-flash` 单次 E2E（2026-10-11） | 未完成；代码阶段超时 | `target/e2e-evidence/happy-path/{summary.json,failure-summary.json,model-selection.json,project/events.jsonl}`、`target/e2e-workspace/.qingling-test-runs/44068f07-e3ca-470d-bfee-aae24e73eeef`、`tasks.md`、`test-spec.md`、`log.md` | 最小 Function Calling 探针与 E2E 启动预检均通过，真实 workflow 完成 checkpoint、PM 和 RD 技术设计并进入 `CODE_IMPLEMENTATION/RD`。`agent_spawn`、`agent_send`、`task_output` 多次在 AgentScope 外层 5 分钟超时，子任务却继续写入 `code/app` 与 `code/tests`；唯一 Test Runner 执行过早启动，终态 `FINISHED/exit_code=5/pytest_collected=0`，随后 task_done 因 execution 归属不匹配被拒绝。运行时未生成 `tool_execution_failed`/BLOCKED，Driver 最终仍以等待 `code/main.py` 30 分钟超时报错；整轮 Maven 44 分 29 秒。未重试、未启动其他场景；清理后 AIO session=0，pytest/pip/tmux 与宿主 Maven/Java 均无残留 |
+| Task 8 AgentScope 父子生命周期修复（2026-10-11） | 代码与非 E2E 验证完成；等待真实 E2E | `TeamAgentFactory.java`、`AgentScopeAgentGateway.java`、`Runner.java`、`ProjectTestAgentTool.java`、`RoleToolkitFactory.java`、`SerialDispatchRegistry.java`、`QinglingTeamProperties.java`、`RuntimeConfiguration.java`、`application.yml`、`config.yaml.template`、`RealTeamE2EDriver.java` 及对应测试 | 将异步工具转后台阈值从 30 分钟业务等待中拆分为默认 30 秒、最大 4 分钟，保证早于 AgentScope 固定 5 分钟工具上限；父调用取消/clearSession/close 会按 session 取消真实 TaskRepository 非终态子任务并 interrupt 父 Agent；`new_mail` RuntimeContext 传播 project ID，测试 execution 在调用开始冻结 project/role/stage；dispatch 快照记录真实 active_since，Driver 对“子任务均终态且存在失败/取消、父 dispatch 仍活跃”持续 20 秒后直接报告悬挂。定向 37 项、真实 Harness 取消 4 项、最终 `mvn verify` 223 项和零模型真实 Docker 1 IT 均通过；未调用百炼、未运行 E2E |
+| Task 8 `qwen3.8-flash` 修复后单次 E2E（2026-10-11） | 未完成；直接识别 AgentScope dispatch 悬挂 | `target/e2e-evidence/happy-path/{summary.json,failure-summary.json,model-selection.json,project/events.jsonl}`、RD AgentScope async-tool/task 状态、`tasks.md`、`test-spec.md`、`log.md` | 仅运行一次干净 `happy-path`，显式模型为 `qwen3.8-flash`。checkpoint、PM 产品设计和 RD 技术设计均完成并进入 `CODE_IMPLEMENTATION/RD`；30 秒异步卸载真实生效，但后台 `task_output` 自身仍触发 AgentScope 固定 PT5M 超时。级联取消将两个 `code_impl` 子任务置为 CANCELLED，却未结束父 `team:rd` dispatch；Driver 依据 `active_since` 和子任务终态在 1021 秒时直接失败，Maven 总耗时 17 分 31 秒，未再伪装为代码/QA 文件超时。没有生成代码文件或 Test Runner execution；未重试、未启动后三个场景。清理后 AIO session=0，pytest/pip/tmux 与宿主 Maven/Java 均无残留 |
+| Task 8 打包门禁修复与单次 E2E（2026-10-11） | 未完成；PM 首次 Shell 调用触发熔断 | `qingling-team-starter/pom.xml`、`README.md`、`target/e2e-evidence/happy-path/{summary.json,failure-summary.json,model-selection.json,project/events.jsonl}`、`tasks.md`、`test-spec.md`、`log.md` | Task 19 的 Spring Boot repackage 曾替换普通 starter JAR，导致 Failsafe 无法从根路径读取 `workspace-template/file-manifest.txt`；改为 `exec` classifier 后普通 JAR 与可执行 JAR 分离，默认 `mvn verify` 225 项及零模型真实 Docker 1 IT 均通过。本轮随后只执行一次干净 `qwen3.8-flash happy-path`：checkpoint 正常批准并迁移到 `PRODUCT_DESIGN/PM`，但 PM 把宿主机 `qingling-team-starter` 目录作为沙盒 working directory 调用 `sandbox_execute_bash`，AIO-Sandbox 返回目录不存在；该调用参数错误被当前 MCP 健康层计为连接故障并将单个 PM client 的工具熔断器置为 OPEN。Driver 在场景 190.2 秒直接报告 `circuit 持续 OPEN`，未伪装成产物超时。未重试、未启动后三个场景；finally 证据显示所有 dispatch pending=0、AgentScope active=0，外部复核 AIO session=0 且无 pytest/pip/tmux/Maven/Java 残留 |
+| Task 8 cwd 与熔断错误分类修复（2026-10-12） | 代码与非 E2E 验证完成；等待用户确认 | `McpSandboxConfiguration.java`、`RuntimeConfiguration.java`、`McpSandboxConfigurationTest.java`、`RealSandboxToolContractIT.java`、`tasks.md`、`test-spec.md`、`log.md` | 生产装配把宿主共享工作区和容器 `workspace-dir` 显式传给 MCP 包装层；`sandbox_execute_bash` 缺省 cwd 固定为容器挂载根，宿主 workspace 子路径按相对路径映射，AgentScope/Maven 的 `user.dir` 映射为容器根，且同步改写 ToolUse content。cwd/参数校验错误保持原始 ERROR 结果但不累计连接失败、不打开 circuit，真正异常、取消和无法识别的 ERROR 仍维持原熔断行为。定向 15 项、完整 `mvn verify` 227 项和零模型真实 Docker 1 IT 均通过；真实契约 10 次故意传宿主 cwd 的 Shell 全部在 `/workspace` 执行，5 次 pytest 与一次断线恢复通过，AIO session 和孤儿进程均为 0。本轮未运行 E2E |
+
+### 11.1 跨语言迁移根因评估（2026-10-10）
+
+| 候选原因 | 结论 | 证据 |
+|----------|------|------|
+| Java/COLA 技术选型 | 不是根因 | 分层模块、确定性状态机、类型化工具边界和 217 项默认回归均稳定；这些机制反而使故障可以被精确分类、熔断和阻断推进。风险集中在 AgentScope/MCP 集成边界，不在 Java 语言或 COLA 分层本身 |
+| Java 迁移实现 | 最近多轮失败的直接主因 | 曾缺少 execution ID 可信绑定、超时未进入 incident、QA 测试目标不独立、真实 ToolUse 字符串与 Map 类型不一致、任务关闭与完成回报可拆开。这些都是迁移实现缺口，现已在 Java 边界修复并由定向、默认及真实 Docker 契约验证 |
+| 原 Python 功能规划/实现 | 长期可靠性问题的重要来源 | Python Runner 捕获 Agent 异常后只记录日志，原 E2E 主要等待文件且成功条件未强制 QA 报告和 delivered 终态；测试可因环境缺失 skip，stale lease 与 shutdown 也缺少正式闭环。这会把真实上游故障拖成下游文件超时，并降低历史“通过/失败”结论的辨识度 |
+| 模型能力 | 不是当前首要阻断 | 真实 `qwen3-max` 曾将 12 项 pytest 从 8 失败修到 1 失败，后续一轮达到 13/13、覆盖率 94%；`qwen3.8-flash` 本轮也完成 checkpoint、产品设计和技术设计。两种模型最终都被工具协议或 Agent 子任务生命周期问题阻断 |
+| 模型配置/可用性 | 新一轮运行的独立前置阻断 | 2026-10-10 启动诊断和 2026-10-11 单次真实 E2E 均表明，当前配置的兼容端点对 `qwen3-max` 返回 HTTP 404；这只证明当前密钥、区域、端点和模型组合不可用，不能推出模型在阿里云全局下线。E2E 驱动已在 Spring 启动前有界探测并输出脱敏失败证据，2026-10-11 的运行因此在 1 个测试报错后快速退出，没有进入长时间 Agent 等待 |
+| AgentScope 子任务生命周期 | 部分修复已被真实 E2E 验证，仍是当前阻断 | 30 秒异步卸载已真实生效，父失败后两个 `code_impl` 子任务也正确进入 CANCELLED，证明卸载与子任务级联取消有效；但后台 `task_output` 自身仍受固定 PT5M ToolExecutor 上限约束，且取消子任务后父 `team:rd` dispatch 没有结束或转换为结构化 incident。Driver 已能在 1021 秒时报告直接悬挂原因，不再等待 30 分钟下游文件超时。下一步需让后台任务查询采用非阻塞/有界轮询或在子任务取消终态后确定性终止父回合，并将该失败接入状态机 |
+
+本次评估基于当前保留的诊断目录、事件/mailbox/MCP 证据和父需求记录；用户报告的五十余次历史运行并非每次都保留了完整证据，因此不对不可复核的单次失败做数量归因。综合判断是“原 Python 可靠性设计留下系统性弱点，Java 迁移在 AgentScope/MCP 边界出现直接实现缺口”，而不是 Java/COLA 选型失败。
 
 ## 12. 审查结论
 
-Task 1～7 已完成验证；Task 8 最近一次真实 `happy-path` 失败所暴露的 task_done 类型契约与 Driver fail-fast 问题已经修复，并通过定向、完整默认回归和零模型真实 Docker 契约。按用户要求本轮没有启动新 E2E；当前仍不得宣称 Task 18 已通过，Task 8、Task 9 与父需求 Task 18 必须保持未完成，等待用户再次确认后从干净 `happy-path` 开始。
+Task 1～7 已完成既有验证；Task 8 仍未完成。2026-10-12 已修复最新单次 E2E 暴露的两个直接问题：生产 MCP 包装层会把已知宿主 cwd 归一化到容器 `/workspace`，并将缺省 cwd 固定为该挂载点；AIO-Sandbox 明确返回的 cwd/参数校验错误不再污染连接健康度或打开 circuit。定向 15 项、默认 227 项及零模型真实 Docker 1 IT 全部通过；真实契约的 10 次 Shell 均故意携带宿主 `user.dir`，实际 `pwd` 全部为 `/workspace`，5 次 pytest 与一次连接恢复也通过，结束后 AIO session=0 且无孤儿进程。本轮遵守用户要求未启动 E2E。四条真实 E2E 尚未全部通过前，Task 8、Task 9 与父需求 Task 18 继续保持未完成。
 
 ## 13. 确认记录（HARD-GATE）
 

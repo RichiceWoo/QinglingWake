@@ -315,7 +315,25 @@ public final class Runner implements CronDispatchGateway {
         attributes.put("rootId", inbound.rootId());
         attributes.put("verbose", session.verbose());
         attributes.put("cron", inbound.cron());
+        String projectId = wakeProjectId(inbound);
+        if (projectId != null) {
+            attributes.put("projectId", projectId);
+        }
         return Map.copyOf(attributes);
+    }
+
+    /**
+     * 从内部 new_mail 唤醒中提取稳定项目标识，使父 Agent、Sub-Agent 和工具共享同一执行上下文。
+     *
+     * @param inbound 原始入站消息
+     * @return 项目标识；非项目邮件唤醒时返回 null
+     */
+    private static String wakeProjectId(InboundMessage inbound) {
+        if (!inbound.cron() || !inbound.content().startsWith(NEW_MAIL_WAKE_PREFIX)) {
+            return null;
+        }
+        String projectId = inbound.content().substring(NEW_MAIL_WAKE_PREFIX.length()).trim();
+        return projectId.isEmpty() ? null : projectId;
     }
 
     /**

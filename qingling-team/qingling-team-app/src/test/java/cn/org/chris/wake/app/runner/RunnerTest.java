@@ -183,6 +183,7 @@ class RunnerTest {
                     .contains("不得把 Maven 模块名、角色 workspace 名或历史项目名当成 project_id")
                     .contains("mark_done(project_id=\"todo-mvp\"")
                     .contains("原始唤醒：__wake__:new_mail:todo-mvp");
+            assertThat(request.attributes()).containsEntry("projectId", "todo-mvp");
         });
         assertThat(senderGateway.events).isEmpty();
     }

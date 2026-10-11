@@ -14,6 +14,7 @@ import io.agentscope.core.tool.Toolkit;
 import io.agentscope.harness.agent.HarnessAgent;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -325,6 +326,108 @@ class McpSandboxConfigurationTest {
     }
 
     /**
+     * Bash cwd 必须把宿主共享目录及 Maven 模块目录归一化为容器挂载点。
+     */
+    @Test
+    void shouldNormalizeHostWorkingDirectoriesToSandboxMount() {
+        AtomicReference<ToolCallParam> captured = new AtomicReference<>();
+        Path hostWorkspace = Path.of("/tmp/qingling-host-workspace").toAbsolutePath().normalize();
+        McpServerConfig server = new McpServerConfig();
+        server.setTransport(McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT);
+        server.setEnableTools(List.of("sandbox_execute_bash"));
+        McpSandboxConfiguration configuration = new McpSandboxConfiguration(
+                "aio-sandbox",
+                server,
+                (toolkit, servers, listener) -> {
+                    toolkit.registerAgentTool(new CapturingSandboxTool(captured));
+                    listener.onCompleted(McpServerRegistrationResult.success(
+                            "aio-sandbox", McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT
+                    ));
+                },
+                hostWorkspace,
+                "/workspace"
+        );
+        Toolkit toolkit = new Toolkit();
+        configuration.applyTo(HarnessAgent.builder(), toolkit);
+        AgentTool tool = toolkit.getTool("sandbox_execute_bash");
+
+        ToolUseBlock workspaceUse = new ToolUseBlock(
+                "call-host-workspace",
+                "sandbox_execute_bash",
+                Map.of("cmd", "pwd", "cwd", hostWorkspace.resolve("shared/projects/demo/code").toString())
+        );
+        ToolResultBlock workspaceResult = tool.callAsync(ToolCallParam.builder()
+                .toolUseBlock(workspaceUse)
+                .input(workspaceUse.getInput())
+                .build()).block();
+
+        assertThat(workspaceResult).isNotNull();
+        assertThat(captured.get().getInput())
+                .containsEntry("cwd", "/workspace/shared/projects/demo/code")
+                .containsEntry("new_session", false);
+
+        ToolUseBlock processUse = new ToolUseBlock(
+                "call-process-cwd",
+                "sandbox_execute_bash",
+                Map.of("cmd", "pwd", "cwd", System.getProperty("user.dir"))
+        );
+        ToolResultBlock processResult = tool.callAsync(ToolCallParam.builder()
+                .toolUseBlock(processUse)
+                .input(processUse.getInput())
+                .build()).block();
+
+        assertThat(processResult).isNotNull();
+        assertThat(captured.get().getInput()).containsEntry("cwd", "/workspace");
+        assertThat(captured.get().getToolUseBlock().getContent())
+                .contains("\"cwd\":\"/workspace\"")
+                .doesNotContain(System.getProperty("user.dir"));
+    }
+
+    /**
+     * 服务端明确返回调用参数错误时必须保持 circuit CLOSED，并允许下一次修正后的调用。
+     */
+    @Test
+    void shouldNotOpenCircuitForToolArgumentFailure() {
+        AtomicInteger calls = new AtomicInteger();
+        McpServerConfig server = new McpServerConfig();
+        server.setTransport(McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT);
+        server.setEnableTools(List.of("sandbox_execute_bash"));
+        McpSandboxConfiguration configuration = new McpSandboxConfiguration(
+                "aio-sandbox",
+                server,
+                (toolkit, servers, listener) -> {
+                    toolkit.registerAgentTool(new ArgumentErrorSandboxTool(calls));
+                    listener.onCompleted(McpServerRegistrationResult.success(
+                            "aio-sandbox", McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT
+                    ));
+                }
+        );
+        Toolkit toolkit = new Toolkit();
+        configuration.applyTo(HarnessAgent.builder(), toolkit);
+        ToolUseBlock use = new ToolUseBlock(
+                "call-invalid-cwd",
+                "sandbox_execute_bash",
+                Map.of("cmd", "pwd", "cwd", "/missing")
+        );
+        ToolCallParam param = ToolCallParam.builder().toolUseBlock(use).input(use.getInput()).build();
+
+        ToolResultBlock first = toolkit.getTool("sandbox_execute_bash").callAsync(param).block();
+        ToolResultBlock second = toolkit.getTool("sandbox_execute_bash").callAsync(param).block();
+
+        assertThat(first).isNotNull();
+        assertThat(first.getState()).isEqualTo(ToolResultState.ERROR);
+        assertThat(first.getOutput().toString()).contains("Working directory does not exist");
+        assertThat(second).isNotNull();
+        assertThat(second.getState()).isEqualTo(ToolResultState.ERROR);
+        assertThat(calls).hasValue(2);
+        assertThat(configuration.circuitHealth()).singleElement().satisfies(health -> {
+            assertThat(health.state()).isEqualTo(McpSandboxConfiguration.CircuitState.CLOSED);
+            assertThat(health.consecutiveFailures()).isZero();
+            assertThat(health.totalFailures()).isZero();
+        });
+    }
+
+    /**
      * AgentScope 外层超时取消 MCP Mono 时也必须打开熔断，供 E2E 快速报告直接原因。
      */
     @Test
@@ -428,6 +531,49 @@ class McpSandboxConfigurationTest {
         public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
             calls.incrementAndGet();
             return reactor.core.publisher.Mono.just(ToolResultBlock.error("Bearer top-secret"));
+        }
+    }
+
+    /** 返回确定性调用参数错误的模拟 MCP 工具。 */
+    private static final class ArgumentErrorSandboxTool implements AgentTool {
+
+        /** 底层实际调用次数，用于证明参数错误后没有快速熔断。 */
+        private final AtomicInteger calls;
+
+        /**
+         * 创建参数错误替身。
+         *
+         * @param calls 调用计数器
+         */
+        private ArgumentErrorSandboxTool(AtomicInteger calls) {
+            this.calls = calls;
+        }
+
+        /** 返回真实 MCP 工具名。 */
+        @Override
+        public String getName() {
+            return "sandbox_execute_bash";
+        }
+
+        /** 返回模拟参数错误说明。 */
+        @Override
+        public String getDescription() {
+            return "模拟工作目录参数错误";
+        }
+
+        /** 返回最小参数 schema。 */
+        @Override
+        public Map<String, Object> getParameters() {
+            return Map.of("type", "object");
+        }
+
+        /** 返回与真实 AIO-Sandbox 一致的 cwd 错误，不抛出传输异常。 */
+        @Override
+        public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            calls.incrementAndGet();
+            return reactor.core.publisher.Mono.just(ToolResultBlock.error(
+                    "Error calling tool 'sandbox_execute_bash': Working directory does not exist: /missing"
+            ));
         }
     }
 

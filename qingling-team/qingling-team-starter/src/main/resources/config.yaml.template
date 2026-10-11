@@ -15,6 +15,7 @@ qingling:
     model: qwen3-max
     sub-agent-model: qwen3-max
     free-model-selection-enabled: false
+    validate-explicit-model: false
     model-candidates:
       - qwen3.8-27b
       - qwen3.8-2.4t-a95b
@@ -30,6 +31,8 @@ qingling:
     max-input-tokens: 30000
     max-output-tokens: 8192
     sub-agent-max-iterations: 20
+    # 长工具必须在 AgentScope 核心 PT5M 超时前转入后台任务。
+    async-tool-offload-timeout: 30s
     timeout: 300s
 
   sandbox:

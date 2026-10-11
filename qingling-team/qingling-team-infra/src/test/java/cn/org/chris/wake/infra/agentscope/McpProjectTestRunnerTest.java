@@ -38,9 +38,28 @@ class McpProjectTestRunnerTest {
         assertThat(input.get().get("cmd").toString())
                 .contains("mkdir '/workspace/.qingling-test-runs/" + EXECUTION_ID + "'")
                 .contains("cd '/workspace/shared/projects/demo-project/code'")
+                .contains("test_targets='. ../qa/contract_tests/test_contract.py'")
                 .contains("timeout --signal=TERM --kill-after=5s 270s")
-                .contains("python -m pytest --disable-warnings --cov=. --cov-report=term-missing")
+                .contains("python -m pytest --disable-warnings --import-mode=importlib")
+                .contains("--cov=. --cov-report=term-missing")
                 .doesNotContain("/tmp/code", "/workspace/rd/code");
+    }
+
+    /**
+     * QA Runner 必须只执行独立契约文件，不能用 RD 自测结果冒充 QA 验收。
+     */
+    @Test
+    void shouldRestrictQaRunnerToIndependentContractSuite() {
+        AtomicReference<Map<String, Object>> input = new AtomicReference<>();
+        Toolkit toolkit = new Toolkit();
+        toolkit.registerAgentTool(new FakeSandboxTool(input, "__QINGLING_STATUS__=RUNNING\n"));
+        McpProjectTestRunner runner = new McpProjectTestRunner(toolkit, new ObjectMapper(), "qa");
+
+        runner.start(EXECUTION_ID, "demo-project").block();
+
+        assertThat(input.get().get("cmd").toString())
+                .contains("test_targets='../qa/contract_tests/test_contract.py'")
+                .doesNotContain("test_targets='. ../qa/contract_tests/test_contract.py'");
     }
 
     /**

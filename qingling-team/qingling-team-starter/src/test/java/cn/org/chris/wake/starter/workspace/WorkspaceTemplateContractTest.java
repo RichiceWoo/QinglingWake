@@ -334,14 +334,15 @@ class WorkspaceTemplateContractTest {
                 .contains("回读失败时不得发送 `task_done`");
         assertThat(testRun)
                 .contains("不得发明测试契约")
-                .contains("优先执行共享代码自带测试")
+                .contains("QA 契约独立于 RD 自测")
                 .contains("计划错误，不执行")
                 .contains("正式产物只能用 `write_shared`")
-                .contains("直接在 `/workspace/shared/projects/{pid}/code`")
+                .contains("pytest 目录和目标只能由 `run_project_tests` 决定")
                 .contains("禁止逐个 `read_shared` 后复制到 `/tmp`")
                 .contains("禁止 QA 直接向 RD 发送 `task_assign`")
                 .contains("read_shared(pid, \"qa/test_report.md\")")
                 .contains("qa/contract_tests/test_contract.py")
+                .contains("缺少契约文件时执行必须失败")
                 .contains("可执行用例数 == QA 契约测试 collected 数")
                 .contains("禁止修改预期")
                 .contains("test -s requirements.txt");

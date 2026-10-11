@@ -39,11 +39,13 @@ class DashScopeModelSelectorTest {
         assertThat(probed).containsExactly("qwen3.8-27b", "deepseek-v4.1-flash");
     }
 
-    /** 关闭动态探测时必须直接使用显式模型且不能访问网络。 */
+    /** 关闭动态选择时仍须探测显式模型，避免无效模型拖到首轮业务请求才超时。 */
     @Test
-    void shouldUseConfiguredModelWithoutProbeWhenDisabled() {
+    void shouldProbeConfiguredModelWhenDynamicSelectionDisabled() {
+        List<String> probed = new ArrayList<>();
         DashScopeModelSelector selector = new DashScopeModelSelector((endpoint, apiKey, model, timeout) -> {
-            throw new AssertionError("关闭动态选择后不应发起探测");
+            probed.add(model);
+            return new DashScopeModelSelector.ProbeResult(true, "available");
         });
 
         DashScopeModelSelector.Selection selection = selector.select(agent(
@@ -53,7 +55,40 @@ class DashScopeModelSelectorTest {
         assertThat(selection.modelName()).isEqualTo("qwen3.8-max");
         assertThat(selection.dynamicallySelected()).isFalse();
         assertThat(selection.selectionMode()).isEqualTo("explicit");
+        assertThat(selection.attempts()).extracting(DashScopeModelSelector.Attempt::status)
+                .containsExactly("available");
+        assertThat(probed).containsExactly("qwen3.8-max");
+    }
+
+    /** 普通生产启动未开启显式探针时保持原有零额外模型调用行为。 */
+    @Test
+    void shouldUseConfiguredModelWithoutProbeByDefault() {
+        DashScopeModelSelector selector = new DashScopeModelSelector((endpoint, apiKey, model, timeout) -> {
+            throw new AssertionError("未启用显式模型探针时不应访问网络");
+        });
+
+        DashScopeModelSelector.Selection selection = selector.select(agent(
+                false, false, "qwen3.8-max", null
+        ));
+
+        assertThat(selection.modelName()).isEqualTo("qwen3.8-max");
+        assertThat(selection.dynamicallySelected()).isFalse();
         assertThat(selection.attempts()).isEmpty();
+    }
+
+    /** 显式模型不存在或不支持工具调用时必须在启动阶段以脱敏原因失败。 */
+    @Test
+    void shouldFailFastWhenConfiguredModelIsUnavailable() {
+        DashScopeModelSelector selector = new DashScopeModelSelector((endpoint, apiKey, model, timeout) ->
+                new DashScopeModelSelector.ProbeResult(false, "http_404")
+        );
+
+        assertThatThrownBy(() -> selector.select(agent(false, "qwen3-max", null)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("显式 DashScope 模型不可用")
+                .hasMessageContaining("model=qwen3-max")
+                .hasMessageContaining("status=http_404")
+                .hasMessageNotContaining("test-api-key");
     }
 
     /** 所有候选不可用或不支持工具调用时应带脱敏状态失败，禁止静默使用付费模型。 */
@@ -93,10 +128,21 @@ class DashScopeModelSelectorTest {
             String model,
             List<String> candidates
     ) {
+        return agent(freeModelSelection, true, model, candidates);
+    }
+
+    /** 构造可指定显式模型探针开关的完整 Agent 配置。 */
+    private static QinglingTeamProperties.Agent agent(
+            boolean freeModelSelection,
+            boolean validateExplicitModel,
+            String model,
+            List<String> candidates
+    ) {
         return new QinglingTeamProperties.Agent(
                 model,
                 model,
                 freeModelSelection,
+                validateExplicitModel,
                 candidates,
                 URI.create("https://example.invalid/chat/completions"),
                 Duration.ofSeconds(1),
@@ -104,6 +150,7 @@ class DashScopeModelSelectorTest {
                 30_000,
                 8_192,
                 20,
+                Duration.ofSeconds(30),
                 Duration.ofMinutes(5),
                 "test-api-key"
         );

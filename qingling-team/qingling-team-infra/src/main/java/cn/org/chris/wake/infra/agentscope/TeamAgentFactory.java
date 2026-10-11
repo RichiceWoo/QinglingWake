@@ -26,6 +26,9 @@ public final class TeamAgentFactory {
     /** 保持业务编排顺序稳定的四角色列表。 */
     public static final List<String> TEAM_ROLES = List.of("manager", "pm", "rd", "qa");
 
+    /** AgentScope 核心工具执行器固定五分钟上限前必须完成异步卸载。 */
+    private static final Duration MAX_ASYNC_TOOL_OFFLOAD_TIMEOUT = Duration.ofMinutes(4);
+
     /** 四角色共享的模型实例。 */
     private final Model model;
 
@@ -47,8 +50,8 @@ public final class TeamAgentFactory {
     /** Harness workspace 上下文允许的最大 token 数。 */
     private final int maxContextTokens;
 
-    /** 异步工具和 MCP 调用等待上限。 */
-    private final Duration asyncToolTimeout;
+    /** 长工具转入 AgentScope 后台任务前的等待时间，必须短于核心工具执行器上限。 */
+    private final Duration asyncToolOffloadTimeout;
 
     /**
      * 创建只启用团队工具、workspace Skill 和声明式 Sub-Agent 的默认工厂。
@@ -64,7 +67,7 @@ public final class TeamAgentFactory {
             RoleSubagentFactory subagentFactory,
             McpSandboxConfiguration sandboxConfiguration
     ) {
-        this(model, toolkitFactory, subagentFactory, sandboxConfiguration, Map.of(), 30, 30_000, Duration.ofSeconds(300));
+        this(model, toolkitFactory, subagentFactory, sandboxConfiguration, Map.of(), 30, 30_000, Duration.ofSeconds(30));
     }
 
     /**
@@ -84,7 +87,7 @@ public final class TeamAgentFactory {
             Map<String, Set<String>> activeSkillsByRole
     ) {
         this(model, toolkitFactory, subagentFactory, sandboxConfiguration, activeSkillsByRole,
-                30, 30_000, Duration.ofSeconds(300));
+                30, 30_000, Duration.ofSeconds(30));
     }
 
     /**
@@ -98,7 +101,7 @@ public final class TeamAgentFactory {
             Map<String, Set<String>> activeSkillsByRole,
             int maxIterations,
             int maxContextTokens,
-            Duration asyncToolTimeout
+            Duration asyncToolOffloadTimeout
     ) {
         this.model = Objects.requireNonNull(model, "model 不能为空");
         this.toolkitFactory = Objects.requireNonNull(toolkitFactory, "toolkitFactory 不能为空");
@@ -112,7 +115,7 @@ public final class TeamAgentFactory {
         }
         this.maxIterations = maxIterations;
         this.maxContextTokens = maxContextTokens;
-        this.asyncToolTimeout = requirePositive(asyncToolTimeout);
+        this.asyncToolOffloadTimeout = requireSafeOffloadTimeout(asyncToolOffloadTimeout);
     }
 
     /**
@@ -136,7 +139,7 @@ public final class TeamAgentFactory {
                 .subagents(subagents)
                 .maxIters(maxIterations)
                 .maxContextTokens(maxContextTokens)
-                .asyncToolTimeout(asyncToolTimeout)
+                .asyncToolTimeout(asyncToolOffloadTimeout)
                 // 长工具链被中断后，由 AgentScope 注入缺失工具结果，使后续 wake 能继续修复或明确失败。
                 .enablePendingToolRecovery(true)
                 // 团队运行时无人值守；沙盒命令在隔离容器执行，宿主工具仍受各自边界校验保护。
@@ -147,14 +150,22 @@ public final class TeamAgentFactory {
                 .disableShellTool();
         HarnessAgent.Builder configuredBuilder = sandboxConfiguration.applyTo(builder, toolkit);
         if (sandboxConfiguration.enabled() && Set.of("rd", "qa").contains(role)) {
-            toolkit.registerAgentTool(new ProjectTestAgentTool(
-                    toolkit,
-                    new com.fasterxml.jackson.databind.ObjectMapper(),
-                    role,
-                    toolkitFactory::reportToolExecutionFailure
-            ));
+            toolkit.registerAgentTool(toolkitFactory.createProjectTestTool(toolkit, role));
         }
-        return configuredBuilder.build();
+        HarnessAgent agent = configuredBuilder.build();
+        replaceBlockingTaskOutput(agent);
+        return agent;
+    }
+
+    /**
+     * 在 Harness 完成内置工具装配后替换 task_output，防止模型请求的等待时长撞上核心五分钟超时。
+     *
+     * @param agent 已完成构建的角色 Agent
+     */
+    private static void replaceBlockingTaskOutput(HarnessAgent agent) {
+        Toolkit runtimeToolkit = agent.getToolkit();
+        runtimeToolkit.removeTool("task_output");
+        runtimeToolkit.registerTool(new NonBlockingTaskOutputTool(agent.getTaskRepository()));
     }
 
     /**
@@ -211,11 +222,19 @@ public final class TeamAgentFactory {
         };
     }
 
-    /** 校验异步工具超时为正数。 */
-    private static Duration requirePositive(Duration timeout) {
-        Objects.requireNonNull(timeout, "asyncToolTimeout 不能为空");
+    /**
+     * 校验异步工具卸载阈值为正数且严格早于 AgentScope 核心工具执行器超时。
+     *
+     * @param timeout 异步工具卸载阈值
+     * @return 已校验阈值
+     */
+    private static Duration requireSafeOffloadTimeout(Duration timeout) {
+        Objects.requireNonNull(timeout, "asyncToolOffloadTimeout 不能为空");
         if (timeout.isZero() || timeout.isNegative()) {
-            throw new IllegalArgumentException("asyncToolTimeout 必须大于零");
+            throw new IllegalArgumentException("asyncToolOffloadTimeout 必须大于零");
+        }
+        if (timeout.compareTo(MAX_ASYNC_TOOL_OFFLOAD_TIMEOUT) > 0) {
+            throw new IllegalArgumentException("asyncToolOffloadTimeout 必须不大于 PT4M，以早于核心 PT5M 超时卸载");
         }
         return timeout;
     }

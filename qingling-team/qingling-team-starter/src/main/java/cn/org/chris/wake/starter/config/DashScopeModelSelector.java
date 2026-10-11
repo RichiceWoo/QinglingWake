@@ -53,7 +53,7 @@ public final class DashScopeModelSelector {
     }
 
     /**
-     * 动态选择第一个可用且支持工具调用的模型；关闭开关时直接返回显式模型。
+     * 动态选择第一个可用且支持工具调用的模型；显式模型仅在独立校验开关开启时探测。
      *
      * @param agent 模型选择配置
      * @return 最终模型及已探测候选的脱敏结果
@@ -61,31 +61,55 @@ public final class DashScopeModelSelector {
     public Selection select(QinglingTeamProperties.Agent agent) {
         Objects.requireNonNull(agent, "agent 配置不能为空");
         if (!agent.freeModelSelectionEnabled()) {
-            LOGGER.info("免费模型选择已关闭，使用显式模型: {}", agent.model());
-            return new Selection(requireText(agent.model(), "model"), List.of(), false);
+            String model = requireText(agent.model(), "model");
+            if (!agent.validateExplicitModel()) {
+                LOGGER.info("免费模型选择和显式模型探测均已关闭，使用显式模型: {}", model);
+                return new Selection(model, List.of(), false);
+            }
+            ProbeResult result = probe(agent, model);
+            Attempt attempt = new Attempt(model, result.status());
+            if (!result.available()) {
+                throw new IllegalStateException(
+                        "显式 DashScope 模型不可用或不支持 Function Calling: model="
+                                + model + ", status=" + result.status()
+                );
+            }
+            LOGGER.info("显式 DashScope 模型探测通过: {}", model);
+            return new Selection(model, List.of(attempt), false);
         }
         List<String> candidates = normalizedCandidates(agent.modelCandidates());
         List<Attempt> attempts = new ArrayList<>();
         for (String candidate : candidates) {
-            try {
-                ProbeResult result = transport.probe(
-                        agent.modelProbeUrl(), agent.apiKey(), candidate, agent.modelProbeTimeout()
-                );
-                attempts.add(new Attempt(candidate, result.status()));
-                if (result.available()) {
-                    LOGGER.info("已选择可用的 DashScope 免费模型: {}", candidate);
-                    return new Selection(candidate, attempts, true);
-                }
-                LOGGER.warn("DashScope 免费模型探测未通过: model={}, status={}", candidate, result.status());
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("DashScope 免费模型探测被中断", exception);
-            } catch (IOException | RuntimeException exception) {
-                attempts.add(new Attempt(candidate, "transport_error"));
-                LOGGER.warn("DashScope 免费模型探测失败: model={}, status=transport_error", candidate);
+            ProbeResult result = probe(agent, candidate);
+            attempts.add(new Attempt(candidate, result.status()));
+            if (result.available()) {
+                LOGGER.info("已选择可用的 DashScope 免费模型: {}", candidate);
+                return new Selection(candidate, attempts, true);
             }
+            LOGGER.warn("DashScope 免费模型探测未通过: model={}, status={}", candidate, result.status());
         }
         throw new IllegalStateException("没有可用且支持 Function Calling 的免费模型，探测结果=" + attempts);
+    }
+
+    /**
+     * 对单个模型执行有界探针，并把所有传输异常收敛为不含凭据的稳定状态。
+     *
+     * @param agent 模型与探针配置
+     * @param model 待验证模型名称
+     * @return 脱敏可用性结果
+     */
+    private ProbeResult probe(QinglingTeamProperties.Agent agent, String model) {
+        try {
+            return transport.probe(
+                    agent.modelProbeUrl(), agent.apiKey(), model, agent.modelProbeTimeout()
+            );
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("DashScope 模型探测被中断", exception);
+        } catch (IOException | RuntimeException exception) {
+            LOGGER.warn("DashScope 模型探测失败: model={}, status=transport_error", model);
+            return new ProbeResult(false, "transport_error");
+        }
     }
 
     /**

@@ -13,6 +13,7 @@ import reactor.core.publisher.Mono;
 
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -71,6 +72,9 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
     /** 解析 MCP 包装 JSON 的编解码器。 */
     private final ObjectMapper objectMapper;
 
+    /** 决定固定 pytest 收集范围的团队角色。 */
+    private final String role;
+
     /**
      * 创建受控 Docker Test Runner。
      *
@@ -78,8 +82,23 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
      * @param objectMapper JSON 编解码器
      */
     public McpProjectTestRunner(Toolkit toolkit, ObjectMapper objectMapper) {
+        this(toolkit, objectMapper, "rd");
+    }
+
+    /**
+     * 创建按 RD 或 QA 固定测试范围运行的受控 Docker Test Runner。
+     *
+     * @param toolkit 已包含 sandbox_execute_bash 的父 Toolkit
+     * @param objectMapper JSON 编解码器
+     * @param role rd 执行代码回归，qa 执行独立契约测试
+     */
+    public McpProjectTestRunner(Toolkit toolkit, ObjectMapper objectMapper, String role) {
         this.toolkit = Objects.requireNonNull(toolkit, "toolkit 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
+        this.role = Objects.requireNonNull(role, "role 不能为空");
+        if (!Set.of("rd", "qa").contains(role)) {
+            throw new IllegalArgumentException("Test Runner 角色只允许 rd 或 qa");
+        }
         if (!toolkit.getToolNames().contains(SANDBOX_TOOL_NAME)) {
             throw new IllegalStateException("创建 Test Runner 前缺少 sandbox_execute_bash");
         }
@@ -97,14 +116,20 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
         validateExecutionId(executionId);
         String runDirectory = runDirectory(executionId);
         String projectDirectory = "/workspace/shared/projects/" + projectId + "/code";
+        String targetSetup = "qa".equals(role)
+                ? "test_targets='../qa/contract_tests/test_contract.py'; "
+                : "test_targets='.'; if test -f '../qa/contract_tests/test_contract.py'; then "
+                        + "test_targets='. ../qa/contract_tests/test_contract.py'; fi; ";
         String command = "set -eu; mkdir -p '" + EXECUTION_ROOT + "'; "
                 + "if mkdir '" + runDirectory + "' 2>/dev/null; then "
                 + "printf '%s' '" + projectId + "' > '" + runDirectory + "/project_id'; "
                 + "printf RUNNING > '" + runDirectory + "/status'; "
                 + ": > '" + runDirectory + "/stdout'; : > '" + runDirectory + "/stderr'; "
                 + "setsid sh -c \"set +e; cd '" + projectDirectory + "'; "
+                + targetSetup
                 + "timeout --signal=TERM --kill-after=5s " + PROCESS_TIMEOUT_SECONDS + "s "
-                + "python -m pytest --disable-warnings --cov=. --cov-report=term-missing "
+                + "python -m pytest --disable-warnings --import-mode=importlib "
+                + "--cov=. --cov-report=term-missing --verbose \\$test_targets "
                 + ">'" + runDirectory + "/stdout' 2>'" + runDirectory + "/stderr'; "
                 + "rc=\\$?; printf '%s' \\\"\\$rc\\\" > '" + runDirectory + "/exit_code.tmp'; "
                 + "mv '" + runDirectory + "/exit_code.tmp' '" + runDirectory + "/exit_code'; "

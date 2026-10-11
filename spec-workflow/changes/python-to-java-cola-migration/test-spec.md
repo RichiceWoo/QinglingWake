@@ -206,7 +206,7 @@ Spring Boot `no-feishu` 模式启动；TestAPI 通过 CaptureSender 完成一轮
 - [x] 固化 Python golden fixtures。
 - [x] 实现 P0 单元与架构测试。
 - [x] 实现契约测试和 IT-01～IT-06。
-- [x] 运行默认 `mvn verify`（2026-09-29，155 tests）。
+- [x] 运行默认 `mvn verify`（2026-10-11，225 tests）。
 - [ ] 运行可选 pgvector profile。
 - [ ] 运行四条真实 E2E 并保存证据。
 - [x] 把当前未覆盖风险和失败证据同步到 `spec.md`/`log.md`（2026-09-29；四场景完成后仍需最终更新）。
@@ -261,3 +261,7 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 | 2026-10-01 | 最终默认 `mvn verify` | 通过（177 tests） | 六模块全部 SUCCESS；覆盖确定性 wake、MCP 完成态归一化、Java 工作流状态机、完成证据门禁及更新后的 `qa-defect-rd-fix` 驱动断言。默认 profile 未调用真实模型 |
 | 2026-10-01 | 零模型工具契约 + 最新 `qwen3-max` 干净 `happy-path` | 工具契约通过；真实 E2E 失败，不能计为通过 | `177 unit + 1 real tool contract` 先行通过。真实流程推进至 RD 代码阶段，pytest 因 `main.py` 相对导入在顶层加载时报错；RD heartbeat 恢复并发送澄清请求，但 Manager 没有可用的澄清响应协议把指导重新交给 RD。运行已终止且无遗留 E2E 进程；诊断保存于 `target/e2e-evidence/diagnostics/happy-path-20261001-2119-clarification-dead-end` |
 | 2026-10-02 | `WorkflowStateMachineTest,DeterministicWorkflowToolsTest,WorkspaceTemplateContractTest` + `mvn verify` | 通过（定向 27 tests；默认 182 tests） | 新增 `clarification_answered` 正式协议：Java 保持当前阶段、固定原 Owner、发送唯一的带恢复标识和澄清正文的 `task_assign` 并安排 wake；重复提交复用开放任务。覆盖空答复、错误 Owner、直发 `clarification_answer` 拒绝，以及 PM/RD/QA 模板恢复契约。本次未运行真实 E2E 或调用模型 |
+| 2026-10-11 | Task 19 `mvn verify` | 通过（225 tests，0 failure / 0 error / 0 skipped） | 六模块全部 SUCCESS；README 的默认验证命令得到实际确认。Spring Boot repackage 以 `exec` classifier 生成可执行 JAR，Manifest 包含 `Main-Class: org.springframework.boot.loader.launch.JarLauncher` 和 `Start-Class: cn.org.chris.wake.starter.QinglingTeamApplication`；普通主 JAR保留给 Failsafe 类路径。本次未运行真实 E2E、未调用百炼 |
+| 2026-10-11 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT -Dtool.contract.workspace="$(pwd)/target/e2e-workspace" verify` | 通过（1 IT） | Task 19 的 repackage 改用 `exec` classifier 后，Failsafe 普通 classpath 可重新读取 workspace 模板；真实 Docker、AgentScope、NoCallModel 压力契约通过，未调用百炼 |
+| 2026-10-11 | `mvn -Pe2e -De2e.scenario=happy-path verify`（仅一次） | 失败（1 failure、0 errors、0 skipped；场景 190.2 秒，Maven 3 分 19 秒），未启动后续场景 | 显式模型 `qwen3.8-flash` 可用且免费选择关闭；checkpoint 正常完成并进入 PM 产品设计。PM 首次 `sandbox_execute_bash` 传入宿主机模块目录，沙盒返回 working directory 不存在；当前错误分类把调用参数错误升级为 MCP circuit OPEN。Driver 快速报告直接原因，`finally` 保存脱敏证据。清理后 AIO session=0，且无 pytest/pip/tmux/Maven/Java 残留；Task 18 保持未完成 |
+| 2026-10-12 | cwd/熔断修复定向测试 + `mvn verify` + 零模型真实 Docker 工具契约 | 全部通过（15 tests + 227 tests + 1 IT） | 宿主 workspace 子路径和 Maven `user.dir` 均映射到 `/workspace`，参数错误不打开 circuit。真实 10 次 Shell 均传宿主 cwd 并断言容器 `pwd=/workspace`；5 次 pytest、一次受控恢复、AIO session=0 和无孤儿进程断言通过。未调用百炼、未运行 E2E |

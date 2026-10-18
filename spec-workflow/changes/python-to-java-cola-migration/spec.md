@@ -235,7 +235,7 @@
 | Task 15 日志查询、Metrics 与结构化日志 | 已完成 | app LogQueryService、infra JSONL/Metrics、starter CLI/metrics/logback | stats/tasks/steps/l1/all-agents Python 契约、7 类 Prometheus 指标、50MB×5 滚动 JSONL 与凭据掩码通过；对应命令共 137 项测试 |
 | Task 16 Starter、配置与生命周期装配 | 已完成 | starter Application/Properties/RuntimeConfiguration、YAML 模板、生命周期与路由 Sender | 无飞书 Spring 容器启动、配置 fail-fast、四角色 heartbeat/Cron、Runner 排空与反向关闭通过；对应命令共 140 项测试，未调用真实模型 |
 | Task 17 跨语言契约与无 LLM 集成测试 | 已完成 | `contract-fixtures/generate_contract_fixture.py`、starter contract fixtures/IT、Maven `contract-it` profile | Python 源快照无 `.git`，以目录及 11 个源文件 SHA-256 追溯；140 项单测与 10 项契约/集成测试通过，未调用真实 LLM、飞书或网络 |
-| Task 18 四条真实 E2E | 未完成；最新失败的 cwd 与熔断分类缺口已离线修复 | `sandbox-docker-compose.yaml`、`E2E.md`、starter `RealTeamE2E`/Driver、模型选择器、AgentScope 父子生命周期、Java 工作流状态机、完成证据门禁、`run_project_tests`、MCP cwd 归一化/熔断与零模型真实工具契约 | 2026-10-12 已把宿主 workspace 子路径和 Maven/AgentScope `user.dir` 映射为容器 `/workspace`，缺省 cwd 也固定到挂载点；AIO-Sandbox 明确返回的 cwd/参数错误不再打开 circuit。定向 15 项、默认 227 项及真实 Docker 1 IT 通过；契约中 10 次 Shell 故意传宿主 cwd，实际均在 `/workspace` 执行，5 次 pytest 与一次恢复也通过。未运行新 E2E，四条真实 E2E 尚未通过，Task 18 保持未完成 |
+| Task 18 四条真实 E2E | 未完成；当前阻断为 Test Runner 业务终态被误判为 RESULT_UNAVAILABLE | `sandbox-docker-compose.yaml`、`E2E.md`、starter `RealTeamE2E`/Driver、模型选择器、AgentScope 任务语义与父子生命周期、Java incident/工作流状态机、完成证据门禁、`run_project_tests`、MCP cwd 归一化/熔断与零模型真实工具契约、`target/e2e-evidence/happy-path` | 2026-10-15 只运行一次显式 `qwen3.8-flash happy-path`：流程完成 checkpoint、PM、RD 技术设计并进入代码实现，单一 spawn、终态后 continuation、无主动取消与 stale lease 恢复均生效。Test Runner 容器终态实际为 `FINISHED/exit_code=1`，pytest 32 collected、11 passed、21 failed、coverage 72%，却被 Java 返回为 `INFRASTRUCTURE_FAILED/RESULT_UNAVAILABLE/exit_code=null` 并进入 RECOVERING、BLOCKED，使业务失败无法交给 RD 正常修复。Driver 已直接报告结构化 incident，未退化为 QA 文件超时。未重试或启动后三个场景，退出后无孤儿进程；四条 E2E 尚未通过，Task 18 保持未完成 |
 | Task 19 迁移收尾与文档 | 已完成 | `qingling-team/README.md`、`qingling-team-starter/pom.xml`、父需求 `spec.md`/`tasks.md`/`test-spec.md`/`log.md` | README 已覆盖整体架构、端到端工作流、运行/部署、配置迁移、数据兼容、AgentScope 2.0.3、AIO-Sandbox、Python Skill 产物、pgvector DDL、升级/回滚、已知差异和 27 行迁移矩阵证据；starter 以 `exec` classifier 生成可执行 Spring Boot JAR并保留普通主 JAR供 Failsafe 使用。2026-10-11 `mvn verify` 六模块 SUCCESS，225 tests 全通过；Task 19 后续门禁暴露并修正了主产物被 repackage 后集成测试无法读取模板资源的问题；Task 18 仍未完成 |
 
 ## 12. 审查结论
@@ -243,6 +243,8 @@
 - 2026-09-25：原 Spec 不满足完整跨语言迁移，存在五项 P0。
 - 2026-09-25：用户选择 `1A / 2A / 3A / 4A / 5A`，本次修订将五项 P0 转化为明确范围、职责和验收项。
 - 当前结论：**用户已确认，可按 `tasks.md` 进入实现阶段。**
+- 2026-10-14：Task 18 最新 RD 取消恢复缺口已完成代码与非 E2E 验证，但未执行新的真实场景；四条 E2E 全部通过前，Task 18 继续保持未完成。
+- 2026-10-15：唯一一次新 `happy-path` 证明取消恢复与快速诊断链生效，同时暴露 Test Runner 对已完成 `exit_code=1` 的 pytest 业务失败错误升级为 `RESULT_UNAVAILABLE/BLOCKED`；修复并重新验证前，Task 18 继续保持未完成。
 
 ## 13. 确认记录（HARD-GATE）
 

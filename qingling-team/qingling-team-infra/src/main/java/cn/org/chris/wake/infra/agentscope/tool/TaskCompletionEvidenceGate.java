@@ -47,7 +47,7 @@ public final class TaskCompletionEvidenceGate {
         if ((stage == WorkflowStage.CODE_IMPLEMENTATION || stage == WorkflowStage.DEFECT_FIX)
                 && "rd".equals(role)) {
             ProjectTestExecution execution = requireRecordedExecution(projectId, stage, role, content);
-            validateRd(execution);
+            validateRd(projectId, execution);
         }
         if (stage == WorkflowStage.QA_TEST_EXECUTION && "qa".equals(role)) {
             ProjectTestExecution execution = requireRecordedExecution(projectId, stage, role, content);
@@ -89,9 +89,10 @@ public final class TaskCompletionEvidenceGate {
     /**
      * 要求 RD 引用的真实执行已经成功，并具有有效 pytest 与覆盖率证据。
      *
+     * @param projectId 当前项目标识
      * @param execution 已与当前项目、角色和阶段绑定的真实执行
      */
-    private static void validateRd(ProjectTestExecution execution) {
+    private void validateRd(String projectId, ProjectTestExecution execution) {
         if (execution.status() != ProjectTestExecution.Status.SUCCEEDED
                 || execution.exitCode() == null
                 || execution.exitCode() != 0) {
@@ -102,6 +103,12 @@ public final class TaskCompletionEvidenceGate {
         }
         if (execution.coveragePercent() < 0D || execution.coveragePercent() > 100D) {
             throw new IllegalStateException("RD task_done 被拒绝：真实执行缺少合法覆盖率证据");
+        }
+        if (!readableNonBlank(projectId, "code/main.py")) {
+            throw new IllegalStateException("RD task_done 被拒绝：缺少唯一应用入口 code/main.py");
+        }
+        if (readableNonBlank(projectId, "code/app/main.py")) {
+            throw new IllegalStateException("RD task_done 被拒绝：禁止同时存在替代入口 code/app/main.py");
         }
     }
 

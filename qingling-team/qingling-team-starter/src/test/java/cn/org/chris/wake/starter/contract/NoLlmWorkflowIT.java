@@ -14,6 +14,7 @@ import cn.org.chris.wake.app.session.SlashCommandService;
 import cn.org.chris.wake.domain.checkpoint.HumanInputClassifier;
 import cn.org.chris.wake.domain.gateway.AgentGateway;
 import cn.org.chris.wake.domain.gateway.MetricsGateway;
+import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.SenderGateway;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.AgentReply;
@@ -294,7 +295,8 @@ class NoLlmWorkflowIT {
                 attachments,
                 new SerialDispatchRegistry(Runnable::run),
                 new RoutingKeyResolver(),
-                MetricsGateway.noop()
+                MetricsGateway.noop(),
+                RuntimeIncidentGateway.noop()
         );
     }
 

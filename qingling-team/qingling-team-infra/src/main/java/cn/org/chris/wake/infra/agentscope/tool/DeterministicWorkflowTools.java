@@ -2,6 +2,7 @@ package cn.org.chris.wake.infra.agentscope.tool;
 
 import cn.org.chris.wake.domain.event.EventService;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
+import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.domain.workflow.WorkflowSignal;
 import cn.org.chris.wake.domain.workflow.WorkflowStage;
 import cn.org.chris.wake.domain.workflow.WorkflowStateMachine;
@@ -20,6 +21,9 @@ import java.util.Objects;
  * 将模型提交的评审结论转换为 Java 状态机决定的唯一阶段迁移。
  */
 public final class DeterministicWorkflowTools {
+
+    /** Agent 父回合故障写入 incident 时使用的稳定工具分类。 */
+    private static final String AGENT_SCOPE_DISPATCH_TOOL = "agentscope_dispatch";
 
     /** 阶段迁移纯领域状态机。 */
     private final WorkflowStateMachine stateMachine;
@@ -191,6 +195,116 @@ public final class DeterministicWorkflowTools {
             boolean retryable,
             int attempt
     ) {
+        reportToolExecutionFailure(
+                projectId,
+                role,
+                tool,
+                executionId,
+                failureType,
+                retryable,
+                attempt,
+                Map.of(),
+                retryable
+        );
+    }
+
+    /**
+     * 将一次 Agent 父回合故障映射到当前 workflow execution，并自动消耗一次恢复预算。
+     *
+     * <p>execution ID 由最近一次 workflow 迁移序号、阶段和 Owner 构成，因此恢复任务不会
+     * 因 AgentScope 子任务 ID 或 session 变化而获得新的重试预算。occurrence ID 用于防止同一
+     * dispatch 的重复回调被误判为第二次失败。</p>
+     *
+     * @param projectId 项目标识
+     * @param role 当前 workflow Owner
+     * @param occurrenceId 当前入站 dispatch 的稳定标识
+     * @param failureType 脱敏 Agent 执行失败分类
+     */
+    public synchronized void reportAgentExecutionFailure(
+            String projectId,
+            String role,
+            String occurrenceId,
+            AgentExecutionException.FailureType failureType
+    ) {
+        String checkedProjectId = AgentToolSupport.requireProjectId(projectId);
+        String checkedRole = AgentToolSupport.requireText(role, "role").trim().toLowerCase(Locale.ROOT);
+        String checkedOccurrenceId = AgentToolSupport.requireText(occurrenceId, "occurrence_id");
+        AgentExecutionException.FailureType checkedFailureType = Objects.requireNonNull(
+                failureType, "failureType 不能为空"
+        );
+        List<Map<String, Object>> events = eventService.readAll(checkedProjectId);
+        WorkflowStage current = currentStage(events);
+        long transitionSequence = currentWorkflowTransitionSequence(events, current);
+        String executionId = "agentscope:%s:%d:%s:%s".formatted(
+                checkedProjectId, transitionSequence, current.name(), checkedRole
+        );
+        List<Map<?, ?>> existingIncidents = agentIncidentPayloads(events, executionId);
+        if (existingIncidents.stream().anyMatch(payload -> "BLOCKED".equals(
+                String.valueOf(payload.get("runtime_status"))
+        ))) {
+            return;
+        }
+        if (existingIncidents.stream().anyMatch(payload -> checkedOccurrenceId.equals(
+                String.valueOf(payload.get("occurrence_id"))
+        ))) {
+            reportToolExecutionFailure(
+                    checkedProjectId,
+                    checkedRole,
+                    AGENT_SCOPE_DISPATCH_TOOL,
+                    executionId,
+                    checkedFailureType.name(),
+                    true,
+                    1,
+                    Map.of(
+                            "occurrence_id", checkedOccurrenceId,
+                            "failure_fingerprint", checkedFailureType.name()
+                    ),
+                    true
+            );
+            return;
+        }
+        int attempt = existingIncidents.isEmpty() ? 1 : 2;
+        boolean retryable = attempt == 1;
+        reportToolExecutionFailure(
+                checkedProjectId,
+                checkedRole,
+                AGENT_SCOPE_DISPATCH_TOOL,
+                executionId,
+                checkedFailureType.name(),
+                retryable,
+                attempt,
+                Map.of(
+                        "occurrence_id", checkedOccurrenceId,
+                        "failure_fingerprint", checkedFailureType.name()
+                ),
+                retryable
+        );
+    }
+
+    /**
+     * 持久化单次结构化故障，并按调用方策略决定是否先释放当前任务分派。
+     *
+     * @param projectId 项目标识
+     * @param role 当前 workflow Owner
+     * @param tool 工具名称
+     * @param executionId 稳定执行标识
+     * @param failureType 脱敏失败分类
+     * @param retryable 是否允许自动恢复
+     * @param attempt 当前恢复尝试序号
+     * @param additionalPayload 由 Java 边界生成的额外幂等字段
+     * @param releaseTaskAssignments 恢复前是否释放当前处理中任务
+     */
+    private void reportToolExecutionFailure(
+            String projectId,
+            String role,
+            String tool,
+            String executionId,
+            String failureType,
+            boolean retryable,
+            int attempt,
+            Map<String, Object> additionalPayload,
+            boolean releaseTaskAssignments
+    ) {
         String checkedProjectId = AgentToolSupport.requireProjectId(projectId);
         String checkedRole = AgentToolSupport.requireText(role, "role").trim().toLowerCase(Locale.ROOT);
         String checkedTool = AgentToolSupport.requireText(tool, "tool");
@@ -201,6 +315,11 @@ public final class DeterministicWorkflowTools {
         }
         String incidentId = checkedExecutionId + ":" + attempt;
         if (hasIncident(checkedProjectId, incidentId)) {
+            if (retryable) {
+                ensureRecoveryScheduled(
+                        checkedProjectId, checkedRole, checkedExecutionId, checkedFailureType, attempt
+                );
+            }
             return;
         }
         WorkflowStage current = currentStage(checkedProjectId);
@@ -226,25 +345,84 @@ public final class DeterministicWorkflowTools {
         payload.put("workflow_stage", current.name());
         payload.put("owner", checkedRole);
         payload.put("runtime_status", retryable ? "RECOVERING" : "BLOCKED");
+        payload.putAll(additionalPayload);
         eventService.appendToolExecutionFailed(checkedProjectId, payload);
         if (retryable) {
-            mailboxService.send(
+            if (releaseTaskAssignments) {
+                mailboxService.releaseInProgressTaskAssignments(checkedProjectId, checkedRole);
+            }
+            scheduleRecovery(
                     checkedProjectId,
-                    transition.assignee(),
-                    "manager",
-                    "task_assign",
-                    transition.subject(),
-                    Map.of(
-                            "protocol", "tool_execution_failed",
-                            "execution_id", checkedExecutionId,
-                            "failure_type", checkedFailureType,
-                            "retry_attempt", attempt,
-                            "workflow_stage", current.name(),
-                            "resume_current_stage", true
-                    )
+                    checkedExecutionId,
+                    checkedFailureType,
+                    attempt,
+                    current,
+                    transition
             );
-            wakeScheduler.schedule(transition.assignee(), checkedProjectId);
         }
+    }
+
+    /**
+     * 对已持久化但副作用可能中断的 RECOVERING incident 补偿释放、邮件和唤醒动作。
+     *
+     * @param projectId 项目标识
+     * @param role 当前 workflow Owner
+     * @param executionId 稳定执行标识
+     * @param failureType 脱敏失败分类
+     * @param attempt 当前恢复尝试序号
+     */
+    private void ensureRecoveryScheduled(
+            String projectId,
+            String role,
+            String executionId,
+            String failureType,
+            int attempt
+    ) {
+        WorkflowStage current = currentStage(projectId);
+        WorkflowTransition transition = stateMachine.transition(current, WorkflowSignal.TOOL_EXECUTION_FAILED);
+        if (!transition.assignee().equals(role)) {
+            throw new IllegalStateException(
+                    "阶段 " + current + " 的工具故障 Owner 必须为 " + transition.assignee()
+            );
+        }
+        mailboxService.releaseInProgressTaskAssignments(projectId, role);
+        scheduleRecovery(projectId, executionId, failureType, attempt, current, transition);
+    }
+
+    /**
+     * 幂等写入恢复任务并重新唤醒原 Owner；邮箱 Repository 会复用同一开放任务。
+     *
+     * @param projectId 项目标识
+     * @param executionId 稳定执行标识
+     * @param failureType 脱敏失败分类
+     * @param attempt 当前恢复尝试序号
+     * @param current 当前 workflow 阶段
+     * @param transition 保持当前阶段的工具故障迁移
+     */
+    private void scheduleRecovery(
+            String projectId,
+            String executionId,
+            String failureType,
+            int attempt,
+            WorkflowStage current,
+            WorkflowTransition transition
+    ) {
+        mailboxService.send(
+                projectId,
+                transition.assignee(),
+                "manager",
+                "task_assign",
+                transition.subject(),
+                Map.of(
+                        "protocol", "tool_execution_failed",
+                        "execution_id", executionId,
+                        "failure_type", failureType,
+                        "retry_attempt", attempt,
+                        "workflow_stage", current.name(),
+                        "resume_current_stage", true
+                )
+        );
+        wakeScheduler.schedule(transition.assignee(), projectId);
     }
 
     /**
@@ -269,7 +447,16 @@ public final class DeterministicWorkflowTools {
      * @return 当前唯一阶段
      */
     public WorkflowStage currentStage(String projectId) {
-        List<Map<String, Object>> events = eventService.readAll(projectId);
+        return currentStage(eventService.readAll(projectId));
+    }
+
+    /**
+     * 从已读取事件中恢复最近 workflow 阶段，避免一次 incident 判定重复读取持久层。
+     *
+     * @param events 按 seq 排列的项目事件
+     * @return 最近阶段；尚无迁移时为需求 checkpoint
+     */
+    private static WorkflowStage currentStage(List<Map<String, Object>> events) {
         for (int index = events.size() - 1; index >= 0; index--) {
             Map<String, Object> event = events.get(index);
             if (!"workflow_transitioned".equals(event.get("action"))) {
@@ -284,6 +471,82 @@ public final class DeterministicWorkflowTools {
             }
         }
         return WorkflowStage.REQUIREMENTS_CHECKPOINT;
+    }
+
+    /**
+     * 返回进入当前阶段的最近一次 workflow 迁移序号，作为 Agent execution 的持久化根标识。
+     *
+     * @param events 按 seq 排列的项目事件
+     * @param current 当前 workflow 阶段
+     * @return 最近匹配迁移序号；初始 checkpoint 使用 project_created 序号或零
+     */
+    private static long currentWorkflowTransitionSequence(
+            List<Map<String, Object>> events,
+            WorkflowStage current
+    ) {
+        for (int index = events.size() - 1; index >= 0; index--) {
+            Map<String, Object> event = events.get(index);
+            if (!"workflow_transitioned".equals(event.get("action"))) {
+                continue;
+            }
+            Object payload = event.get("payload");
+            if (!(payload instanceof Map<?, ?> values)
+                    || !current.name().equals(String.valueOf(values.get("to_stage")))) {
+                continue;
+            }
+            Object sequence = event.get("seq");
+            try {
+                long parsed = sequence instanceof Number number
+                        ? number.longValue()
+                        : Long.parseLong(String.valueOf(sequence));
+                if (parsed > 0L) {
+                    return parsed;
+                }
+            } catch (NumberFormatException ignored) {
+                // 损坏或缺失的 seq 不能退化为不稳定 execution ID，继续检查更早的合法迁移。
+            }
+        }
+        if (current == WorkflowStage.REQUIREMENTS_CHECKPOINT) {
+            for (int index = events.size() - 1; index >= 0; index--) {
+                Map<String, Object> event = events.get(index);
+                if (!"project_created".equals(event.get("action"))) {
+                    continue;
+                }
+                Object sequence = event.get("seq");
+                try {
+                    long parsed = sequence instanceof Number number
+                            ? number.longValue()
+                            : Long.parseLong(String.valueOf(sequence));
+                    return Math.max(parsed, 0L);
+                } catch (NumberFormatException ignored) {
+                    // 初始事件序号损坏时使用固定零值，仍保持同一项目内 execution ID 稳定。
+                }
+            }
+            return 0L;
+        }
+        throw new IllegalStateException("当前阶段缺少合法 workflow_transitioned seq: " + current);
+    }
+
+    /**
+     * 筛选同一稳定 Agent execution 已持久化的结构化 incident。
+     *
+     * @param events 项目全部事件
+     * @param executionId 稳定 Agent execution 标识
+     * @return 按事件顺序排列的 incident payload
+     */
+    private static List<Map<?, ?>> agentIncidentPayloads(
+            List<Map<String, Object>> events,
+            String executionId
+    ) {
+        return events.stream()
+                .filter(event -> "tool_execution_failed".equals(event.get("action")))
+                .map(event -> event.get("payload"))
+                .filter(Map.class::isInstance)
+                .map(Map.class::cast)
+                .filter(payload -> AGENT_SCOPE_DISPATCH_TOOL.equals(String.valueOf(payload.get("tool"))))
+                .filter(payload -> executionId.equals(String.valueOf(payload.get("execution_id"))))
+                .map(payload -> (Map<?, ?>) payload)
+                .collect(java.util.stream.Collectors.toList());
     }
 
     /**

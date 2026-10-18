@@ -28,8 +28,11 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
     /** Docker 内持久保存 execution ID 状态的根目录。 */
     private static final String EXECUTION_ROOT = "/workspace/.qingling-test-runs";
 
-    /** 单份 stdout/stderr 允许返回的最大字节数。 */
-    private static final int OUTPUT_LIMIT = 32_768;
+    /** 单份 stdout/stderr 摘录允许返回的最大字节数，避免 MCP 响应截断终态元数据。 */
+    private static final int OUTPUT_LIMIT = 1_024;
+
+    /** 超长输出首尾各保留的字节数。 */
+    private static final int OUTPUT_EDGE_LIMIT = 480;
 
     /** pytest 进程硬超时秒数，低于 MCP 外层等待上限。 */
     private static final int PROCESS_TIMEOUT_SECONDS = 270;
@@ -37,26 +40,28 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
     /** 查询命令的 MCP 等待上限秒数。 */
     private static final int QUERY_TIMEOUT_SECONDS = 15;
 
-    /** pytest 输出中的 collected 数量。 */
-    private static final Pattern COLLECTED_PATTERN = Pattern.compile("collected\\s+(\\d+)\\s+items?");
-
-    /** pytest 简洁摘要中的通过数量。 */
-    private static final Pattern PASSED_PATTERN = Pattern.compile("(\\d+)\\s+passed");
-
-    /** pytest-cov TOTAL 行中的覆盖率。 */
-    private static final Pattern COVERAGE_PATTERN = Pattern.compile("(?m)^TOTAL\\s+.*?\\s+(\\d+(?:\\.\\d+)?)%\\s*$");
-
     /** 查询输出中的状态字段。 */
-    private static final Pattern STATUS_PATTERN = Pattern.compile("(?m)^__QINGLING_STATUS__=(.+)$");
+    private static final Pattern STATUS_PATTERN = Pattern.compile("__QINGLING_STATUS__=([^\\r\\n]+)");
 
     /** 查询输出中的退出码字段。 */
-    private static final Pattern EXIT_CODE_PATTERN = Pattern.compile("(?m)^__QINGLING_EXIT_CODE__=(-?\\d+)$");
+    private static final Pattern EXIT_CODE_PATTERN = Pattern.compile("__QINGLING_EXIT_CODE__=(-?\\d+)");
+
+    /** 查询输出中的 pytest 收集数量字段。 */
+    private static final Pattern PYTEST_COLLECTED_PATTERN = Pattern.compile("__QINGLING_PYTEST_COLLECTED__=(\\d+)");
+
+    /** 查询输出中的 pytest 通过数量字段。 */
+    private static final Pattern PYTEST_PASSED_PATTERN = Pattern.compile("__QINGLING_PYTEST_PASSED__=(\\d+)");
+
+    /** 查询输出中的覆盖率字段。 */
+    private static final Pattern COVERAGE_PERCENT_PATTERN = Pattern.compile(
+            "__QINGLING_COVERAGE_PERCENT__=(-?\\d+(?:\\.\\d+)?)"
+    );
 
     /** 查询输出中的 Base64 stdout 字段。 */
-    private static final Pattern STDOUT_PATTERN = Pattern.compile("(?m)^__QINGLING_STDOUT_B64__=(.*)$");
+    private static final Pattern STDOUT_PATTERN = Pattern.compile("__QINGLING_STDOUT_B64__=([^\\r\\n]*)");
 
     /** 查询输出中的 Base64 stderr 字段。 */
-    private static final Pattern STDERR_PATTERN = Pattern.compile("(?m)^__QINGLING_STDERR_B64__=(.*)$");
+    private static final Pattern STDERR_PATTERN = Pattern.compile("__QINGLING_STDERR_B64__=([^\\r\\n]*)");
 
     /** 常见凭据赋值的脱敏模式。 */
     private static final Pattern SECRET_ASSIGNMENT_PATTERN = Pattern.compile(
@@ -161,18 +166,34 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
     public Mono<ProjectTestExecution> query(String executionId) {
         validateExecutionId(executionId);
         String runDirectory = runDirectory(executionId);
-        String command = "set +e; run='" + runDirectory + "'; limit=" + OUTPUT_LIMIT + "; "
+        String command = "set +e; run='" + runDirectory + "'; "
                 + "if test ! -d \"$run\"; then status=MISSING; "
                 + "elif test -f \"$run/status\"; then status=$(cat \"$run/status\"); "
                 + "else status=MISSING; fi; "
-                + "if test \"$status\" = RUNNING && test -f \"$run/runner_pid\"; then "
+                + "exit_code=''; if test -f \"$run/exit_code\"; then exit_code=$(cat \"$run/exit_code\"); fi; "
+                + "if test -n \"$exit_code\" && test \"$status\" != CANCELLED; then status=FINISHED; "
+                + "elif test \"$status\" = FINISHED; then status=FINALIZING; "
+                + "elif test \"$status\" = RUNNING && test -f \"$run/runner_pid\"; then "
                 + "pid=$(cat \"$run/runner_pid\"); kill -0 \"$pid\" 2>/dev/null || status=ORPHANED; fi; "
                 + "printf '__QINGLING_STATUS__=%s\\n' \"$status\"; "
-                + "if test -f \"$run/exit_code\"; then printf '__QINGLING_EXIT_CODE__=%s\\n' \"$(cat \"$run/exit_code\")\"; fi; "
-                + "printf '__QINGLING_STDOUT_B64__='; test -f \"$run/stdout\" && tail -c \"$limit\" \"$run/stdout\" | base64 | tr -d '\\n'; printf '\\n'; "
-                + "printf '__QINGLING_STDERR_B64__='; test -f \"$run/stderr\" && tail -c \"$limit\" \"$run/stderr\" | base64 | tr -d '\\n'; printf '\\n'";
-        return callSandbox("query-" + executionId, command, QUERY_TIMEOUT_SECONDS)
-                .map(output -> parseExecution(executionId, output));
+                + "if test -n \"$exit_code\"; then printf '__QINGLING_EXIT_CODE__=%s\\n' \"$exit_code\"; fi; "
+                + "collected=$(grep -Eo 'collected [0-9]+ items?' \"$run/stdout\" 2>/dev/null "
+                + "| tail -n 1 | cut -d ' ' -f 2); "
+                + "passed=$(grep -Eo '[0-9]+ passed' \"$run/stdout\" 2>/dev/null "
+                + "| tail -n 1 | cut -d ' ' -f 1); "
+                + "coverage=$(grep -E '^TOTAL[[:space:]]' \"$run/stdout\" 2>/dev/null "
+                + "| tail -n 1 | grep -Eo '[0-9]+(\\.[0-9]+)?%' | tail -n 1 | tr -d '%'); "
+                + "printf '__QINGLING_PYTEST_COLLECTED__=%s\\n' \"${collected:-0}\"; "
+                + "printf '__QINGLING_PYTEST_PASSED__=%s\\n' \"${passed:-0}\"; "
+                + "printf '__QINGLING_COVERAGE_PERCENT__=%s\\n' \"${coverage:--1}\"";
+        return callSandbox("query-metadata-" + executionId, command, QUERY_TIMEOUT_SECONDS)
+                .map(output -> parseExecutionMetadata(executionId, output))
+                .flatMap(metadata -> metadata.status() == ProjectTestExecution.Status.SUCCEEDED
+                                || metadata.status() == ProjectTestExecution.Status.TEST_FAILED
+                                || metadata.status() == ProjectTestExecution.Status.TIMED_OUT
+                                || metadata.status() == ProjectTestExecution.Status.CANCELLED
+                        ? attachOutput(executionId, metadata)
+                        : Mono.just(metadata));
     }
 
     /**
@@ -240,25 +261,22 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
     }
 
     /**
-     * 解析查询标记与 pytest 摘要，并严格区分业务失败和基础设施失败。
+     * 解析小型终态元数据，并严格区分业务失败和基础设施失败。
      *
      * @param executionId 稳定执行标识
      * @param output 查询命令输出
      * @return 结构化执行结果
      */
-    private ProjectTestExecution parseExecution(String executionId, String output) {
+    private ProjectTestExecution parseExecutionMetadata(String executionId, String output) {
         String rawStatus = match(STATUS_PATTERN, output, "MISSING");
         Integer exitCode = integerMatch(EXIT_CODE_PATTERN, output);
-        String stdout = sanitize(decodeBase64(match(STDOUT_PATTERN, output, "")));
-        String stderr = sanitize(decodeBase64(match(STDERR_PATTERN, output, "")));
-        String combined = stdout + "\n" + stderr;
-        int passed = intMatch(PASSED_PATTERN, combined, 0);
-        int collected = intMatch(COLLECTED_PATTERN, combined, passed);
-        double coverage = doubleMatch(COVERAGE_PATTERN, combined, -1D);
+        int collected = intMatch(PYTEST_COLLECTED_PATTERN, output, 0);
+        int passed = intMatch(PYTEST_PASSED_PATTERN, output, 0);
+        double coverage = doubleMatch(COVERAGE_PERCENT_PATTERN, output, -1D);
         ProjectTestExecution.Status status;
         ProjectTestExecution.FailureType failureType;
         boolean retryable;
-        if ("RUNNING".equals(rawStatus)) {
+        if ("RUNNING".equals(rawStatus) || "FINALIZING".equals(rawStatus)) {
             status = ProjectTestExecution.Status.RUNNING;
             failureType = ProjectTestExecution.FailureType.NONE;
             retryable = false;
@@ -285,7 +303,85 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
         }
         return new ProjectTestExecution(
                 executionId, status, exitCode, collected, passed, coverage,
-                failureType, retryable, stdout, stderr
+                failureType, retryable, "", ""
+        );
+    }
+
+    /**
+     * 在终态元数据已经可靠取得后，再分别读取 stdout/stderr 的受限首尾摘录。
+     *
+     * <p>输出查询失败不会覆盖已经持久化的 pytest 终态，避免把 exit_code=1 的业务失败
+     * 再次误判为 MCP 基础设施故障。</p>
+     *
+     * @param executionId 稳定执行标识
+     * @param metadata 已解析的终态元数据
+     * @return 携带受限输出的同一终态；摘录不可用时保留空输出
+     */
+    private Mono<ProjectTestExecution> attachOutput(
+            String executionId,
+            ProjectTestExecution metadata
+    ) {
+        return readOutputExcerpt(executionId, "stdout", STDOUT_PATTERN)
+                .flatMap(stdout -> readOutputExcerpt(executionId, "stderr", STDERR_PATTERN)
+                        .map(stderr -> withOutput(metadata, stdout, stderr)))
+                .onErrorReturn(metadata);
+    }
+
+    /**
+     * 读取单个输出文件的受限首尾摘录，确保任一 MCP 响应都不会携带大段 pytest 正文。
+     *
+     * @param executionId 稳定执行标识
+     * @param stream 仅允许 stdout 或 stderr
+     * @param outputPattern 对应输出标记的解析模式
+     * @return 解码并脱敏后的摘录
+     */
+    private Mono<String> readOutputExcerpt(
+            String executionId,
+            String stream,
+            Pattern outputPattern
+    ) {
+        if (!Set.of("stdout", "stderr").contains(stream)) {
+            return Mono.error(new IllegalArgumentException("Test Runner 输出类型非法"));
+        }
+        String file = runDirectory(executionId) + "/" + stream;
+        String marker = "stdout".equals(stream)
+                ? "__QINGLING_STDOUT_B64__="
+                : "__QINGLING_STDERR_B64__=";
+        String command = "set +e; file='" + file + "'; printf '" + marker + "'; "
+                + "if test -f \"$file\"; then size=$(wc -c < \"$file\" | tr -d ' '); "
+                + "if test \"${size:-0}\" -le " + OUTPUT_LIMIT + "; then cat \"$file\"; "
+                + "else head -c " + OUTPUT_EDGE_LIMIT + " \"$file\"; "
+                + "printf '\\n... [output truncated] ...\\n'; "
+                + "tail -c " + OUTPUT_EDGE_LIMIT + " \"$file\"; fi; fi | base64 | tr -d '\\n'; "
+                + "printf '\\n'";
+        return callSandbox("query-" + stream + "-" + executionId, command, QUERY_TIMEOUT_SECONDS)
+                .map(output -> sanitize(decodeBase64(match(outputPattern, output, ""))));
+    }
+
+    /**
+     * 把受限输出附加到已经分类的终态，不允许输出内容反向改变状态或退出码。
+     *
+     * @param metadata 已可靠解析的终态元数据
+     * @param stdout 标准输出摘录
+     * @param stderr 标准错误摘录
+     * @return 完整结构化终态
+     */
+    private static ProjectTestExecution withOutput(
+            ProjectTestExecution metadata,
+            String stdout,
+            String stderr
+    ) {
+        return new ProjectTestExecution(
+                metadata.executionId(),
+                metadata.status(),
+                metadata.exitCode(),
+                metadata.pytestCollected(),
+                metadata.pytestPassed(),
+                metadata.coveragePercent(),
+                metadata.failureType(),
+                metadata.retryable(),
+                stdout,
+                stderr
         );
     }
 

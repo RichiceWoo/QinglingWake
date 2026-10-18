@@ -6,7 +6,9 @@ import cn.org.chris.wake.app.session.SlashCommandService;
 import cn.org.chris.wake.domain.gateway.AgentGateway;
 import cn.org.chris.wake.domain.gateway.CronDispatchGateway;
 import cn.org.chris.wake.domain.gateway.MetricsGateway;
+import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.SenderGateway;
+import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.domain.model.AgentReply;
 import cn.org.chris.wake.domain.model.AgentRequest;
 import cn.org.chris.wake.domain.model.InboundMessage;
@@ -56,6 +58,9 @@ public final class Runner implements CronDispatchGateway {
     /** 不依赖具体指标库的 Runner 观测端口。 */
     private final MetricsGateway metrics;
 
+    /** 将类型化 Agent 执行故障转换为确定性恢复或 BLOCKED incident。 */
+    private final RuntimeIncidentGateway runtimeIncidentGateway;
+
     /** 正在等待或执行的 wake 路由，用于抑制重复 heartbeat/new_mail。 */
     private final Set<String> inFlightWakeRoutes = ConcurrentHashMap.newKeySet();
 
@@ -70,6 +75,7 @@ public final class Runner implements CronDispatchGateway {
      * @param dispatchRegistry 串行调度注册表
      * @param routingKeyResolver 路由解析器
      * @param metrics Runner 指标端口
+     * @param runtimeIncidentGateway 运行时故障上报与阻断查询端口
      */
     public Runner(
             SessionRoutingService sessionRoutingService,
@@ -79,7 +85,8 @@ public final class Runner implements CronDispatchGateway {
             InboundAttachmentService attachmentService,
             SerialDispatchRegistry dispatchRegistry,
             RoutingKeyResolver routingKeyResolver,
-            MetricsGateway metrics
+            MetricsGateway metrics,
+            RuntimeIncidentGateway runtimeIncidentGateway
     ) {
         this.sessionRoutingService = Objects.requireNonNull(
                 sessionRoutingService, "sessionRoutingService 不能为空"
@@ -91,6 +98,9 @@ public final class Runner implements CronDispatchGateway {
         this.dispatchRegistry = Objects.requireNonNull(dispatchRegistry, "dispatchRegistry 不能为空");
         this.routingKeyResolver = Objects.requireNonNull(routingKeyResolver, "routingKeyResolver 不能为空");
         this.metrics = Objects.requireNonNull(metrics, "metrics 不能为空");
+        this.runtimeIncidentGateway = Objects.requireNonNull(
+                runtimeIncidentGateway, "runtimeIncidentGateway 不能为空"
+        );
     }
 
     /**
@@ -149,6 +159,7 @@ public final class Runner implements CronDispatchGateway {
             Throwable cause = unwrap(failure);
             metrics.recordFailure("runner", cause.getClass().getSimpleName());
             if (routingKeyResolver.isTeamRoute(inbound.routingKey())) {
+                reportTeamAgentFailure(inbound, cause);
                 return CompletableFuture.<Void>failedFuture(cause);
             }
             CompletableFuture<Void> notification;
@@ -165,6 +176,38 @@ public final class Runner implements CronDispatchGateway {
                 return (Void) null;
             }).thenCompose(ignored -> CompletableFuture.<Void>failedFuture(cause));
         }).thenCompose(future -> future);
+    }
+
+    /**
+     * 仅把带项目上下文的类型化 Agent 执行故障交给确定性 incident 端口，且不上报业务异常。
+     *
+     * <p>incident 上报失败只记录指标，Cron 仍必须收到原始 Agent 异常作为直接原因。</p>
+     *
+     * @param inbound 当前团队入站消息
+     * @param cause 已解包的原始失败
+     */
+    private void reportTeamAgentFailure(InboundMessage inbound, Throwable cause) {
+        if (!(cause instanceof AgentExecutionException agentFailure)) {
+            return;
+        }
+        String projectId = wakeProjectId(inbound);
+        try {
+            String role = routingKeyResolver.resolve(inbound).role();
+            if (projectId == null) {
+                runtimeIncidentGateway.reportUnscopedAgentExecutionFailure(
+                        role, inbound.msgId(), agentFailure.failureType()
+                );
+            } else {
+                runtimeIncidentGateway.reportAgentExecutionFailure(
+                        projectId,
+                        role,
+                        inbound.msgId(),
+                        agentFailure.failureType()
+                );
+            }
+        } catch (RuntimeException incidentFailure) {
+            metrics.recordFailure("runtime_incident", incidentFailure.getClass().getSimpleName());
+        }
     }
 
     /**

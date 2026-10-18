@@ -1,6 +1,7 @@
 package cn.org.chris.wake.starter.e2e;
 
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
+import cn.org.chris.wake.domain.model.CronJob;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -192,7 +193,8 @@ class RealTeamE2EDriverTest {
                         "todo-mvp",
                         activeSince,
                         List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
-                                "task-code", "code_impl", "CANCELLED", true, activeSince
+                                "task-code", "code_impl", "CANCELLED", true, activeSince,
+                                "SEND", "MODEL_REQUESTED", activeSince
                         ))
                 );
         Map<String, Instant> observed = new java.util.LinkedHashMap<>();
@@ -201,15 +203,186 @@ class RealTeamE2EDriverTest {
         );
 
         assertThat(RealTeamE2EDriver.hangingDispatchReason(
-                dispatch, List.of(diagnostic), observed, activeSince.plusSeconds(1), Duration.ofSeconds(20)
+                dispatch, List.of(diagnostic), observed, activeSince.plusSeconds(1),
+                Duration.ofSeconds(20), Duration.ofMinutes(5)
         )).isNull();
         String reason = RealTeamE2EDriver.hangingDispatchReason(
-                dispatch, List.of(diagnostic), observed, activeSince.plusSeconds(22), Duration.ofSeconds(20)
+                dispatch, List.of(diagnostic), observed, activeSince.plusSeconds(22),
+                Duration.ofSeconds(20), Duration.ofMinutes(5)
         );
 
         assertThat(reason)
                 .contains("team:rd", "role=rd", "todo-mvp", "task-code=CANCELLED")
                 .doesNotContain("qa/test_plan.md");
+    }
+
+    /** 同一子 Agent 的最新 continuation 仍在运行时，旧取消任务不得触发悬挂误报。 */
+    @Test
+    void shouldIgnoreOldCancelledTaskWhenLatestContinuationIsRunning() {
+        Instant activeSince = Instant.parse("2026-10-11T08:00:00Z");
+        AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic =
+                new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
+                        "rd", "session-rd", "team:rd", "todo-mvp", activeSince,
+                        List.of(
+                                new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                                        "task-1", "code_impl", "CANCELLED", true, activeSince,
+                                        "SPAWN", "MODEL_REQUESTED", activeSince
+                                ),
+                                new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                                        "task-2", "code_impl", "RUNNING", false,
+                                        activeSince.plusSeconds(1), "SEND", "NONE",
+                                        activeSince.plusSeconds(50)
+                                )
+                        )
+                );
+
+        String reason = RealTeamE2EDriver.hangingDispatchReason(
+                Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)),
+                List.of(diagnostic),
+                new java.util.LinkedHashMap<>(),
+                activeSince.plusSeconds(60),
+                Duration.ofSeconds(20),
+                Duration.ofMinutes(5)
+        );
+
+        assertThat(reason).isNull();
+    }
+
+    /** RUNNING 子任务真实进度租约过期时应直接报告 taskId，而不是等待 code/main.py 超时。 */
+    @Test
+    void shouldDescribeRunningChildWithoutProgressImmediately() {
+        Instant activeSince = Instant.parse("2026-10-11T08:00:00Z");
+        Instant lastProgressAt = activeSince.plusSeconds(30);
+        AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic =
+                new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
+                        "rd", "session-rd", "team:rd", "todo-mvp", activeSince,
+                        List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                                "task-stalled", "code_impl", "RUNNING", false,
+                                activeSince.plusSeconds(10), "SEND", "NONE", lastProgressAt
+                        ))
+                );
+
+        String reason = RealTeamE2EDriver.hangingDispatchReason(
+                Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)),
+                List.of(diagnostic),
+                new java.util.LinkedHashMap<>(),
+                activeSince.plusSeconds(331),
+                Duration.ofSeconds(20),
+                Duration.ofMinutes(5)
+        );
+
+        assertThat(reason)
+                .contains("team:rd", "task-stalled", "code_impl", lastProgressAt.toString())
+                .doesNotContain("qa/test_plan.md", "code/main.py");
+    }
+
+    /** 空闲 Cron 已记录 RD dispatch 失败时应报告取消主因，而不是继续等待 QA 文件。 */
+    @Test
+    void shouldDescribeIdleCronFailureWithOpenAssignmentDirectly() throws Exception {
+        Instant observedAt = Instant.parse("2026-10-12T15:56:40Z");
+        CronJob failedHeartbeat = failedRdHeartbeat(
+                observedAt.toEpochMilli(),
+                "AgentScope 子任务异常终止: code_impl=CANCELLED"
+        );
+        JsonNode assignment = new ObjectMapper().readTree("""
+                {"id":"msg-code","project_id":"todo-mvp","from":"manager","to":"rd",
+                "type":"task_assign","subject":"代码实现","status":"unread",
+                "timestamp":"2026-10-12T15:23:53Z",
+                "content":{"workflow_stage":"CODE_IMPLEMENTATION","instruction":"敏感业务正文"}}
+                """);
+        Map<String, Instant> firstObserved = new java.util.LinkedHashMap<>();
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> idleDispatch = Map.of(
+                "team:rd", new SerialDispatchRegistry.DispatchSnapshot(0, null)
+        );
+
+        assertThat(RealTeamE2EDriver.idleCronFailureReason(
+                List.of(failedHeartbeat), List.of(assignment), idleDispatch, List.of(),
+                firstObserved, observedAt, Duration.ofSeconds(20)
+        )).isNull();
+        String reason = RealTeamE2EDriver.idleCronFailureReason(
+                List.of(failedHeartbeat), List.of(assignment), idleDispatch, List.of(),
+                firstObserved, observedAt.plusSeconds(21), Duration.ofSeconds(20)
+        );
+
+        assertThat(reason)
+                .contains("heartbeat-rd", "team:rd", "code_impl=CANCELLED", "msg-code",
+                        "CODE_IMPLEMENTATION")
+                .doesNotContain("敏感业务正文", "qa/test_plan.md");
+    }
+
+    /** dispatch、AgentScope 或一次性 wake 仍承载恢复时不得把旧 Cron 错误误判为终态。 */
+    @Test
+    void shouldDeferCronFailureWhileRecoveryWorkExists() throws Exception {
+        Instant now = Instant.parse("2026-10-12T15:57:10Z");
+        CronJob failedHeartbeat = failedRdHeartbeat(
+                now.minusSeconds(30).toEpochMilli(),
+                "AgentScope 子任务异常终止: code_impl=CANCELLED"
+        );
+        JsonNode assignment = new ObjectMapper().readTree("""
+                {"id":"msg-code","to":"rd","type":"task_assign","status":"unread",
+                "timestamp":"2026-10-12T15:23:53Z","content":{"workflow_stage":"CODE_IMPLEMENTATION"}}
+                """);
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> idleDispatch = Map.of(
+                "team:rd", new SerialDispatchRegistry.DispatchSnapshot(0, null)
+        );
+        AgentScopeAgentGateway.ActiveExecutionDiagnostic activeAgent =
+                new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
+                        "rd", "session-rd", "team:rd", "todo-mvp", now, List.of()
+                );
+
+        assertThat(RealTeamE2EDriver.idleCronFailureReason(
+                List.of(failedHeartbeat), List.of(assignment),
+                Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, now)),
+                List.of(), new java.util.LinkedHashMap<>(), now, Duration.ZERO
+        )).isNull();
+        assertThat(RealTeamE2EDriver.idleCronFailureReason(
+                List.of(failedHeartbeat), List.of(assignment), idleDispatch,
+                List.of(activeAgent), new java.util.LinkedHashMap<>(), now, Duration.ZERO
+        )).isNull();
+        assertThat(RealTeamE2EDriver.idleCronFailureReason(
+                List.of(failedHeartbeat, rdRecoveryWake(now.plusSeconds(5).toEpochMilli())),
+                List.of(assignment), idleDispatch, List.of(),
+                new java.util.LinkedHashMap<>(), now, Duration.ZERO
+        )).isNull();
+    }
+
+    /** Cron 与开放邮箱证据必须保留路由诊断，同时排除正文并脱敏鉴权信息。 */
+    @Test
+    void shouldSanitizeCronAndOpenMailboxEvidence() throws Exception {
+        CronJob failedHeartbeat = failedRdHeartbeat(
+                Instant.parse("2026-10-12T15:56:36Z").toEpochMilli(),
+                "Authorization:secret Bearer abc.def"
+        );
+        JsonNode assignment = new ObjectMapper().readTree("""
+                {"id":"msg-code","project_id":"todo-mvp","from":"manager","to":"rd",
+                "type":"task_assign","subject":"秘密主题","status":"in_progress",
+                "timestamp":"2026-10-12T15:23:53Z","processing_since":"2026-10-12T15:24:00Z",
+                "content":{"workflow_stage":"CODE_IMPLEMENTATION","instruction":"秘密正文"}}
+                """);
+
+        String cronEvidence = RealTeamE2EDriver.cronJobEvidence(List.of(failedHeartbeat)).toString();
+        String mailboxEvidence = RealTeamE2EDriver.openMailboxEvidence(List.of(assignment)).toString();
+
+        assertThat(cronEvidence)
+                .contains("heartbeat-rd", "team:rd", "[REDACTED]")
+                .doesNotContain("secret", "abc.def");
+        assertThat(mailboxEvidence)
+                .contains("msg-code", "todo-mvp", "CODE_IMPLEMENTATION", "in_progress")
+                .doesNotContain("秘密主题", "秘密正文");
+    }
+
+    /** 阶段超时摘要应携带最后的 Cron 和 mailbox 诊断，但忽略无关快照字段。 */
+    @Test
+    void shouldAttachLastRuntimeSnapshotSummaryToTimeout() {
+        String summary = RealTeamE2EDriver.runtimeTimeoutSummary(Map.of(
+                "cron_jobs", List.of(Map.of("id", "heartbeat-rd", "last_error", "code_impl=CANCELLED")),
+                "mailbox_open", List.of(Map.of("id", "msg-code", "workflow_stage", "CODE_IMPLEMENTATION")),
+                "unrelated", "不应出现在超时摘要"
+        ));
+
+        assertThat(summary)
+                .contains("heartbeat-rd", "code_impl=CANCELLED", "msg-code", "CODE_IMPLEMENTATION")
+                .doesNotContain("不应出现在超时摘要");
     }
 
     /** 失败证据必须脱敏 API Key、Authorization 与 Bearer，并限制异常长度。 */
@@ -245,5 +418,46 @@ class RealTeamE2EDriverTest {
                 .contains("model unavailable", "[REDACTED]")
                 .doesNotContain("secret", "abc.def");
         assertThat(evidence.resolve("summary.json")).isRegularFile();
+    }
+
+    /**
+     * 构造持久化最近错误的 RD heartbeat，模拟 Cron 已接收到异常 dispatch 结果。
+     *
+     * @param lastRunAtMs 最近触发时间，单位毫秒
+     * @param lastError 已脱敏前的直接错误摘要
+     * @return 可用于 Driver 诊断的重复 heartbeat
+     */
+    private static CronJob failedRdHeartbeat(long lastRunAtMs, String lastError) {
+        return new CronJob(
+                "heartbeat-rd",
+                "heartbeat-rd",
+                true,
+                new CronJob.Schedule(CronJob.ScheduleKind.EVERY, null, 600_000L, null, null),
+                new CronJob.Payload("team:rd", "__wake__:heartbeat"),
+                new CronJob.State(lastRunAtMs + 600_000L, lastRunAtMs, "error", lastError),
+                lastRunAtMs - 60_000L,
+                lastRunAtMs,
+                false
+        );
+    }
+
+    /**
+     * 构造尚未触发的一次性 RD wake，证明 Driver 会等待正式恢复动作。
+     *
+     * @param atMs 计划触发时间，单位毫秒
+     * @return 尚未完成的一次性恢复任务
+     */
+    private static CronJob rdRecoveryWake(long atMs) {
+        return new CronJob(
+                "wake-rd-recovery",
+                "wake-rd-recovery",
+                true,
+                new CronJob.Schedule(CronJob.ScheduleKind.AT, atMs, null, null, null),
+                new CronJob.Payload("team:rd", "__wake__:new_mail:todo-mvp"),
+                new CronJob.State(null, null, null, null),
+                atMs - 1_000L,
+                atMs - 1_000L,
+                true
+        );
     }
 }

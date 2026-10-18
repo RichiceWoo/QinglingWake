@@ -11,6 +11,7 @@ import reactor.core.publisher.Mono;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -72,6 +73,9 @@ class McpProjectTestRunnerTest {
         String stderr = "Authorization=secret-value Bearer hidden-token";
         String response = "__QINGLING_STATUS__=FINISHED\n"
                 + "__QINGLING_EXIT_CODE__=0\n"
+                + "__QINGLING_PYTEST_COLLECTED__=7\n"
+                + "__QINGLING_PYTEST_PASSED__=7\n"
+                + "__QINGLING_COVERAGE_PERCENT__=88\n"
                 + "__QINGLING_STDOUT_B64__=" + base64(stdout) + "\n"
                 + "__QINGLING_STDERR_B64__=" + base64(stderr) + "\n";
         McpProjectTestRunner runner = runner(new AtomicReference<>(), response);
@@ -96,6 +100,9 @@ class McpProjectTestRunnerTest {
     void shouldClassifyPytestFailureSeparatelyFromInfrastructure() {
         String response = "__QINGLING_STATUS__=FINISHED\n"
                 + "__QINGLING_EXIT_CODE__=1\n"
+                + "__QINGLING_PYTEST_COLLECTED__=2\n"
+                + "__QINGLING_PYTEST_PASSED__=1\n"
+                + "__QINGLING_COVERAGE_PERCENT__=73\n"
                 + "__QINGLING_STDOUT_B64__=" + base64("collected 2 items\n1 passed, 1 failed") + "\n"
                 + "__QINGLING_STDERR_B64__=" + base64("AssertionError") + "\n";
         McpProjectTestRunner runner = runner(new AtomicReference<>(), response);
@@ -106,6 +113,107 @@ class McpProjectTestRunnerTest {
         assertThat(execution.status()).isEqualTo(ProjectTestExecution.Status.TEST_FAILED);
         assertThat(execution.failureType()).isEqualTo(ProjectTestExecution.FailureType.PYTEST_FAILURE);
         assertThat(execution.retryable()).isFalse();
+    }
+
+    /**
+     * 大段输出查询即使不再携带终态标记，也必须保留元数据查询取得的 exit_code=1 业务失败。
+     */
+    @Test
+    void shouldKeepCompletedPytestFailureWhenOutputResponseHasNoTerminalMetadata() {
+        AtomicInteger calls = new AtomicInteger();
+        Toolkit toolkit = new Toolkit();
+        toolkit.registerAgentTool(new AgentTool() {
+            /** 返回真实 MCP 工具名。 */
+            @Override
+            public String getName() {
+                return "sandbox_execute_bash";
+            }
+
+            /** 返回测试替身说明。 */
+            @Override
+            public String getDescription() {
+                return "按调用阶段返回终态元数据或输出摘录";
+            }
+
+            /** 返回接受任意对象的最小参数 Schema。 */
+            @Override
+            public Map<String, Object> getParameters() {
+                return Map.of("type", "object");
+            }
+
+            /**
+             * 分别模拟不被截断的终态元数据与不含终态字段的输出响应。
+             *
+             * @param param 原始调用参数
+             * @return 对应查询阶段的模拟 MCP 结果
+             */
+            @Override
+            public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+                calls.incrementAndGet();
+                String callId = param.getToolUseBlock().getId();
+                if (callId.startsWith("query-metadata-")) {
+                    return Mono.just(ToolResultBlock.text(
+                            "__QINGLING_STATUS__=FINISHED\n"
+                                    + "__QINGLING_EXIT_CODE__=1\n"
+                                    + "__QINGLING_PYTEST_COLLECTED__=32\n"
+                                    + "__QINGLING_PYTEST_PASSED__=11\n"
+                                    + "__QINGLING_COVERAGE_PERCENT__=72\n"
+                    ));
+                }
+                if (callId.startsWith("query-stdout-")) {
+                    return Mono.just(ToolResultBlock.text(
+                            "__QINGLING_STDOUT_B64__="
+                                    + base64("collected 32 items\n21 failed, 11 passed\nTOTAL 72%")
+                                    + "\n"
+                    ));
+                }
+                return Mono.just(ToolResultBlock.text(
+                        "__QINGLING_STDERR_B64__=" + base64("AssertionError") + "\n"
+                ));
+            }
+        });
+        McpProjectTestRunner runner = new McpProjectTestRunner(toolkit, new ObjectMapper());
+
+        ProjectTestExecution execution = runner.query(EXECUTION_ID).block();
+
+        assertThat(execution).isNotNull();
+        assertThat(calls).hasValue(3);
+        assertThat(execution.status()).isEqualTo(ProjectTestExecution.Status.TEST_FAILED);
+        assertThat(execution.exitCode()).isEqualTo(1);
+        assertThat(execution.pytestCollected()).isEqualTo(32);
+        assertThat(execution.pytestPassed()).isEqualTo(11);
+        assertThat(execution.coveragePercent()).isEqualTo(72D);
+        assertThat(execution.failureType()).isEqualTo(ProjectTestExecution.FailureType.PYTEST_FAILURE);
+        assertThat(execution.retryable()).isFalse();
+        assertThat(execution.stdout()).contains("21 failed, 11 passed");
+        assertThat(execution.stderr()).contains("AssertionError");
+    }
+
+    /** FINISHED 状态先于原子退出码可见时必须继续轮询，不能制造 RESULT_UNAVAILABLE。 */
+    @Test
+    void shouldTreatFinishedWithoutExitCodeAsFinalizing() {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicReference<Map<String, Object>> input = new AtomicReference<>();
+        Toolkit toolkit = new Toolkit();
+        toolkit.registerAgentTool(new FakeSandboxTool(
+                input,
+                "__QINGLING_STATUS__=FINALIZING\n"
+                        + "__QINGLING_PYTEST_COLLECTED__=32\n"
+                        + "__QINGLING_PYTEST_PASSED__=11\n"
+                        + "__QINGLING_COVERAGE_PERCENT__=72\n",
+                calls
+        ));
+        McpProjectTestRunner runner = new McpProjectTestRunner(toolkit, new ObjectMapper());
+
+        ProjectTestExecution execution = runner.query(EXECUTION_ID).block();
+
+        assertThat(execution).isNotNull();
+        assertThat(calls).hasValue(1);
+        assertThat(execution.status()).isEqualTo(ProjectTestExecution.Status.RUNNING);
+        assertThat(execution.exitCode()).isNull();
+        assertThat(execution.failureType()).isEqualTo(ProjectTestExecution.FailureType.NONE);
+        assertThat(input.get().get("cmd").toString())
+                .contains("elif test \"$status\" = FINISHED; then status=FINALIZING");
     }
 
     /**
@@ -143,6 +251,9 @@ class McpProjectTestRunnerTest {
         /** 每次调用返回的固定 Bash 输出。 */
         private final String commandOutput;
 
+        /** 记录调用次数；不需要计数时为空。 */
+        private final AtomicInteger calls;
+
         /**
          * 创建沙盒工具替身。
          *
@@ -150,8 +261,24 @@ class McpProjectTestRunnerTest {
          * @param commandOutput 固定 Bash 输出
          */
         private FakeSandboxTool(AtomicReference<Map<String, Object>> input, String commandOutput) {
+            this(input, commandOutput, null);
+        }
+
+        /**
+         * 创建可记录调用次数的沙盒工具替身。
+         *
+         * @param input 参数捕获器
+         * @param commandOutput 固定 Bash 输出
+         * @param calls 可空调用计数器
+         */
+        private FakeSandboxTool(
+                AtomicReference<Map<String, Object>> input,
+                String commandOutput,
+                AtomicInteger calls
+        ) {
             this.input = input;
             this.commandOutput = commandOutput;
+            this.calls = calls;
         }
 
         /** 返回真实 MCP 工具名。 */
@@ -180,6 +307,9 @@ class McpProjectTestRunnerTest {
          */
         @Override
         public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            if (calls != null) {
+                calls.incrementAndGet();
+            }
             input.set(param.getInput());
             return Mono.just(ToolResultBlock.text(commandOutput));
         }

@@ -1,6 +1,7 @@
 package cn.org.chris.wake.infra.agentscope;
 
 import cn.org.chris.wake.domain.gateway.AgentGateway;
+import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.domain.model.AgentReply;
 import cn.org.chris.wake.domain.model.AgentRequest;
 import cn.org.chris.wake.infra.memory.TurnMemoryIndexer;
@@ -9,9 +10,14 @@ import io.agentscope.core.message.Msg;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.subagent.task.BackgroundTask;
 import io.agentscope.harness.agent.subagent.task.TaskRepository;
+import io.agentscope.harness.agent.subagent.task.TaskRecord;
+import io.agentscope.harness.agent.subagent.task.TaskStatus;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -24,6 +30,7 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Stream;
 
 /**
  * 将领域 AgentGateway 适配到四角色 AgentScope HarnessAgent。
@@ -35,6 +42,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
 
     /** 子任务异常终态保持该时长后才终止父回合，给正常父回复保留短暂收尾窗口。 */
     private static final Duration DEFAULT_CHILD_TASK_FAILURE_GRACE = Duration.ofSeconds(2);
+
+    /** RUNNING 子任务真实事件与会话日志均无变化时允许保持的最长租约。 */
+    private static final Duration DEFAULT_CHILD_TASK_STALL_TIMEOUT = Duration.ofMinutes(5);
 
     /** RuntimeContext 中保存目标角色的键。 */
     public static final String ROLE_ATTRIBUTE = "role";
@@ -60,6 +70,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     /** 子任务失败或取消后允许父 Agent 正常结束的宽限时间。 */
     private final Duration childTaskFailureGrace;
 
+    /** RUNNING 子任务真实进度租约的最大静默时长。 */
+    private final Duration childTaskStallTimeout;
+
     /** 当前仍在执行的父 Agent 回合，用于取消级联和悬挂 dispatch 快速诊断。 */
     private final ConcurrentHashMap<InvocationKey, ActiveInvocation> activeInvocations = new ConcurrentHashMap<>();
 
@@ -74,7 +87,8 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 RuntimeMode.PRODUCTION,
                 noOpMemoryIndexer(),
                 DEFAULT_CHILD_TASK_POLL_INTERVAL,
-                DEFAULT_CHILD_TASK_FAILURE_GRACE
+                DEFAULT_CHILD_TASK_FAILURE_GRACE,
+                DEFAULT_CHILD_TASK_STALL_TIMEOUT
         );
     }
 
@@ -90,7 +104,8 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 RuntimeMode.PRODUCTION,
                 memoryIndexer,
                 DEFAULT_CHILD_TASK_POLL_INTERVAL,
-                DEFAULT_CHILD_TASK_FAILURE_GRACE
+                DEFAULT_CHILD_TASK_FAILURE_GRACE,
+                DEFAULT_CHILD_TASK_STALL_TIMEOUT
         );
     }
 
@@ -106,7 +121,8 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 ignored,
                 noOpMemoryIndexer(),
                 DEFAULT_CHILD_TASK_POLL_INTERVAL,
-                DEFAULT_CHILD_TASK_FAILURE_GRACE
+                DEFAULT_CHILD_TASK_FAILURE_GRACE,
+                DEFAULT_CHILD_TASK_STALL_TIMEOUT
         );
     }
 
@@ -127,7 +143,8 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 ignored,
                 memoryIndexer,
                 DEFAULT_CHILD_TASK_POLL_INTERVAL,
-                DEFAULT_CHILD_TASK_FAILURE_GRACE
+                DEFAULT_CHILD_TASK_FAILURE_GRACE,
+                DEFAULT_CHILD_TASK_STALL_TIMEOUT
         );
     }
 
@@ -147,6 +164,34 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
             Duration childTaskPollInterval,
             Duration childTaskFailureGrace
     ) {
+        this(
+                runtimes,
+                ignored,
+                memoryIndexer,
+                childTaskPollInterval,
+                childTaskFailureGrace,
+                DEFAULT_CHILD_TASK_STALL_TIMEOUT
+        );
+    }
+
+    /**
+     * 使用可观测运行时及完整可调子任务时序创建测试适配器。
+     *
+     * @param runtimes 测试运行时
+     * @param ignored 区分生产构造器的内部标记
+     * @param memoryIndexer 非阻塞记忆索引入口
+     * @param childTaskPollInterval 子任务状态轮询间隔
+     * @param childTaskFailureGrace 异常终态宽限时间
+     * @param childTaskStallTimeout RUNNING 子任务真实进度租约
+     */
+    AgentScopeAgentGateway(
+            Map<String, AgentRuntime> runtimes,
+            RuntimeMode ignored,
+            TurnMemoryIndexer memoryIndexer,
+            Duration childTaskPollInterval,
+            Duration childTaskFailureGrace,
+            Duration childTaskStallTimeout
+    ) {
         Objects.requireNonNull(ignored, "runtimeMode 不能为空");
         if (runtimes == null || runtimes.isEmpty()) {
             throw new IllegalArgumentException("Agent 运行时不能为空");
@@ -158,6 +203,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         );
         this.childTaskFailureGrace = requireNonNegativeDuration(
                 childTaskFailureGrace, "childTaskFailureGrace"
+        );
+        this.childTaskStallTimeout = requirePositiveDuration(
+                childTaskStallTimeout, "childTaskStallTimeout"
         );
     }
 
@@ -189,55 +237,131 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                     scheduleMemoryIndex(request, reply, turnTimestampMs);
                     return reply;
                 });
-        return Mono.firstWithSignal(parentCall, failWhenAllChildrenEndAbnormally(invocation))
-                .doOnError(ignored -> cancelOnce(invocation, cancellationPropagated))
-                .doOnCancel(() -> cancelOnce(invocation, cancellationPropagated))
+        return Mono.firstWithSignal(parentCall, failWhenChildrenCannotProgress(invocation))
+                .doOnError(ignored -> cancelOnce(
+                        invocation,
+                        cancellationPropagated,
+                        TaskSemanticsRegistry.CancelOrigin.RUNTIME_PARENT_FAILURE
+                ))
+                .doOnCancel(() -> cancelOnce(
+                        invocation,
+                        cancellationPropagated,
+                        TaskSemanticsRegistry.CancelOrigin.RUNTIME_PARENT_FAILURE
+                ))
                 .doFinally(ignored -> activeInvocations.remove(invocationKey, invocation))
                 .toFuture();
     }
 
     /**
-     * 当当前 session 的全部子任务均已结束且至少一个失败或取消时，使仍悬挂的父回合直接失败。
+     * 当子任务异常终态或 RUNNING 真实进度租约过期时，使仍悬挂的父回合直接失败。
      *
      * @param invocation 当前父回合
      * @return 仅在确认异常终态持续超过宽限期后发出错误的信号
      */
-    private Mono<AgentReply> failWhenAllChildrenEndAbnormally(ActiveInvocation invocation) {
+    private Mono<AgentReply> failWhenChildrenCannotProgress(ActiveInvocation invocation) {
         return Flux.interval(childTaskPollInterval)
                 .onBackpressureDrop()
                 .concatMap(ignored -> {
-                    String reason = terminalChildFailureReason(invocation);
-                    if (reason == null) {
-                        return Mono.<String>empty();
+                    AgentExecutionException failure = childFailure(invocation, Instant.now());
+                    if (failure == null) {
+                        return Mono.<AgentExecutionException>empty();
                     }
                     return Mono.delay(childTaskFailureGrace)
-                            .filter(ignoredDelay -> reason.equals(terminalChildFailureReason(invocation)))
-                            .map(ignoredDelay -> reason);
+                            .map(ignoredDelay -> childFailure(invocation, Instant.now()))
+                            .filter(rechecked -> sameFailure(failure, rechecked));
                 })
                 .next()
-                .flatMap(reason -> Mono.error(new ChildTaskTerminationException(reason)));
+                .flatMap(failure -> Mono.error(failure));
     }
 
     /**
-     * 生成不含任务正文和输出的异常终态摘要；仍有运行任务或全部成功时返回空。
+     * 仅使用每个逻辑 Sub-Agent 最新 continuation 的终态或真实进度租约生成类型化异常。
      *
      * @param invocation 当前父回合
-     * @return 稳定失败摘要，未满足终止条件时为 null
+     * @return 稳定失败异常，未满足终止条件时为 null
      */
-    private static String terminalChildFailureReason(ActiveInvocation invocation) {
-        List<ChildTaskDiagnostic> tasks = safeTaskDiagnostics(invocation);
-        if (tasks.isEmpty() || tasks.stream().anyMatch(task -> !task.terminal())) {
+    private AgentExecutionException childFailure(ActiveInvocation invocation, Instant now) {
+        List<ChildTaskDiagnostic> latestTasks = latestTasksByAgent(safeTaskDiagnostics(invocation));
+        List<ChildTaskDiagnostic> stalledTasks = latestTasks.stream()
+                .filter(task -> "RUNNING".equals(task.status()))
+                .filter(task -> !task.terminal())
+                .filter(task -> Duration.between(task.lastProgressAt(), now)
+                        .compareTo(childTaskStallTimeout) >= 0)
+                .toList();
+        if (!stalledTasks.isEmpty()) {
+            List<String> failures = stalledTasks.stream()
+                    .map(task -> task.agentId() + "=RUNNING"
+                            + "[task_id=" + task.taskId()
+                            + ",last_progress_at=" + task.lastProgressAt() + "]")
+                    .sorted()
+                    .toList();
+            return new AgentExecutionException(
+                    AgentExecutionException.FailureType.CHILD_STALLED,
+                    "AgentScope 子任务真实进度租约过期，父 dispatch 已结束: "
+                            + String.join(",", failures)
+            );
+        }
+        if (latestTasks.isEmpty() || latestTasks.stream().anyMatch(task -> !task.terminal())) {
             return null;
         }
-        List<String> failures = tasks.stream()
+        List<ChildTaskDiagnostic> failedTasks = latestTasks.stream()
                 .filter(task -> "FAILED".equals(task.status()) || "CANCELLED".equals(task.status()))
-                .map(task -> task.agentId() + "=" + task.status())
+                .toList();
+        if (failedTasks.isEmpty()) {
+            return null;
+        }
+        AgentExecutionException.FailureType failureType = failedTasks.stream()
+                .anyMatch(task -> "FAILED".equals(task.status()))
+                ? AgentExecutionException.FailureType.CHILD_FAILED
+                : AgentExecutionException.FailureType.CHILD_CANCELLED;
+        List<String> failures = failedTasks.stream()
+                .map(task -> task.agentId() + "=" + task.status()
+                        + "[kind=" + task.taskKind() + ",cancel_origin=" + task.cancelOrigin() + "]")
                 .sorted()
                 .toList();
-        if (failures.isEmpty()) {
-            return null;
+        return new AgentExecutionException(
+                failureType,
+                "AgentScope 子任务异常终止，父 dispatch 已结束: " + String.join(",", failures)
+        );
+    }
+
+    /**
+     * 按逻辑 agentId 选择创建时间最新的任务，使 send continuation 覆盖旧 spawn 终态。
+     *
+     * @param tasks 当前 session 的全部任务诊断
+     * @return 每个 agentId 唯一且按 agentId 排序的最新任务
+     */
+    private static List<ChildTaskDiagnostic> latestTasksByAgent(List<ChildTaskDiagnostic> tasks) {
+        Map<String, ChildTaskDiagnostic> latestByAgent = new LinkedHashMap<>();
+        Comparator<ChildTaskDiagnostic> recency = Comparator
+                .comparing(ChildTaskDiagnostic::createdAt)
+                .thenComparing(ChildTaskDiagnostic::taskId);
+        for (ChildTaskDiagnostic task : tasks) {
+            latestByAgent.merge(
+                    task.agentId(),
+                    task,
+                    (current, candidate) -> recency.compare(candidate, current) > 0 ? candidate : current
+            );
         }
-        return "AgentScope 子任务异常终止，父 dispatch 已结束: " + String.join(",", failures);
+        return latestByAgent.values().stream()
+                .sorted(Comparator.comparing(ChildTaskDiagnostic::agentId))
+                .toList();
+    }
+
+    /**
+     * 比较宽限期前后的稳定故障分类与摘要，避免状态变化后误杀父回合。
+     *
+     * @param expected 宽限期前故障
+     * @param actual 宽限期后故障
+     * @return 两次诊断仍指向同一故障时为 true
+     */
+    private static boolean sameFailure(
+            AgentExecutionException expected,
+            AgentExecutionException actual
+    ) {
+        return actual != null
+                && expected.failureType() == actual.failureType()
+                && Objects.equals(expected.getMessage(), actual.getMessage());
     }
 
     /**
@@ -295,12 +419,16 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
      * @param invocation 待取消活跃回合
      * @param propagated 幂等标志
      */
-    private static void cancelOnce(ActiveInvocation invocation, AtomicBoolean propagated) {
+    private static void cancelOnce(
+            ActiveInvocation invocation,
+            AtomicBoolean propagated,
+            TaskSemanticsRegistry.CancelOrigin origin
+    ) {
         if (!propagated.compareAndSet(false, true)) {
             return;
         }
         try {
-            invocation.runtime().cancel(invocation.context());
+            invocation.runtime().cancel(invocation.context(), origin);
         } catch (RuntimeException ignored) {
             // 原始调用失败或取消必须保持主因，清理失败由诊断快照和关闭流程兜底。
         }
@@ -340,7 +468,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         requireText(sessionId, "sessionId");
         AgentRuntime runtime = requireRuntime(role);
         RuntimeContext context = RuntimeContext.builder().userId(userId).sessionId(sessionId).build();
-        runtime.cancel(context);
+        runtime.cancel(context, TaskSemanticsRegistry.CancelOrigin.SESSION_CLEAR);
         runtime.clearContext(userId, sessionId);
     }
 
@@ -351,9 +479,19 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     public void close() {
         activeInvocations.values().forEach(invocation -> {
             try {
-                invocation.runtime().cancel(invocation.context());
+                invocation.runtime().cancel(
+                        invocation.context(),
+                        TaskSemanticsRegistry.CancelOrigin.SHUTDOWN
+                );
             } catch (RuntimeException ignored) {
                 // 关闭继续处理其他角色，最终仍由 HarnessAgent.close() 关闭任务仓库。
+            }
+        });
+        runtimes.values().forEach(runtime -> {
+            try {
+                runtime.cancelAll(TaskSemanticsRegistry.CancelOrigin.SHUTDOWN);
+            } catch (RuntimeException ignored) {
+                // 已脱离活跃 dispatch 的任务仍尽力终态化；单个角色失败不阻止其他角色清理。
             }
         });
         activeInvocations.clear();
@@ -373,7 +511,10 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         Map<String, AgentRuntime> adapted = new LinkedHashMap<>();
         agents.forEach((role, agent) -> adapted.put(
                 role,
-                new HarnessAgentRuntime(Objects.requireNonNull(agent, "HarnessAgent 不能为空"))
+                new HarnessAgentRuntime(
+                        Objects.requireNonNull(agent, "HarnessAgent 不能为空"),
+                        TaskSemanticsRegistry.forRepository(agent.getTaskRepository())
+                )
         ));
         return adapted;
     }
@@ -489,8 +630,12 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
          * 中断父 Agent 并取消当前 session 尚未结束的全部 Sub-Agent 任务。
          *
          * @param context 当前父回合上下文
+         * @param origin 本次取消由父失败、会话清理或关闭流程触发
          */
-        default void cancel(RuntimeContext context) {
+        default void cancel(
+                RuntimeContext context,
+                TaskSemanticsRegistry.CancelOrigin origin
+        ) {
             // 无真实 Harness 的测试替身默认无需清理后台任务。
         }
 
@@ -502,6 +647,15 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
          */
         default List<ChildTaskDiagnostic> taskDiagnostics(RuntimeContext context) {
             return List.of();
+        }
+
+        /**
+         * 终态化运行时曾观察到的全部父会话任务，覆盖已脱离 activeInvocations 的后台任务。
+         *
+         * @param origin 本次全局取消来源
+         */
+        default void cancelAll(TaskSemanticsRegistry.CancelOrigin origin) {
+            // 无真实 Harness 的测试替身默认没有持久化后台任务。
         }
 
         /**
@@ -532,8 +686,15 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
      * @param agent 实际 HarnessAgent
      */
     private record HarnessAgentRuntime(
-            /** 负责会话、模型、Skill 与工具调用的 AgentScope Agent。 */ HarnessAgent agent
+            /** 负责会话、模型、Skill 与工具调用的 AgentScope Agent。 */ HarnessAgent agent,
+            /** 保存子任务种类与取消来源的有界共享语义表。 */ TaskSemanticsRegistry semanticsRegistry
     ) implements AgentRuntime {
+
+        /** 校验真实 Agent 与任务语义表均已装配。 */
+        private HarnessAgentRuntime {
+            Objects.requireNonNull(agent, "agent 不能为空");
+            Objects.requireNonNull(semanticsRegistry, "semanticsRegistry 不能为空");
+        }
 
         /**
          * 直接调用 HarnessAgent，正文不拼接审计历史。
@@ -544,6 +705,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
          */
         @Override
         public Mono<Msg> call(String content, RuntimeContext context) {
+            semanticsRegistry.observeContext(context);
             return agent.call(content, context);
         }
 
@@ -551,19 +713,26 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
          * 先取消当前 session 的所有未终态子任务，再中断父 Agent，避免父回合取消后子任务继续写文件。
          *
          * @param context 当前父回合上下文
+         * @param origin 本次运行时取消来源
          */
         @Override
-        public void cancel(RuntimeContext context) {
+        public void cancel(
+                RuntimeContext context,
+                TaskSemanticsRegistry.CancelOrigin origin
+        ) {
+            semanticsRegistry.observeContext(context);
             TaskRepository repository = agent.getTaskRepository();
             String parentSessionId = context.getSessionId();
             try {
                 for (BackgroundTask task : repository.listTasks(context, parentSessionId, null)) {
                     if (!task.isCompleted()) {
                         try {
+                            semanticsRegistry.recordCancellation(task.getTaskId(), origin);
                             repository.cancelTask(context, parentSessionId, task.getTaskId());
                         } catch (RuntimeException ignored) {
-                            // 单个子任务取消失败不能阻止其余子任务和父 Agent 接收中断。
+                            persistTerminalFallback(context, parentSessionId, task, origin);
                         }
+                        persistTerminalFallback(context, parentSessionId, task, origin);
                     }
                 }
             } catch (RuntimeException ignored) {
@@ -577,6 +746,18 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         }
 
         /**
+         * 终态化该角色曾观察到的全部父会话，避免已脱离 activeInvocations 的任务在关闭后仍为 RUNNING。
+         *
+         * @param origin 本次全局取消来源
+         */
+        @Override
+        public void cancelAll(TaskSemanticsRegistry.CancelOrigin origin) {
+            for (RuntimeContext context : semanticsRegistry.knownContexts()) {
+                cancel(context, origin);
+            }
+        }
+
+        /**
          * 读取当前父 session 的子任务终态，供悬挂 dispatch 诊断使用。
          *
          * @param context 当前父回合上下文
@@ -584,16 +765,157 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
          */
         @Override
         public List<ChildTaskDiagnostic> taskDiagnostics(RuntimeContext context) {
+            semanticsRegistry.observeContext(context);
             return agent.getTaskRepository().listTasks(context, context.getSessionId(), null).stream()
-                    .map(task -> new ChildTaskDiagnostic(
-                            task.getTaskId(),
-                            task.getAgentId(),
-                            task.getTaskStatus().name(),
-                            task.isCompleted(),
-                            task.getCreatedAt()
-                    ))
+                    .map(task -> {
+                        TaskSemanticsRegistry.TaskSemantics semantics =
+                                semanticsRegistry.semantics(task.getTaskId());
+                        TaskProgressEvidence progressEvidence = taskProgressEvidence(context, task);
+                        TaskSemanticsRegistry.ProgressLease progressLease = semanticsRegistry.observeProgress(
+                                task.getTaskId(),
+                                progressEvidence.fingerprint(),
+                                progressEvidence.evidenceAt(),
+                                Instant.now()
+                        );
+                        return new ChildTaskDiagnostic(
+                                task.getTaskId(),
+                                task.getAgentId(),
+                                task.getTaskStatus().name(),
+                                task.isCompleted(),
+                                task.getCreatedAt(),
+                                semantics.kind().name(),
+                                semantics.cancelOrigin().name(),
+                                progressLease.lastProgressAt()
+                        );
+                    })
                     .sorted(Comparator.comparing(ChildTaskDiagnostic::taskId))
                     .toList();
+        }
+
+        /**
+         * 若 AgentScope cancelTask 没有把持久化记录写成终态，则直接以 CANCELLED 做幂等兜底。
+         *
+         * @param context 父 Agent 运行上下文
+         * @param parentSessionId 父 session 标识
+         * @param task 待终态化后台任务
+         * @param origin 取消来源
+         */
+        private void persistTerminalFallback(
+                RuntimeContext context,
+                String parentSessionId,
+                BackgroundTask task,
+                TaskSemanticsRegistry.CancelOrigin origin
+        ) {
+            try {
+                TaskRecord record = agent.getWorkspaceManager().readTaskRecord(
+                        context,
+                        agent.getName(),
+                        parentSessionId,
+                        task.getTaskId()
+                ).orElse(null);
+                if (record == null || (record.getStatus() != null && record.getStatus().isTerminal())) {
+                    return;
+                }
+                semanticsRegistry.recordCancellation(task.getTaskId(), origin);
+                record.setCancelRequested(true);
+                record.setStatus(TaskStatus.CANCELLED);
+                record.setErrorMessage("runtime_terminated:" + origin.name());
+                record.touch();
+                agent.getWorkspaceManager().writeTaskRecord(
+                        context,
+                        agent.getName(),
+                        parentSessionId,
+                        record
+                );
+            } catch (RuntimeException ignored) {
+                // 关闭继续处理其他任务；无法落盘时保留原始运行时异常，不写入不可信终态。
+            }
+        }
+
+        /**
+         * 组合 TaskRecord 稳定字段与子 Agent 会话日志元数据，不使用会被 heartbeat 刷新的 lastUpdatedAt。
+         *
+         * @param context 父 Agent 运行上下文
+         * @param task 当前后台任务
+         * @return 不含正文和输出的真实进度证据
+         */
+        private TaskProgressEvidence taskProgressEvidence(RuntimeContext context, BackgroundTask task) {
+            TaskRecord record = agent.getWorkspaceManager().readTaskRecord(
+                    context,
+                    agent.getName(),
+                    context.getSessionId(),
+                    task.getTaskId()
+            ).orElse(null);
+            SessionLogEvidence logEvidence = sessionLogEvidence(context, task.getAgentId());
+            Instant evidenceAt = task.getCreatedAt();
+            if (record != null && record.getCreatedAt() != null && record.getCreatedAt().isAfter(evidenceAt)) {
+                evidenceAt = record.getCreatedAt();
+            }
+            if (logEvidence.lastModifiedAt().isAfter(evidenceAt)) {
+                evidenceAt = logEvidence.lastModifiedAt();
+            }
+            String fingerprint = task.getTaskStatus().name()
+                    + "|completed=" + task.isCompleted()
+                    + "|record_status=" + (record == null || record.getStatus() == null
+                    ? "UNKNOWN" : record.getStatus().name())
+                    + "|event_seq=" + (record == null ? 0L : record.getLastEventSeq())
+                    + "|awaiting_confirm=" + (record != null && record.isAwaitingConfirm())
+                    + "|pending_confirms=" + (record == null || record.getPendingConfirms() == null
+                    ? 0 : record.getPendingConfirms().size())
+                    + "|log_files=" + logEvidence.fileCount()
+                    + "|log_bytes=" + logEvidence.totalBytes()
+                    + "|log_mtime=" + logEvidence.lastModifiedAt().toEpochMilli();
+            return new TaskProgressEvidence(fingerprint, evidenceAt);
+        }
+
+        /**
+         * 读取指定 Sub-Agent 会话日志的文件数、总字节数和最新修改时间作为真实活动证据。
+         *
+         * @param context 父 Agent 运行上下文
+         * @param agentId 声明式 Sub-Agent 标识
+         * @return 会话日志元数据；目录不可用时返回零值
+         */
+        private SessionLogEvidence sessionLogEvidence(RuntimeContext context, String agentId) {
+            Path sessionDirectory = agent.getWorkspaceManager().getSessionDir(context, agentId);
+            if (!Files.isDirectory(sessionDirectory)) {
+                return SessionLogEvidence.empty();
+            }
+            long totalBytes = 0L;
+            long fileCount = 0L;
+            Instant lastModifiedAt = Instant.EPOCH;
+            try (Stream<Path> files = Files.list(sessionDirectory)) {
+                for (Path file : files.filter(Files::isRegularFile)
+                        .filter(path -> path.getFileName().toString().endsWith(".jsonl"))
+                        .toList()) {
+                    fileCount++;
+                    totalBytes += Files.size(file);
+                    Instant modifiedAt = Files.getLastModifiedTime(file).toInstant();
+                    if (modifiedAt.isAfter(lastModifiedAt)) {
+                        lastModifiedAt = modifiedAt;
+                    }
+                }
+                return new SessionLogEvidence(fileCount, totalBytes, lastModifiedAt);
+            } catch (IOException ignored) {
+                return SessionLogEvidence.empty();
+            }
+        }
+
+        /** 表示一次不含正文的稳定任务进度指纹及其真实证据时间。 */
+        private record TaskProgressEvidence(
+                /** 状态、事件序号与会话日志元数据组成的稳定指纹。 */ String fingerprint,
+                /** 最后真实事件或日志活动时间。 */ Instant evidenceAt
+        ) { }
+
+        /** 表示 Sub-Agent 会话日志目录的聚合元数据。 */
+        private record SessionLogEvidence(
+                /** 当前日志文件数量。 */ long fileCount,
+                /** 当前全部日志文件总字节数。 */ long totalBytes,
+                /** 当前日志文件的最新修改时间。 */ Instant lastModifiedAt
+        ) {
+            /** 返回日志目录不存在或不可读时的稳定零值。 */
+            private static SessionLogEvidence empty() {
+                return new SessionLogEvidence(0L, 0L, Instant.EPOCH);
+            }
         }
 
         /**
@@ -629,19 +951,6 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
             /** 父回合开始时间。 */ Instant startedAt
     ) { }
 
-    /** 父回合因当前 session 的子任务失败或取消而被运行时主动终止。 */
-    private static final class ChildTaskTerminationException extends IllegalStateException {
-
-        /**
-         * 使用脱敏子任务状态摘要创建异常。
-         *
-         * @param message 不含任务正文或输出的失败摘要
-         */
-        private ChildTaskTerminationException(String message) {
-            super(message);
-        }
-    }
-
     /**
      * 表示活跃父 Agent 回合的脱敏诊断。
      *
@@ -674,12 +983,24 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
      * @param status AgentScope 任务状态
      * @param terminal 是否已经进入终态
      * @param createdAt 任务创建时间
+     * @param taskKind 首次 spawn、后续 send 或未知历史任务
+     * @param cancelOrigin 取消请求来源；未取消时为 NONE
+     * @param lastProgressAt 最后稳定状态、事件序号或会话日志发生真实变化的时间
      */
     public record ChildTaskDiagnostic(
             /** AgentScope 任务标识。 */ String taskId,
             /** 声明式 Sub-Agent 标识。 */ String agentId,
             /** AgentScope 任务状态。 */ String status,
             /** 是否已经进入终态。 */ boolean terminal,
-            /** 任务创建时间。 */ Instant createdAt
-    ) { }
+            /** 任务创建时间。 */ Instant createdAt,
+            /** 任务是首次 spawn、后续 send 或未观测历史任务。 */ String taskKind,
+            /** 模型或运行时发起取消的来源。 */ String cancelOrigin,
+            /** 最后真实进度时间；不会被 task_output 轮询或 heartbeat 刷新。 */ Instant lastProgressAt
+    ) {
+        /** 校验时间字段完整，避免停滞诊断将缺失值误判为当前进展。 */
+        public ChildTaskDiagnostic {
+            Objects.requireNonNull(createdAt, "createdAt 不能为空");
+            Objects.requireNonNull(lastProgressAt, "lastProgressAt 不能为空");
+        }
+    }
 }

@@ -3,6 +3,8 @@ package cn.org.chris.wake.starter.e2e;
 import cn.org.chris.wake.adapter.api.TestApiController;
 import cn.org.chris.wake.adapter.api.dto.TestRequest;
 import cn.org.chris.wake.adapter.api.dto.TestResponse;
+import cn.org.chris.wake.domain.gateway.CronJobRepository;
+import cn.org.chris.wake.domain.model.CronJob;
 import cn.org.chris.wake.infra.agentscope.McpSandboxConfiguration;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
@@ -55,6 +57,12 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 失败或取消子任务全部终态后允许父 Agent 收尾的短暂窗口。 */
     private static final Duration TERMINAL_CHILD_DISPATCH_GRACE = Duration.ofSeconds(20);
 
+    /** RUNNING 子任务稳定事件和会话日志均无变化时允许的最长时间。 */
+    private static final Duration RUNNING_CHILD_PROGRESS_TIMEOUT = Duration.ofMinutes(5);
+
+    /** Cron dispatch 已失败且没有恢复动作时允许状态持久化收敛的短暂窗口。 */
+    private static final Duration IDLE_CRON_FAILURE_GRACE = Duration.ofSeconds(20);
+
     /** 从 task_done 正文提取 pytest 重试次数。 */
     private static final Pattern PYTEST_ATTEMPTS = Pattern.compile(
             "pytest_attempts[\\\"']?\\s*[:=]\\s*(\\d+)", Pattern.CASE_INSENSITIVE
@@ -87,6 +95,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 提供 E2E 轮询期间的 dispatch 接纳和积压快照。 */
     private final SerialDispatchRegistry dispatchRegistry;
 
+    /** 直接读取原子 tasks.json 快照，避免被同步等待 dispatch 的 CronService 锁阻塞。 */
+    private final CronJobRepository cronJobRepository;
+
     /** 提供父 Agent 与 Sub-Agent 任务终态的脱敏诊断。 */
     private final AgentScopeAgentGateway agentGateway;
 
@@ -111,6 +122,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 记录各路由首次观察到失败子任务全部终态的时间，避免瞬时收尾窗口误报。 */
     private final Map<String, Instant> terminalChildFailureSince = new LinkedHashMap<>();
 
+    /** 记录各次 Cron dispatch 失败首次满足空闲死锁条件的时间，避免恢复调度竞态误报。 */
+    private final Map<String, Instant> idleCronFailureSince = new LinkedHashMap<>();
+
     /** 最近一次轮询采集的脱敏运行时诊断。 */
     private Map<String, Object> lastRuntimeSnapshot = Map.of();
 
@@ -134,6 +148,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
         this.testApi = applicationContext.getBean(TestApiController.class);
         this.sandboxConfiguration = applicationContext.getBean(McpSandboxConfiguration.class);
         this.dispatchRegistry = applicationContext.getBean(SerialDispatchRegistry.class);
+        this.cronJobRepository = applicationContext.getBean(CronJobRepository.class);
         this.agentGateway = applicationContext.getBean(AgentScopeAgentGateway.class);
         this.modelSelection = applicationContext.getBean(DashScopeModelSelector.Selection.class);
         this.routingKey = "test:e2e-" + scenario;
@@ -213,6 +228,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
                 routingKey, text, messageId, "e2e-user", null
         ));
         if (!response.getStatusCode().is2xxSuccessful() || !(response.getBody() instanceof TestResponse body)) {
+            assertRuntimeHealthy();
             throw new AssertionError("真实 Agent 请求失败，HTTP=" + response.getStatusCode()
                     + "，body=" + String.valueOf(response.getBody()));
         }
@@ -628,6 +644,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
             Path project = currentProjectDirectory();
             List<JsonNode> eventSnapshot = project == null ? List.of() : events();
             List<JsonNode> mailSnapshot = project == null ? List.of() : readAvailableMail(project);
+            List<CronJob> cronSnapshot = cronJobRepository.findAll();
             String incident = terminalIncidentReason(eventSnapshot);
             Map<String, Integer> dispatch = new LinkedHashMap<>();
             Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates = new LinkedHashMap<>();
@@ -649,8 +666,10 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     agentDiagnostics,
                     terminalChildFailureSince,
                     now,
-                    TERMINAL_CHILD_DISPATCH_GRACE
+                    TERMINAL_CHILD_DISPATCH_GRACE,
+                    RUNNING_CHILD_PROGRESS_TIMEOUT
             );
+            String mcpFailure = null;
             for (McpSandboxConfiguration.CircuitHealth health : sandboxConfiguration.circuitHealth()) {
                 String key = health.serverName() + ":" + health.toolName() + ":" + mcpHealth.size();
                 mcpHealth.add(Map.of(
@@ -661,13 +680,23 @@ final class RealTeamE2EDriver implements AutoCloseable {
                 ));
                 if (health.state() == McpSandboxConfiguration.CircuitState.OPEN) {
                     Instant openedAt = circuitOpenSince.computeIfAbsent(key, ignored -> now);
-                    if (Duration.between(openedAt, now).compareTo(Duration.ofSeconds(30)) > 0) {
-                        throw new AssertionError("不可恢复 MCP 故障：circuit 持续 OPEN，tool=" + health.toolName());
+                    if (mcpFailure == null
+                            && Duration.between(openedAt, now).compareTo(Duration.ofSeconds(30)) > 0) {
+                        mcpFailure = "circuit 持续 OPEN，tool=" + health.toolName();
                     }
                 } else {
                     circuitOpenSince.remove(key);
                 }
             }
+            String cronFailure = idleCronFailureReason(
+                    cronSnapshot,
+                    mailSnapshot,
+                    dispatchStates,
+                    agentDiagnostics,
+                    idleCronFailureSince,
+                    now,
+                    IDLE_CRON_FAILURE_GRACE
+            );
             Map<String, Long> mailboxStatuses = new LinkedHashMap<>();
             for (String status : List.of("unread", "in_progress", "done")) {
                 mailboxStatuses.put(status, mailSnapshot.stream()
@@ -677,14 +706,27 @@ final class RealTeamE2EDriver implements AutoCloseable {
             Map<String, Object> snapshot = new LinkedHashMap<>();
             snapshot.put("event_count", eventSnapshot.size());
             snapshot.put("mailbox_statuses", mailboxStatuses);
+            snapshot.put("mailbox_open", openMailboxEvidence(mailSnapshot));
             snapshot.put("dispatch_accepting", dispatchRegistry.isAccepting());
             snapshot.put("dispatch_pending", dispatch);
             snapshot.put("dispatch_states", dispatchStateEvidence(dispatchStates));
             snapshot.put("agentscope_active", agentDiagnosticEvidence(agentDiagnostics));
+            snapshot.put("cron_jobs", cronJobEvidence(cronSnapshot));
             snapshot.put("mcp_health", mcpHealth);
+            snapshot.put("terminal_incident", incident == null ? "" : sanitizeEvidenceText(incident));
+            snapshot.put("mcp_failure", mcpFailure == null ? "" : sanitizeEvidenceText(mcpFailure));
+            snapshot.put("cron_failure", cronFailure == null ? "" : sanitizeEvidenceText(cronFailure));
+            snapshot.put("hanging_dispatch", hangingDispatch == null
+                    ? "" : sanitizeEvidenceText(hangingDispatch));
             lastRuntimeSnapshot = Map.copyOf(snapshot);
             if (incident != null) {
                 throw new AssertionError("不可恢复工具基础设施故障：" + incident);
+            }
+            if (mcpFailure != null) {
+                throw new AssertionError("不可恢复 MCP 故障：" + mcpFailure);
+            }
+            if (cronFailure != null) {
+                throw new AssertionError("不可恢复 Cron dispatch 故障：" + cronFailure);
             }
             if (hangingDispatch != null) {
                 throw new AssertionError("不可恢复 AgentScope dispatch 悬挂：" + hangingDispatch);
@@ -713,6 +755,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
      * @param firstObservedAt 各路由首次观察到异常终态的时间
      * @param now 当前时间
      * @param grace 父 Agent 收尾宽限
+     * @param runningProgressTimeout RUNNING 子任务真实进度租约
      * @return 悬挂直接原因；仍在运行或尚处于宽限期时为 null
      */
     static String hangingDispatchReason(
@@ -720,19 +763,39 @@ final class RealTeamE2EDriver implements AutoCloseable {
             List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics,
             Map<String, Instant> firstObservedAt,
             Instant now,
-            Duration grace
+            Duration grace,
+            Duration runningProgressTimeout
     ) {
         Set<String> unhealthyRoutes = new LinkedHashSet<>();
         for (AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic : agentDiagnostics) {
             String route = diagnostic.routingKey();
             SerialDispatchRegistry.DispatchSnapshot dispatch = dispatchStates.get(route);
-            List<AgentScopeAgentGateway.ChildTaskDiagnostic> tasks = diagnostic.childTasks();
+            List<AgentScopeAgentGateway.ChildTaskDiagnostic> tasks = latestChildTasks(diagnostic.childTasks());
+            if (dispatch == null || !dispatch.active()) {
+                continue;
+            }
+            AgentScopeAgentGateway.ChildTaskDiagnostic stalledTask = tasks.stream()
+                    .filter(task -> "RUNNING".equals(task.status()))
+                    .filter(task -> !task.terminal())
+                    .filter(task -> Duration.between(task.lastProgressAt(), now)
+                            .compareTo(runningProgressTimeout) >= 0)
+                    .findFirst()
+                    .orElse(null);
+            if (stalledTask != null) {
+                return "route=" + route
+                        + ", role=" + diagnostic.role()
+                        + ", project_id=" + diagnostic.projectId()
+                        + ", dispatch_active_since=" + dispatch.activeSince()
+                        + ", stalled_running_task=" + stalledTask.taskId()
+                        + ", agent_id=" + stalledTask.agentId()
+                        + ", last_progress_at=" + stalledTask.lastProgressAt();
+            }
             boolean allTerminal = !tasks.isEmpty()
                     && tasks.stream().allMatch(AgentScopeAgentGateway.ChildTaskDiagnostic::terminal);
             boolean hasFailedOrCancelled = tasks.stream()
                     .map(AgentScopeAgentGateway.ChildTaskDiagnostic::status)
                     .anyMatch(status -> "FAILED".equals(status) || "CANCELLED".equals(status));
-            if (dispatch == null || !dispatch.active() || !allTerminal || !hasFailedOrCancelled) {
+            if (!allTerminal || !hasFailedOrCancelled) {
                 continue;
             }
             unhealthyRoutes.add(route);
@@ -753,6 +816,124 @@ final class RealTeamE2EDriver implements AutoCloseable {
         }
         firstObservedAt.keySet().removeIf(route -> !unhealthyRoutes.contains(route));
         return null;
+    }
+
+    /**
+     * 按逻辑 agentId 选择最新 continuation，避免旧取消记录被误报为当前悬挂原因。
+     *
+     * @param tasks 当前父 session 的全部子任务
+     * @return 每个逻辑子 Agent 最新的一项任务
+     */
+    private static List<AgentScopeAgentGateway.ChildTaskDiagnostic> latestChildTasks(
+            List<AgentScopeAgentGateway.ChildTaskDiagnostic> tasks
+    ) {
+        Map<String, AgentScopeAgentGateway.ChildTaskDiagnostic> latestByAgent = new LinkedHashMap<>();
+        Comparator<AgentScopeAgentGateway.ChildTaskDiagnostic> recency = Comparator
+                .comparing(AgentScopeAgentGateway.ChildTaskDiagnostic::createdAt)
+                .thenComparing(AgentScopeAgentGateway.ChildTaskDiagnostic::taskId);
+        for (AgentScopeAgentGateway.ChildTaskDiagnostic task : tasks) {
+            latestByAgent.merge(
+                    task.agentId(),
+                    task,
+                    (current, candidate) -> recency.compare(candidate, current) > 0 ? candidate : current
+            );
+        }
+        return latestByAgent.values().stream()
+                .sorted(Comparator.comparing(AgentScopeAgentGateway.ChildTaskDiagnostic::agentId))
+                .toList();
+    }
+
+    /**
+     * 识别 Cron 已记录 dispatch 失败、当前任务仍开放且恢复链完全空闲的终态故障。
+     *
+     * @param cronSnapshot 原子 tasks.json 任务快照
+     * @param mailSnapshot 当前项目邮箱快照
+     * @param dispatchStates 各路由 dispatch 状态
+     * @param agentDiagnostics 当前活跃 AgentScope 回合
+     * @param firstObservedAt 各次失败首次满足空闲条件的时间
+     * @param now 当前时间
+     * @param grace 状态持久化与恢复 wake 建立宽限
+     * @return 直接 Cron 错误摘要；存在恢复工作或尚在宽限期时为 null
+     */
+    static String idleCronFailureReason(
+            List<CronJob> cronSnapshot,
+            List<JsonNode> mailSnapshot,
+            Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates,
+            List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics,
+            Map<String, Instant> firstObservedAt,
+            Instant now,
+            Duration grace
+    ) {
+        Set<String> candidateKeys = new LinkedHashSet<>();
+        String directReason = null;
+        for (CronJob job : cronSnapshot) {
+            String route = job.payload().routingKey();
+            String error = job.state().lastError();
+            if (!"error".equalsIgnoreCase(job.state().lastStatus())
+                    || error == null
+                    || error.isBlank()
+                    || !route.startsWith("team:")) {
+                continue;
+            }
+            SerialDispatchRegistry.DispatchSnapshot dispatch = dispatchStates.get(route);
+            boolean dispatchBusy = dispatch == null || dispatch.pendingCount() > 0 || dispatch.active();
+            boolean agentBusy = agentDiagnostics.stream()
+                    .anyMatch(diagnostic -> route.equals(diagnostic.routingKey()));
+            if (dispatchBusy || agentBusy || hasScheduledRecoveryWake(cronSnapshot, route)) {
+                continue;
+            }
+            String owner = route.substring("team:".length());
+            JsonNode assignment = latestOpenAssignment(mailSnapshot, owner);
+            if (assignment == null) {
+                continue;
+            }
+            String candidateKey = job.id() + ":" + String.valueOf(job.state().lastRunAtMs());
+            candidateKeys.add(candidateKey);
+            Instant observedAt = firstObservedAt.computeIfAbsent(candidateKey, ignored -> now);
+            if (directReason != null || Duration.between(observedAt, now).compareTo(grace) < 0) {
+                continue;
+            }
+            directReason = "cron_job=" + job.id()
+                    + ", route=" + route
+                    + ", owner=" + owner
+                    + ", last_run_at_ms=" + String.valueOf(job.state().lastRunAtMs())
+                    + ", last_error=" + sanitizeEvidenceText(error)
+                    + ", assignment_id=" + assignment.path("id").asText("unknown")
+                    + ", assignment_status=" + assignment.path("status").asText("unknown")
+                    + ", stage=" + assignment.path("content").path("workflow_stage").asText("unknown");
+        }
+        firstObservedAt.keySet().removeIf(key -> !candidateKeys.contains(key));
+        return directReason;
+    }
+
+    /**
+     * 判断同一路由是否已有启用的一次性任务承载恢复，避免在 wake 到期前误报终态失败。
+     *
+     * @param cronSnapshot Cron 任务快照
+     * @param route 待检查团队路由
+     * @return 存在尚未被 Cron 删除的一次性恢复任务时为 true
+     */
+    private static boolean hasScheduledRecoveryWake(List<CronJob> cronSnapshot, String route) {
+        return cronSnapshot.stream().anyMatch(job -> job.enabled()
+                && job.schedule().kind() == CronJob.ScheduleKind.AT
+                && route.equals(job.payload().routingKey())
+                && (job.schedule().atMs() != null || job.state().nextRunAtMs() != null));
+    }
+
+    /**
+     * 返回指定 Owner 最新的未完成任务分派，忽略邮件正文中的业务说明。
+     *
+     * @param mailSnapshot 当前项目邮箱快照
+     * @param owner 当前工作流 Owner
+     * @return 最新开放任务；不存在时为 null
+     */
+    private static JsonNode latestOpenAssignment(List<JsonNode> mailSnapshot, String owner) {
+        return mailSnapshot.stream()
+                .filter(message -> "task_assign".equals(message.path("type").asText()))
+                .filter(message -> owner.equals(message.path("to").asText()))
+                .filter(message -> Set.of("unread", "in_progress").contains(message.path("status").asText()))
+                .max(Comparator.comparing(message -> message.path("timestamp").asText("")))
+                .orElse(null);
     }
 
     /** 将 dispatch 快照转换为可序列化且不含 null 的证据。 */
@@ -784,9 +965,61 @@ final class RealTeamE2EDriver implements AutoCloseable {
                         "task_id", task.taskId(),
                         "agent_id", task.agentId(),
                         "status", task.status(),
-                        "terminal", task.terminal()
+                        "terminal", task.terminal(),
+                        "task_kind", task.taskKind(),
+                        "cancel_origin", task.cancelOrigin(),
+                        "last_progress_at", task.lastProgressAt().toString()
                 )).toList()
         )).toList();
+    }
+
+    /**
+     * 将 Cron 任务转换为不含消息正文且错误已脱敏的运行时证据。
+     *
+     * @param cronSnapshot 原子 tasks.json 任务快照
+     * @return 可安全写入 summary 的任务状态
+     */
+    static List<Map<String, Object>> cronJobEvidence(List<CronJob> cronSnapshot) {
+        return cronSnapshot.stream().map(job -> {
+            Map<String, Object> values = new LinkedHashMap<>();
+            values.put("id", job.id());
+            values.put("routing_key", job.payload().routingKey());
+            values.put("schedule_kind", job.schedule().kind().name());
+            values.put("enabled", job.enabled());
+            Long nextRunAtMs = job.state().nextRunAtMs() == null
+                    ? job.schedule().atMs() : job.state().nextRunAtMs();
+            values.put("next_run_at_ms", nextRunAtMs == null ? "" : nextRunAtMs);
+            values.put("last_run_at_ms", job.state().lastRunAtMs() == null
+                    ? "" : job.state().lastRunAtMs());
+            values.put("last_status", job.state().lastStatus() == null ? "" : job.state().lastStatus());
+            values.put("last_error", sanitizeEvidenceText(job.state().lastError()));
+            return Map.copyOf(values);
+        }).toList();
+    }
+
+    /**
+     * 将开放 mailbox 转换为只含路由、阶段与租约状态的证据，不复制 subject 或正文。
+     *
+     * @param mailSnapshot 当前项目邮箱快照
+     * @return unread 与 in_progress 邮件的脱敏摘要
+     */
+    static List<Map<String, Object>> openMailboxEvidence(List<JsonNode> mailSnapshot) {
+        return mailSnapshot.stream()
+                .filter(message -> Set.of("unread", "in_progress").contains(message.path("status").asText()))
+                .map(message -> {
+                    Map<String, Object> values = new LinkedHashMap<>();
+                    values.put("id", message.path("id").asText(""));
+                    values.put("project_id", message.path("project_id").asText(""));
+                    values.put("from", message.path("from").asText(""));
+                    values.put("to", message.path("to").asText(""));
+                    values.put("type", message.path("type").asText(""));
+                    values.put("status", message.path("status").asText(""));
+                    values.put("workflow_stage", message.path("content").path("workflow_stage").asText(""));
+                    values.put("timestamp", message.path("timestamp").asText(""));
+                    values.put("processing_since", message.path("processing_since").asText(""));
+                    return Map.copyOf(values);
+                })
+                .toList();
     }
 
     /**
@@ -977,6 +1210,37 @@ final class RealTeamE2EDriver implements AutoCloseable {
         return sanitized.length() <= 4_096 ? sanitized : sanitized.substring(0, 4_096) + "...[TRUNCATED]";
     }
 
+    /**
+     * 从最后一次运行时快照提取超时所需的最小脱敏上下文，避免只报告下游文件名。
+     *
+     * @param snapshot 最近一次完整运行时快照
+     * @return 可直接附加到断言消息的有界摘要
+     */
+    static String runtimeTimeoutSummary(Map<String, Object> snapshot) {
+        if (snapshot == null || snapshot.isEmpty()) {
+            return "{}";
+        }
+        Map<String, Object> summary = new LinkedHashMap<>();
+        for (String key : List.of(
+                "event_count",
+                "mailbox_open",
+                "dispatch_pending",
+                "dispatch_states",
+                "agentscope_active",
+                "cron_jobs",
+                "mcp_health",
+                "terminal_incident",
+                "mcp_failure",
+                "cron_failure",
+                "hanging_dispatch"
+        )) {
+            if (snapshot.containsKey(key)) {
+                summary.put(key, snapshot.get(key));
+            }
+        }
+        return sanitizeEvidenceText(summary.toString());
+    }
+
     /** 在给定上限内轮询条件；超时返回 false 供有限重试使用。 */
     private boolean waitUpTo(BooleanSupplier condition, Duration timeout) throws InterruptedException {
         long deadline = System.nanoTime() + timeout.toNanos();
@@ -994,7 +1258,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 在给定上限内等待条件，超时必须失败并标出业务阶段。 */
     private void waitUntil(BooleanSupplier condition, Duration timeout, String label) throws Exception {
         if (!waitUpTo(condition, timeout)) {
-            throw new AssertionError("等待真实 E2E 阶段超时: " + label + "，timeout=" + timeout);
+            throw new AssertionError("等待真实 E2E 阶段超时: " + label
+                    + "，timeout=" + timeout
+                    + "，runtime=" + runtimeTimeoutSummary(lastRuntimeSnapshot));
         }
     }
 

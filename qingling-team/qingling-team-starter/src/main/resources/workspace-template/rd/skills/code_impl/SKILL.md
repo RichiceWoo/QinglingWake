@@ -26,6 +26,7 @@ type: task
 9. **SQLite 服务端时间默认值必须可建表**：需要数据库默认时间时使用 SQLite 可接受的 `server_default=text("CURRENT_TIMESTAMP")`，或改用 Python 侧 `default=datetime.utcnow`；禁止把 `strftime(...)` 函数表达式直接放进 `server_default`，避免 `CREATE TABLE` 语法错误。
 10. **失败时先守住文档契约**：测试断言来自 `needs/requirements.md`、`design/product_spec.md` 和 `tech/tech_design.md`。实现返回值与断言不一致时，必须先回读这三份文档并修复业务代码；禁止仅因为当前实现返回 `422`、`500` 或其他结果，就把文档要求的 `400` 等期望值改成实际值来制造全绿。
 11. **依赖清单是测试前置门禁**：运行 pytest 前必须执行 `test -s requirements.txt`，并通过 `pip install -r requirements.txt` 安装依赖。文件缺失、为空或未列全 import 依赖时不得交付，也不得改成逐个 `pip install` 后声称硬约束通过。
+12. **应用入口唯一**：唯一入口必须是 `code/main.py`，并在其中创建或导出最终 ASGI `app`、挂载全部 router。允许把业务模块放入 `code/app/`，但禁止创建 `code/app/main.py` 或任何第二个 main.py；若技术方案写了替代入口，先按本条修正方案再实现。
 
 ## 步骤
 

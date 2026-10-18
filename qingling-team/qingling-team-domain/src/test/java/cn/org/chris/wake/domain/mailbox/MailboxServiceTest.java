@@ -76,6 +76,22 @@ class MailboxServiceTest {
     }
 
     /**
+     * 释放处理中任务必须校验角色并把项目与角色原样交给 Repository。
+     */
+    @Test
+    void shouldValidateRoleAndDelegateTaskAssignmentRelease() {
+        RecordingMailboxRepository repository = new RecordingMailboxRepository();
+        MailboxService service = new MailboxService(repository);
+
+        assertThatThrownBy(() -> service.releaseInProgressTaskAssignments("p1", "stranger"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(service.releaseInProgressTaskAssignments("p1", "rd")).isEqualTo(2);
+
+        assertThat(repository.releaseProjectId).isEqualTo("p1");
+        assertThat(repository.releaseRole).isEqualTo("rd");
+    }
+
+    /**
      * 记录领域服务调用参数，避免测试依赖运行时字节码代理。
      */
     private static final class RecordingMailboxRepository implements MailboxRepository {
@@ -91,6 +107,12 @@ class MailboxServiceTest {
 
         /** 最近执行 stale 恢复的超时时间。 */
         private Duration resetTimeout;
+
+        /** 最近执行任务释放的项目标识。 */
+        private String releaseProjectId;
+
+        /** 最近执行任务释放的角色。 */
+        private String releaseRole;
 
         /**
          * 记录追加的邮件并模拟 Repository 返回实际持久化结果。
@@ -126,6 +148,20 @@ class MailboxServiceTest {
         @Override
         public List<MailMessage> findInProgressTaskAssignments(String projectId, String role) {
             return List.of();
+        }
+
+        /**
+         * 记录运行时恢复释放的项目与角色。
+         *
+         * @param projectId 所属项目标识
+         * @param role 邮箱角色
+         * @return 固定释放数量
+         */
+        @Override
+        public int releaseInProgressTaskAssignments(String projectId, String role) {
+            releaseProjectId = projectId;
+            releaseRole = role;
+            return 2;
         }
 
         /**

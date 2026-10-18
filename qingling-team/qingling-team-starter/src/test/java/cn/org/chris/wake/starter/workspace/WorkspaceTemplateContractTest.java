@@ -284,24 +284,51 @@ class WorkspaceTemplateContractTest {
         Path templateRoot = templateRoot();
         String rdAgents = Files.readString(templateRoot.resolve("rd/AGENTS.md"));
         String codeImplSkill = Files.readString(templateRoot.resolve("rd/skills/code_impl/SKILL.md"));
+        String techDesignSkill = Files.readString(templateRoot.resolve("rd/skills/tech_design/SKILL.md"));
         String codeImplSubagent = Files.readString(templateRoot.resolve("rd/subagents/code_impl.md"));
         String featureSop = Files.readString(templateRoot.resolve("manager/skills/sop_feature_dev/SKILL.md"));
 
         assertThat(rdAgents)
                 .contains("/workspace/shared/projects/{project_id}/code")
-                .contains("禁止使用 `/workspace/code`、`/workspace/rd/code`、`/tmp/code`");
+                .contains("禁止使用 `/workspace/code`、`/workspace/rd/code`、`/tmp/code`")
+                .contains("唯一入口产物是 `code/main.py`")
+                .contains("`code/app/main.py` 和其他第二入口一律禁止");
         assertThat(codeImplSkill)
                 .contains("test -d /workspace/shared/projects/{pid}/code")
                 .contains("禁止把 `write_shared` 产物复制、重建或改写")
                 .contains("禁止 `ls /workspace` 后选择角色私有目录作为回退")
-                .contains("修复失败用例时仍只能调用 `write_shared`");
+                .contains("修复失败用例时仍只能调用 `write_shared`")
+                .contains("唯一入口必须是 `code/main.py`")
+                .contains("禁止创建 `code/app/main.py`");
+        assertThat(techDesignSkill)
+                .contains("`code/main.py` — 唯一 FastAPI ASGI app")
+                .contains("禁止生成或规划 `code/app/main.py`");
         assertThat(codeImplSubagent)
                 .contains("首次无副作用的 `pwd`/`test -d` 工具契约探测")
                 .contains("正式测试必须调用 `run_project_tests(project_id)`")
+                .contains("唯一 ASGI 入口是 `code/main.py`")
+                .contains("禁止创建 `code/app/main.py`")
                 .contains("禁止使用或创建 `/workspace/code`、`/workspace/rd/code`、`/tmp/code`")
                 .contains("精确目录不存在时向 Manager 发送 `clarification_request`");
         assertThat(featureSop)
                 .contains("`run_project_tests(project_id)` 固定");
+    }
+
+    /**
+     * RD 父代理必须串行维护单个 code_impl continuation，避免并发纠偏消息制造伪多任务和级联取消。
+     *
+     * @throws Exception 模板资源读取失败
+     */
+    @Test
+    void shouldRequireNonBlockingSingleCodeImplementationContinuation() throws Exception {
+        String rdAgents = Files.readString(templateRoot().resolve("rd/AGENTS.md"));
+
+        assertThat(rdAgents)
+                .contains("只允许维护一个 `code_impl` 逻辑子代理")
+                .contains("`task_output(block=false)`")
+                .contains("禁止并发 `agent_send`")
+                .contains("禁止使用 `wait_async_results`")
+                .contains("不得仅因一次 heartbeat 尚未完成就调用 `task_cancel`");
     }
 
     /**

@@ -1,9 +1,11 @@
 package cn.org.chris.wake.infra.agentscope.tool;
 
 import cn.org.chris.wake.domain.event.EventService;
+import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.SenderGateway;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
+import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.infra.agentscope.ProjectTestAgentTool;
 import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,7 +19,7 @@ import java.util.Set;
 /**
  * 按团队角色和当前启用 Skill 构造最小权限 AgentScope Toolkit。
  */
-public final class RoleToolkitFactory {
+public final class RoleToolkitFactory implements RuntimeIncidentGateway {
 
     /** 四角色共享的五个团队工具名。 */
     public static final Set<String> COMMON_TEAM_TOOL_NAMES = Set.of(
@@ -168,6 +170,58 @@ public final class RoleToolkitFactory {
         workflowTools.reportToolExecutionFailure(
                 projectId, role, tool, executionId, failureType, retryable, attempt
         );
+    }
+
+    /**
+     * 将 Runner 捕获的类型化 Agent 执行故障交给共享确定性状态机处理。
+     *
+     * @param projectId 当前团队项目标识
+     * @param role 当前 workflow Owner
+     * @param occurrenceId 当前入站 dispatch 的稳定标识
+     * @param failureType Agent 执行失败分类
+     */
+    @Override
+    public void reportAgentExecutionFailure(
+            String projectId,
+            String role,
+            String occurrenceId,
+            AgentExecutionException.FailureType failureType
+    ) {
+        workflowTools.reportAgentExecutionFailure(projectId, role, occurrenceId, failureType);
+    }
+
+    /**
+     * 将无项目 heartbeat 故障绑定到该角色唯一的处理中任务；候选不唯一时拒绝猜测。
+     *
+     * @param role 当前团队角色
+     * @param occurrenceId 当前入站 dispatch 的稳定标识
+     * @param failureType Agent 执行失败分类
+     */
+    @Override
+    public void reportUnscopedAgentExecutionFailure(
+            String role,
+            String occurrenceId,
+            AgentExecutionException.FailureType failureType
+    ) {
+        List<String> candidates = workspaceRepository.listProjectIds().stream()
+                .filter(projectId -> !mailboxService.findInProgressTaskAssignments(projectId, role).isEmpty())
+                .toList();
+        if (candidates.size() == 1) {
+            workflowTools.reportAgentExecutionFailure(
+                    candidates.get(0), role, occurrenceId, failureType
+            );
+        }
+    }
+
+    /**
+     * 查询项目是否已经耗尽运行时恢复预算。
+     *
+     * @param projectId 项目标识
+     * @return 已存在 BLOCKED incident 时为 true
+     */
+    @Override
+    public boolean isRuntimeBlocked(String projectId) {
+        return workflowTools.isRuntimeBlocked(projectId);
     }
 
     /**

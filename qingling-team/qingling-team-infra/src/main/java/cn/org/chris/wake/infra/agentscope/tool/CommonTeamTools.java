@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,6 +17,9 @@ import java.util.Objects;
  * 向四个角色提供邮箱三态流转和受权限约束的共享工作区 AgentScope 工具。
  */
 public final class CommonTeamTools {
+
+    /** RD 可交付的唯一 Python 应用入口相对路径。 */
+    private static final String CANONICAL_PYTHON_ENTRYPOINT = "code/main.py";
 
     /** 调用这些工具时固定使用的当前角色，防止模型伪造发送者或文件 Owner。 */
     private final String role;
@@ -290,6 +294,7 @@ public final class CommonTeamTools {
             @ToolParam(name = "content", description = "文件正文") String content
     ) {
         try {
+            validateCanonicalEntrypoint(relativePath);
             workspaceRepository.write(
                     AgentToolSupport.requireProjectId(projectId), role, relativePath,
                     Objects.requireNonNullElse(content, "")
@@ -297,6 +302,26 @@ public final class CommonTeamTools {
             return AgentToolSupport.success(objectMapper, Map.of("rel_path", relativePath));
         } catch (RuntimeException exception) {
             return AgentToolSupport.error(objectMapper, exception);
+        }
+    }
+
+    /**
+     * 拒绝 RD 在 code 子目录创建第二个 main.py，保证 Driver、QA 与测试入口使用同一产物。
+     *
+     * @param relativePath 模型请求写入的项目相对路径
+     */
+    private void validateCanonicalEntrypoint(String relativePath) {
+        if (!"rd".equals(role) || relativePath == null || relativePath.isBlank()) {
+            return;
+        }
+        String normalized = Path.of(relativePath).normalize().toString().replace('\\', '/');
+        if (normalized.startsWith("code/")
+                && normalized.endsWith("/main.py")
+                && !CANONICAL_PYTHON_ENTRYPOINT.equals(normalized)) {
+            throw new IllegalArgumentException(
+                    "Python 应用唯一入口必须是 " + CANONICAL_PYTHON_ENTRYPOINT
+                            + "，禁止创建替代入口: " + normalized
+            );
         }
     }
 

@@ -2,6 +2,7 @@ package cn.org.chris.wake.infra.agentscope;
 
 import cn.org.chris.wake.domain.model.AgentReply;
 import cn.org.chris.wake.domain.model.AgentRequest;
+import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.infra.memory.TurnMemoryIndexer;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
@@ -156,7 +157,61 @@ class AgentScopeAgentGatewayTest {
         CompletableFuture<AgentReply> future = gateway.execute(request);
 
         assertThatThrownBy(() -> future.get(1, TimeUnit.SECONDS))
-                .hasRootCauseMessage("AgentScope 子任务异常终止，父 dispatch 已结束: code_impl=CANCELLED");
+                .hasRootCauseInstanceOf(AgentExecutionException.class)
+                .hasRootCauseMessage("AgentScope 子任务异常终止，父 dispatch 已结束: "
+                        + "code_impl=CANCELLED[kind=SEND,cancel_origin=MODEL_REQUESTED]");
+        assertThat(runtime.cancellations).hasValue(1);
+        assertThat(gateway.activeExecutionDiagnostics()).isEmpty();
+    }
+
+    /** 较旧的取消记录不得覆盖同一逻辑子 Agent 最新仍在运行的 continuation。 */
+    @Test
+    void shouldKeepParentAliveWhileLatestContinuationIsRunning() throws Exception {
+        LatestContinuationRuntime runtime = new LatestContinuationRuntime();
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime),
+                AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                Duration.ofMillis(5),
+                Duration.ofMillis(10)
+        );
+        AgentRequest request = new AgentRequest(
+                "rd", "team-rd", "session-continuation", "继续实现", List.of(),
+                Map.of("routingKey", "team:rd", "projectId", "todo-mvp")
+        );
+
+        CompletableFuture<AgentReply> future = gateway.execute(request);
+        Thread.sleep(60L);
+
+        assertThat(future).isNotDone();
+        assertThat(future.cancel(true)).isTrue();
+        assertThat(runtime.cancellations).hasValue(1);
+    }
+
+    /** RUNNING 子任务超过真实进度租约后必须终止父 dispatch，并生成 CHILD_STALLED 类型化故障。 */
+    @Test
+    void shouldTerminateParentDispatchWhenRunningChildStopsMakingRealProgress() {
+        StalledChildRuntime runtime = new StalledChildRuntime();
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime),
+                AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                Duration.ofMillis(5),
+                Duration.ofMillis(5),
+                Duration.ofMillis(20)
+        );
+        AgentRequest request = new AgentRequest(
+                "rd", "team-rd", "session-stalled", "继续实现", List.of(),
+                Map.of("routingKey", "team:rd", "projectId", "todo-mvp")
+        );
+
+        CompletableFuture<AgentReply> future = gateway.execute(request);
+
+        assertThatThrownBy(() -> future.get(1, TimeUnit.SECONDS))
+                .hasRootCauseInstanceOf(AgentExecutionException.class)
+                .rootCause()
+                .extracting(failure -> ((AgentExecutionException) failure).failureType())
+                .isEqualTo(AgentExecutionException.FailureType.CHILD_STALLED);
         assertThat(runtime.cancellations).hasValue(1);
         assertThat(gateway.activeExecutionDiagnostics()).isEmpty();
     }
@@ -203,7 +258,10 @@ class AgentScopeAgentGatewayTest {
 
         /** 捕获会话级取消上下文。 */
         @Override
-        public void cancel(RuntimeContext currentContext) {
+        public void cancel(
+                RuntimeContext currentContext,
+                TaskSemanticsRegistry.CancelOrigin origin
+        ) {
             cancelledContext = currentContext;
         }
 
@@ -245,7 +303,10 @@ class AgentScopeAgentGatewayTest {
 
         /** 捕获父子级联取消。 */
         @Override
-        public void cancel(RuntimeContext context) {
+        public void cancel(
+                RuntimeContext context,
+                TaskSemanticsRegistry.CancelOrigin origin
+        ) {
             cancellations.incrementAndGet();
             cancelledContext = context;
         }
@@ -254,7 +315,8 @@ class AgentScopeAgentGatewayTest {
         @Override
         public List<AgentScopeAgentGateway.ChildTaskDiagnostic> taskDiagnostics(RuntimeContext context) {
             return List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
-                    "task-code", "code_impl", "RUNNING", false, java.time.Instant.EPOCH
+                    "task-code", "code_impl", "RUNNING", false, java.time.Instant.EPOCH,
+                    "SPAWN", "NONE", java.time.Instant.now()
             ));
         }
 
@@ -281,7 +343,10 @@ class AgentScopeAgentGatewayTest {
 
         /** 捕获 Gateway 发起的单次父子级联取消。 */
         @Override
-        public void cancel(RuntimeContext context) {
+        public void cancel(
+                RuntimeContext context,
+                TaskSemanticsRegistry.CancelOrigin origin
+        ) {
             cancellations.incrementAndGet();
         }
 
@@ -289,7 +354,95 @@ class AgentScopeAgentGatewayTest {
         @Override
         public List<AgentScopeAgentGateway.ChildTaskDiagnostic> taskDiagnostics(RuntimeContext context) {
             return List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
-                    "task-cancelled", "code_impl", "CANCELLED", true, java.time.Instant.EPOCH
+                    "task-cancelled", "code_impl", "CANCELLED", true, java.time.Instant.EPOCH,
+                    "SEND", "MODEL_REQUESTED", java.time.Instant.EPOCH
+            ));
+        }
+
+        /** 本测试不需要清理持久会话。 */
+        @Override
+        public void clearContext(String userId, String sessionId) { }
+
+        /** 本测试运行时没有外部资源。 */
+        @Override
+        public void close() { }
+    }
+
+    /** 返回旧取消任务和更新运行中 continuation，验证最新任务权威性。 */
+    private static final class LatestContinuationRuntime implements AgentScopeAgentGateway.AgentRuntime {
+
+        /** 收到的父子级联取消次数。 */
+        private final AtomicInteger cancellations = new AtomicInteger();
+
+        /** 保持父回合活跃，直到测试主动取消。 */
+        @Override
+        public Mono<Msg> call(String content, RuntimeContext context) {
+            return Mono.never();
+        }
+
+        /** 记录测试收尾触发的取消。 */
+        @Override
+        public void cancel(
+                RuntimeContext context,
+                TaskSemanticsRegistry.CancelOrigin origin
+        ) {
+            cancellations.incrementAndGet();
+        }
+
+        /** 返回同一 agentId 的旧取消 spawn 和较新运行中 send。 */
+        @Override
+        public List<AgentScopeAgentGateway.ChildTaskDiagnostic> taskDiagnostics(RuntimeContext context) {
+            return List.of(
+                    new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                            "task-1", "code_impl", "CANCELLED", true, java.time.Instant.EPOCH,
+                            "SPAWN", "MODEL_REQUESTED", java.time.Instant.EPOCH
+                    ),
+                    new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                            "task-2", "code_impl", "RUNNING", false,
+                            java.time.Instant.EPOCH.plusSeconds(1), "SEND", "NONE", java.time.Instant.now()
+                    )
+            );
+        }
+
+        /** 本测试不需要清理持久会话。 */
+        @Override
+        public void clearContext(String userId, String sessionId) { }
+
+        /** 本测试运行时没有外部资源。 */
+        @Override
+        public void close() { }
+    }
+
+    /** 返回真实进度时间固定在过去的 RUNNING 子任务，用于验证租约到期路径。 */
+    private static final class StalledChildRuntime implements AgentScopeAgentGateway.AgentRuntime {
+
+        /** 收到的父子级联取消次数。 */
+        private final AtomicInteger cancellations = new AtomicInteger();
+
+        /** 固定的最后进展时间，保证宽限期复查仍指向同一故障。 */
+        private final java.time.Instant lastProgressAt = java.time.Instant.now().minusSeconds(60);
+
+        /** 保持父回合活跃，等待 Gateway 根据进度租约主动终止。 */
+        @Override
+        public Mono<Msg> call(String content, RuntimeContext context) {
+            return Mono.never();
+        }
+
+        /** 记录租约到期触发的父子级联取消。 */
+        @Override
+        public void cancel(
+                RuntimeContext context,
+                TaskSemanticsRegistry.CancelOrigin origin
+        ) {
+            cancellations.incrementAndGet();
+        }
+
+        /** 返回最后真实进度早于测试租约的 RUNNING 子任务。 */
+        @Override
+        public List<AgentScopeAgentGateway.ChildTaskDiagnostic> taskDiagnostics(RuntimeContext context) {
+            return List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                    "task-stalled", "code_impl", "RUNNING", false, lastProgressAt,
+                    "SEND", "NONE", lastProgressAt
             ));
         }
 

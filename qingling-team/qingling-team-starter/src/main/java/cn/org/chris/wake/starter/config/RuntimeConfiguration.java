@@ -18,6 +18,7 @@ import cn.org.chris.wake.domain.event.EventService;
 import cn.org.chris.wake.domain.gateway.AttachmentDownloader;
 import cn.org.chris.wake.domain.gateway.CronJobRepository;
 import cn.org.chris.wake.domain.gateway.MetricsGateway;
+import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.SenderGateway;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
@@ -418,10 +419,12 @@ public class RuntimeConfiguration {
             MailboxService mailboxService,
             WorkspaceRepository workspaceRepository,
             SerialDispatchRegistry dispatchRegistry,
-            WakeScheduler wakeScheduler
+            WakeScheduler wakeScheduler,
+            RuntimeIncidentGateway runtimeIncidentGateway
     ) {
         return new MailboxLeaseWatchdog(
-                mailboxService, workspaceRepository, dispatchRegistry, wakeScheduler
+                mailboxService, workspaceRepository, dispatchRegistry, wakeScheduler,
+                runtimeIncidentGateway
         );
     }
 
@@ -441,11 +444,12 @@ public class RuntimeConfiguration {
             InboundAttachmentService attachments,
             SerialDispatchRegistry dispatchRegistry,
             RoutingKeyResolver routingKeyResolver,
-            MetricsGateway metrics
+            MetricsGateway metrics,
+            RuntimeIncidentGateway runtimeIncidentGateway
     ) {
         return new Runner(
                 sessions, slashCommands, agents, sender, attachments,
-                dispatchRegistry, routingKeyResolver, metrics
+                dispatchRegistry, routingKeyResolver, metrics, runtimeIncidentGateway
         );
     }
 

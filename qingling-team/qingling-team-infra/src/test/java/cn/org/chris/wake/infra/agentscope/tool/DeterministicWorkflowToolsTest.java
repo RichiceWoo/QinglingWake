@@ -3,6 +3,7 @@ package cn.org.chris.wake.infra.agentscope.tool;
 import cn.org.chris.wake.domain.event.EventService;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.MailMessage;
+import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.domain.workflow.WorkflowStage;
 import cn.org.chris.wake.infra.agentscope.ProjectTestExecution;
 import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
@@ -154,7 +155,10 @@ class DeterministicWorkflowToolsTest {
         tools.reportToolExecutionFailure(
                 "flow-project", "rd", "run_project_tests", "execution-complete", "MCP_TRANSPORT", true, 1
         );
-        MailMessage recoveryAssignment = mailbox.readInbox("flow-project", "rd").get(0);
+        MailMessage recoveryAssignment = mailbox.readInbox("flow-project", "rd").stream()
+                .filter(message -> "恢复代码实现工具执行".equals(message.subject()))
+                .findFirst()
+                .orElseThrow();
         CommonTeamTools rdTools = new CommonTeamTools(
                 "rd", mailbox, workspace,
                 (role, projectId) -> "wake-" + role,
@@ -171,6 +175,7 @@ class DeterministicWorkflowToolsTest {
         executionRegistry.record(
                 "flow-project", "rd", WorkflowStage.CODE_IMPLEMENTATION, rdSuccess
         );
+        workspace.write("flow-project", "rd", "code/main.py", "print('ready')\n");
         JsonNode wrongRecipient = json(rdTools.sendMail(
                 "qa", "task_done", "代码实现完成",
                 evidence(rdSuccess),
@@ -239,6 +244,7 @@ class DeterministicWorkflowToolsTest {
         executionRegistry.record(
                 "flow-project", "rd", WorkflowStage.CODE_IMPLEMENTATION, rdSuccess
         );
+        workspace.write("flow-project", "rd", "code/main.py", "print('ready')\n");
         tools.advanceWorkflow(
                 "flow-project", "stage_accepted", "rd",
                 evidence(rdSuccess), ""
@@ -393,6 +399,70 @@ class DeterministicWorkflowToolsTest {
         assertThat(events.readAll("flow-project").stream()
                 .filter(event -> "tool_execution_failed".equals(event.get("action"))))
                 .hasSize(2);
+    }
+
+    /** Agent 父回合首次失败必须释放租约并恢复原 Owner，第二个 occurrence 必须明确阻断。 */
+    @Test
+    void shouldRecoverAndThenBlockAgentExecutionFailureByStableWorkflowExecution() {
+        tools.advanceWorkflow("flow-project", "checkpoint_approved", "", Map.of(), "");
+        tools.advanceWorkflow("flow-project", "stage_accepted", "pm", Map.of(), "");
+        MailMessage techAssignment = mailbox.readInbox("flow-project", "rd").get(0);
+        mailbox.markDone("flow-project", "rd", techAssignment.id());
+        tools.advanceWorkflow("flow-project", "stage_accepted", "rd", Map.of(), "");
+        MailMessage codeAssignment = mailbox.readInbox("flow-project", "rd").get(0);
+
+        tools.reportAgentExecutionFailure(
+                "flow-project", "rd", "dispatch-1",
+                AgentExecutionException.FailureType.CHILD_CANCELLED
+        );
+        tools.reportAgentExecutionFailure(
+                "flow-project", "rd", "dispatch-1",
+                AgentExecutionException.FailureType.CHILD_CANCELLED
+        );
+
+        assertThat(mailbox.findMessage("flow-project", "rd", codeAssignment.id()))
+                .get()
+                .extracting(MailMessage::status)
+                .isEqualTo(cn.org.chris.wake.domain.model.MailStatus.UNREAD);
+        assertThat(mailbox.readInbox("flow-project", "rd").stream()
+                .filter(message -> "恢复代码实现工具执行".equals(message.subject())))
+                .singleElement();
+        assertThat(events.readAll("flow-project").stream()
+                .filter(event -> "tool_execution_failed".equals(event.get("action"))))
+                .singleElement()
+                .satisfies(event -> assertThat(event.get("payload"))
+                        .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                        .containsEntry("tool", "agentscope_dispatch")
+                        .containsEntry("occurrence_id", "dispatch-1")
+                        .containsEntry("runtime_status", "RECOVERING"));
+
+        tools.reportAgentExecutionFailure(
+                "flow-project", "rd", "dispatch-2",
+                AgentExecutionException.FailureType.CHILD_CANCELLED
+        );
+
+        assertThat(tools.isRuntimeBlocked("flow-project")).isTrue();
+        assertThat(tools.currentStage("flow-project")).isEqualTo(WorkflowStage.CODE_IMPLEMENTATION);
+        assertThat(events.readAll("flow-project").stream()
+                .filter(event -> "tool_execution_failed".equals(event.get("action"))))
+                .hasSize(2);
+    }
+
+    /** 初始 checkpoint 尚无迁移事件时也必须生成稳定 execution ID，而不是丢失故障。 */
+    @Test
+    void shouldReportAgentFailureBeforeFirstWorkflowTransition() {
+        tools.reportAgentExecutionFailure(
+                "flow-project", "manager", "checkpoint-dispatch-1",
+                AgentExecutionException.FailureType.CHILD_FAILED
+        );
+
+        assertThat(events.readAll("flow-project"))
+                .singleElement()
+                .satisfies(event -> assertThat(event.get("payload"))
+                        .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                        .containsEntry("execution_id", "agentscope:flow-project:0:REQUIREMENTS_CHECKPOINT:manager")
+                        .containsEntry("runtime_status", "RECOVERING"));
+        assertThat(scheduledRoles).containsExactly("manager");
     }
 
     /**

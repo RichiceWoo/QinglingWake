@@ -5,6 +5,7 @@ import io.agentscope.core.model.Model;
 import io.agentscope.core.permission.PermissionContextState;
 import io.agentscope.core.permission.PermissionMode;
 import io.agentscope.core.state.JsonFileAgentStateStore;
+import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
@@ -154,6 +155,7 @@ public final class TeamAgentFactory {
         }
         HarnessAgent agent = configuredBuilder.build();
         replaceBlockingTaskOutput(agent);
+        trackTaskSemantics(agent);
         return agent;
     }
 
@@ -166,6 +168,24 @@ public final class TeamAgentFactory {
         Toolkit runtimeToolkit = agent.getToolkit();
         runtimeToolkit.removeTool("task_output");
         runtimeToolkit.registerTool(new NonBlockingTaskOutputTool(agent.getTaskRepository()));
+    }
+
+    /**
+     * 包装 AgentScope 内置子任务工具，补充 TaskRepository 未保存的任务种类和取消来源。
+     *
+     * @param agent 已完成内置工具装配的角色 Agent
+     */
+    private static void trackTaskSemantics(HarnessAgent agent) {
+        Toolkit runtimeToolkit = agent.getToolkit();
+        TaskSemanticsRegistry registry = TaskSemanticsRegistry.forRepository(agent.getTaskRepository());
+        for (String toolName : List.of("agent_spawn", "agent_send", "task_cancel")) {
+            AgentTool original = runtimeToolkit.getTool(toolName);
+            if (original == null || original instanceof TaskSemanticsTrackingTool) {
+                continue;
+            }
+            runtimeToolkit.removeToolIfSame(toolName, original);
+            runtimeToolkit.registerAgentTool(new TaskSemanticsTrackingTool(original, registry));
+        }
     }
 
     /**

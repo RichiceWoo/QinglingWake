@@ -2,6 +2,7 @@ package cn.org.chris.wake.infra.agentscope.tool;
 
 import cn.org.chris.wake.domain.event.EventService;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
+import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.infra.persistence.event.JsonlEventRepository;
 import cn.org.chris.wake.infra.persistence.mailbox.FileMailboxRepository;
 import cn.org.chris.wake.infra.persistence.workspace.FileWorkspaceRepository;
@@ -219,6 +220,30 @@ class RoleToolkitFactoryTest {
         assertThat(wakeReply.path("routing_key").asText()).isEqualTo("test:real-user");
     }
 
+    /** RD 写入工具必须接受 code/main.py，并拒绝 code/app/main.py 等第二入口。 */
+    @Test
+    void shouldEnforceSingleCanonicalPythonEntrypoint() throws Exception {
+        workspaceRepository.initializeProject("entrypoint-project");
+        CommonTeamTools rdTools = new CommonTeamTools(
+                "rd", mailboxService, workspaceRepository,
+                (role, projectId) -> "job-12345678", objectMapper
+        );
+
+        JsonNode canonical = json(rdTools.writeShared(
+                "entrypoint-project", "code/main.py", "app = object()"
+        ));
+        JsonNode duplicate = json(rdTools.writeShared(
+                "entrypoint-project", "code/app/main.py", "app = object()"
+        ));
+
+        assertThat(canonical.path("errcode").asInt()).isZero();
+        assertThat(duplicate.path("errcode").asInt()).isNotZero();
+        assertThat(duplicate.toString()).contains("唯一入口", "code/main.py", "code/app/main.py");
+        assertThat(workspaceRepository.read(
+                "entrypoint-project", "rd", "code/main.py"
+        )).isEqualTo("app = object()");
+    }
+
     /**
      * 低自评、硬约束失分或显式新 Skill 都必须稳定触发评审。
      *
@@ -278,6 +303,40 @@ class RoleToolkitFactoryTest {
         assertThat(invalidProject.path("errmsg").asText()).contains("invalid project_id");
         assertThat(invalidKind.path("errcode").asInt()).isEqualTo(1);
         assertThat(invalidKind.path("errmsg").asText()).contains("invalid kind");
+    }
+
+    /** 无项目 heartbeat 只允许绑定到该角色唯一的处理中任务，候选歧义时不得误报。 */
+    @Test
+    void shouldResolveUnscopedFailureOnlyForUniqueInProgressProject() {
+        workspaceRepository.initializeProject("only-project");
+        mailboxService.send(
+                "only-project", "manager", "manager", "task_assign", "需求检查点", Map.of()
+        );
+        mailboxService.readInbox("only-project", "manager");
+
+        factory.reportUnscopedAgentExecutionFailure(
+                "manager", "heartbeat-1", AgentExecutionException.FailureType.CHILD_FAILED
+        );
+
+        assertThat(eventService.readAll("only-project"))
+                .singleElement()
+                .satisfies(event -> assertThat(event.get("payload"))
+                        .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                        .containsEntry("occurrence_id", "heartbeat-1")
+                        .containsEntry("runtime_status", "RECOVERING"));
+
+        mailboxService.readInbox("only-project", "manager");
+        workspaceRepository.initializeProject("other-project");
+        mailboxService.send(
+                "other-project", "manager", "manager", "task_assign", "需求检查点", Map.of()
+        );
+        mailboxService.readInbox("other-project", "manager");
+        factory.reportUnscopedAgentExecutionFailure(
+                "manager", "heartbeat-2", AgentExecutionException.FailureType.CHILD_FAILED
+        );
+
+        assertThat(eventService.readAll("only-project")).hasSize(1);
+        assertThat(eventService.readAll("other-project")).isEmpty();
     }
 
     /**

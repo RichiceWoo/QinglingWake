@@ -197,6 +197,32 @@ public final class FileMailboxRepository implements MailboxRepository {
     }
 
     /**
+     * 在邮箱文件锁内原子释放全部处理中的流水线任务，普通邮件状态保持不变。
+     *
+     * @param projectId 所属项目标识
+     * @param role 邮箱角色
+     * @return 从 in_progress 恢复为 unread 的 task_assign 数量
+     */
+    @Override
+    public int releaseInProgressTaskAssignments(String projectId, String role) {
+        validateRole(role);
+        Path inbox = inboxPath(projectId, role);
+        return withLockedInbox(inbox, messages -> {
+            int released = 0;
+            for (Map<String, Object> message : messages) {
+                if (!"task_assign".equals(message.get("type"))
+                        || !"in_progress".equals(message.get("status"))) {
+                    continue;
+                }
+                message.put("status", "unread");
+                message.put("processing_since", null);
+                released++;
+            }
+            return released;
+        });
+    }
+
+    /**
      * 只允许把指定 in_progress 邮件转为 done。
      *
      * @param projectId 所属项目标识

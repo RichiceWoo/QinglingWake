@@ -135,6 +135,18 @@ public final class MailboxService {
     }
 
     /**
+     * 原子释放角色当前全部处理中的流水线任务，供确定性运行时恢复原 Owner。
+     *
+     * @param projectId 所属项目标识
+     * @param role 接收角色
+     * @return 从 in_progress 恢复为 unread 的 task_assign 数量
+     */
+    public int releaseInProgressTaskAssignments(String projectId, String role) {
+        validateRole(role, false);
+        return repository.releaseInProgressTaskAssignments(requireText(projectId, "projectId"), role);
+    }
+
+    /**
      * 将已领取邮件从 in_progress 转为 done。
      *
      * @param projectId 所属项目

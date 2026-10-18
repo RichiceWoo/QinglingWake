@@ -164,6 +164,9 @@ public final class WorkflowStateMachine {
      */
     private static WorkflowTransition recoverAfterToolFailure(WorkflowStage current) {
         return switch (current) {
+            case REQUIREMENTS_CHECKPOINT -> new WorkflowTransition(
+                    current, current, "manager", "恢复需求检查点工具执行"
+            );
             case PRODUCT_DESIGN -> new WorkflowTransition(current, current, "pm", "恢复产品设计工具执行");
             case TECH_DESIGN -> new WorkflowTransition(current, current, "rd", "恢复技术方案工具执行");
             case CODE_IMPLEMENTATION -> new WorkflowTransition(current, current, "rd", "恢复代码实现工具执行");
@@ -182,7 +185,7 @@ public final class WorkflowStateMachine {
      */
     private static WorkflowTransition blockAfterToolFailure(WorkflowStage current) {
         return switch (current) {
-            case PRODUCT_DESIGN, TECH_DESIGN, CODE_IMPLEMENTATION,
+            case REQUIREMENTS_CHECKPOINT, PRODUCT_DESIGN, TECH_DESIGN, CODE_IMPLEMENTATION,
                     QA_TEST_DESIGN, QA_TEST_EXECUTION, DEFECT_FIX ->
                     new WorkflowTransition(current, current, "", "");
             default -> throw illegal(current, WorkflowSignal.TOOL_RETRY_EXHAUSTED);

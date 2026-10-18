@@ -31,6 +31,8 @@
 |---------|------------|-----------|-----------|------|
 | `ProjectTestAgentTool` | pytest 成功 | exit 0、多个测试、覆盖率 | fake MCP 输出 | 结构化解析 execution ID、数量和覆盖率 |
 | `ProjectTestAgentTool` | pytest 失败 | exit 非 0 | fake MCP 输出 | 标记业务失败，可由 RD 修复，不触发 MCP 熔断 |
+| `McpProjectTestRunner` | 大输出终态查询 | `FINISHED/exit_code=1` + 100 KiB pytest stdout | fake MCP 截断形态 + 真实 Docker | 小型元数据不受输出截断影响，返回 `TEST_FAILED/PYTEST_FAILURE`；输出仅保留脱敏首尾摘录，circuit 不打开 |
+| `McpProjectTestRunner` | 终态写入竞态 | `FINISHED` 已可见但 `exit_code` 暂不可见 | fake MCP 元数据 | 视为 FINALIZING 并继续轮询，不产生 `RESULT_UNAVAILABLE` incident |
 | 沙盒执行器 | 命令超时 | 子进程超过上限 | fake/集成 runner | 终止进程组，返回 `TIMEOUT`，无孤儿进程 |
 | 沙盒执行器 | 响应丢失 | 命令完成后 transport 断开 | 可查询执行 fake | 按 execution ID 找回同一结果，不重复执行 |
 | MCP 熔断器 | 首次传输失败 | timeout/disconnect | fake clock/client | OPEN 后快速失败，重建探针成功才关闭 |
@@ -94,7 +96,8 @@ Task 6 实测：`mvn -pl qingling-team-app,qingling-team-starter -am test` 通�
 5. 验证每次都有唯一 execution ID 和明确终态。
 6. 验证不存在 pending tool、孤儿 pytest/pip/tmux 进程。
 7. 覆盖一次受控连接故障；验证结果找回或客户端重建。
-8. 失败时禁止进入真实模型 E2E。
+8. 覆盖一次超过 MCP 响应上限的 pytest 业务失败，验证 `exit_code=1` 不被误判为基础设施故障。
+9. 失败时禁止进入真实模型 E2E。
 
 ## 4. 真实 E2E
 
@@ -213,3 +216,17 @@ git diff --check
 | 2026-10-12 | `mvn -pl qingling-team-infra,qingling-team-starter -am -Dsurefire.failIfNoSpecifiedTests=false -Dtest=McpSandboxConfigurationTest,RuntimeBootstrapTest test` | 通过（15 tests） | 验证宿主 workspace 子路径映射、Maven `user.dir → /workspace`、ToolUse content 同步，以及真实形态 `Working directory does not exist` 连续两次 ERROR 后 circuit 仍 CLOSED、失败计数仍为 0；启动配置回归通过 |
 | 2026-10-12 | `mvn verify` | 通过（227 tests） | 六模块全部 SUCCESS，0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
 | 2026-10-12 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT -Dtool.contract.workspace="$(pwd)/target/e2e-workspace" verify` | 通过（1 IT） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；10 次 Shell 均故意传入宿主 Maven `user.dir` 并断言实际 `pwd=/workspace`，5 次结构化 pytest 和一次受控连接恢复通过。AIO session=0，宿主与容器均无 pytest/pip/tmux/Maven/Java 残留；未运行 E2E |
+| 2026-10-12 | `mvn -Pe2e -De2e.scenario=happy-path verify`（cwd/熔断修复后，仅一次） | 失败（1 E2E，1 failure、0 errors、0 skipped；场景 2589 秒，Maven 43 分 18 秒），未启动后续场景 | 显式 `qwen3.8-flash` 探针可用。workflow 完成 checkpoint、PM 产品设计、RD 技术设计并进入 `CODE_IMPLEMENTATION/RD`；宿主 cwd 归一化已生效，四个 MCP circuit 全程 CLOSED/0 failures。RD 生成应用与测试，但三个 `code_impl` 子任务均进入 CANCELLED；父 dispatch 正确终止并把 RD 邮件恢复为 unread。一次 heartbeat 自动恢复再次得到相同 CANCELLED，未形成 `tool_execution_failed`/BLOCKED，RD 邮件未被重新领取，最终仍以等待 `qa/test_plan.md` 30 分钟超时失败。证据保存于 `target/e2e-evidence/happy-path`；退出后宿主和容器均无 pytest/pip/tmux/Maven/Java 残留，没有启动第二次 E2E |
+| 2026-10-14 | `mvn -pl qingling-team-starter -am -DskipITs -Dsurefire.failIfNoSpecifiedTests=false -Dtest=RunnerTest,MailboxLeaseWatchdogTest,RoleToolkitFactoryTest,TeamAgentFactoryTest,AgentScopeAgentGatewayTest,DeterministicWorkflowToolsTest,RealTeamE2EDriverTest test` | 通过（56 个定向测试） | 覆盖最新 continuation 权威判定、MODEL_REQUESTED/运行时取消来源、父 dispatch 类型化失败、路由与唯一 heartbeat incident 归属、第一次恢复/第二次 BLOCKED/重复 occurrence 幂等、lease 释放、BLOCKED watchdog 隔离、Cron 直接失败及证据脱敏；未调用模型、未运行 E2E |
+| 2026-10-14 | `mvn verify` | 通过（245 tests） | domain 44、app 36、infra 109、adapter 13、starter 43；0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
+| 2026-10-14 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（1 IT） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；连续 10 次无副作用 Shell、5 次 `run_project_tests` 和一次受控连接失效/恢复全部通过，结束时没有 pending tool 或 pytest/pip/tmux/AIO 孤儿会话；未运行真实 E2E |
+| 2026-10-15 | `mvn -Pe2e -De2e.scenario=happy-path verify`（取消恢复闭环修复后，仅一次） | 失败（1 E2E，1 failure、0 errors、0 skipped；场景 1786 秒，Maven 29 分 55 秒），未启动后续场景 | 显式 `qwen3.8-flash`、免费模型选择关闭；workflow 完成 checkpoint、PM、RD 技术设计并进入 `CODE_IMPLEMENTATION/RD`。RD 使用一个 spawn 和终态后的 continuation，无主动取消；watchdog 将 stale assignment 恢复为 unread 并安排 wake。execution `84eab81b-ec29-47ef-9f98-fc3f9246eb03` 的容器状态文件最终为 `FINISHED/exit_code=1`，pytest 32 collected、11 passed、21 failed、coverage 72%，但工具返回 `INFRASTRUCTURE_FAILED/RESULT_UNAVAILABLE/exit_code=null`，并写入 attempt 1 RECOVERING、attempt 2 BLOCKED。Driver 直接报告 tool/execution/failure/stage/owner，没有等待 QA 文件超时。`finally` 保存脱敏证据；退出后宿主无 Maven/E2E，容器无 pytest/pip/tmux；没有自动重试 |
+| 2026-10-15 | `mvn -pl qingling-team-infra -am -Dtest=McpProjectTestRunnerTest,ProjectTestAgentToolTest -Dsurefire.failIfNoSpecifiedTests=false test` | 通过（15 tests） | 覆盖终态元数据与输出分离、`FINISHED/exit_code=1` 稳定分类为 `TEST_FAILED/PYTEST_FAILURE`、输出响应不含终态字段时仍保留业务结果，以及 FINALIZING 竞态不制造 `RESULT_UNAVAILABLE`；未调用模型 |
+| 2026-10-15 | `mvn verify` | 通过（247 tests） | domain 44、app 36、infra 111、adapter 13、starter 43；0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
+| 2026-10-15 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（1 IT，15.45 秒） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；10 次无副作用 Shell、原有 5 次成功 `run_project_tests`、1 次生成 100 KiB stdout 的 `exit_code=1` 业务失败、一次受控连接恢复全部通过。大输出失败返回 `TEST_FAILED/PYTEST_FAILURE`，不含 `RESULT_UNAVAILABLE/INFRASTRUCTURE_FAILED`，所有 circuit 保持 CLOSED；契约结束后无 pytest/pip/tmux 孤儿进程。本轮未运行 E2E |
+| 2026-10-17 | `mvn -Pe2e -De2e.scenario=happy-path verify`（Test Runner 终态修复后，仅一次） | 失败（1 E2E，1 failure、0 errors、0 skipped；场景 2468 秒，Maven 41 分 17 秒），未启动后续场景 | 显式 `qwen3.8-flash`、免费模型选择关闭；workflow 完成 checkpoint、PM 产品设计、RD 技术设计并进入 `CODE_IMPLEMENTATION/RD`。首个 `code_impl` task COMPLETED/delivered，但父 RD 在其完成前登记同 agent/session 的第二个 task；第二个 task 日志与产物停止更新、状态却长期 RUNNING，父 dispatch active/pending=1，且无 workflow incident、MCP/cron failure 或 hanging_dispatch。Driver 最终仍报告等待 `code/main.py` 30 分钟超时。未产生 `run_project_tests` execution，因此 Test Runner `exit_code=1` 修复未在本场景走到。finally 保存脱敏证据；退出后宿主无 Maven/Java、容器无 pytest/pip/tmux，Docker healthy，但持久化任务仓库仍遗留 RUNNING/cancelRequested=false/delivered=false 记录；没有自动重试 |
+| 2026-10-17 | `mvn -pl qingling-team-infra -am -Dtest=AgentScopeAgentGatewayTest,TaskSemanticsTrackingToolTest,TeamAgentFactoryTest,RoleToolkitFactoryTest,TaskCompletionEvidenceGateTest -Dsurefire.failIfNoSpecifiedTests=false test` | 通过（30 tests） | 覆盖稳定指纹不续租/真实变化续租、label 与真实 taskId-only spawn 后未知 agent_key 两种同 session continuation 去重、RUNNING 租约过期触发 `CHILD_STALLED`、唯一 Python 入口写入与完成门禁、Gateway shutdown 遗留任务持久化终态 |
+| 2026-10-17 | `mvn -pl qingling-team-starter -am -Dtest=RealTeamE2EDriverTest,WorkspaceTemplateContractTest -Dsurefire.failIfNoSpecifiedTests=false test` | 通过（30 tests） | 覆盖 Driver 对 RUNNING 无进展 task 的直接诊断、`last_progress_at` 脱敏证据，以及 RD 模板的 `code/main.py` 唯一入口契约 |
+| 2026-10-17 | `mvn -pl qingling-team-infra -am -Dtest=DeterministicWorkflowToolsTest -Dsurefire.failIfNoSpecifiedTests=false test` | 通过（10 tests） | 补齐唯一入口门禁后的 RD/QA 状态机夹具，验证收件人、完成证据与阶段推进仍保持原语义 |
+| 2026-10-17 | `mvn verify` | 通过（255 tests） | domain 44、app 36、infra 118、adapter 13、starter 44；0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
+| 2026-10-17 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（1 IT，15.25 秒） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；0 failures、0 errors、0 skipped。既有连续 Shell、结构化 Test Runner、受控断线恢复和孤儿进程断言全部通过；本轮未运行真实 E2E |

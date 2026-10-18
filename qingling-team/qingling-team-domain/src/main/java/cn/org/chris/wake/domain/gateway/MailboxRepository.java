@@ -51,6 +51,15 @@ public interface MailboxRepository {
     List<MailMessage> findInProgressTaskAssignments(String projectId, String role);
 
     /**
+     * 原子释放指定角色当前全部处理中的流水线任务，使同阶段恢复可以重新领取原任务。
+     *
+     * @param projectId 所属项目标识
+     * @param role 邮箱角色
+     * @return 从 in_progress 恢复为 unread 的 task_assign 数量
+     */
+    int releaseInProgressTaskAssignments(String projectId, String role);
+
+    /**
      * 将指定 in_progress 邮件标记为 done。
      *
      * @param projectId 所属项目标识

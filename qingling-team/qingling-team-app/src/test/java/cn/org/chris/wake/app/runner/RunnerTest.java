@@ -4,11 +4,13 @@ import cn.org.chris.wake.app.session.SessionRoutingService;
 import cn.org.chris.wake.app.session.SlashCommandService;
 import cn.org.chris.wake.domain.gateway.AgentGateway;
 import cn.org.chris.wake.domain.gateway.MetricsGateway;
+import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.ConversationAuditRepository;
 import cn.org.chris.wake.domain.gateway.SenderGateway;
 import cn.org.chris.wake.domain.gateway.SessionRouteRepository;
 import cn.org.chris.wake.domain.model.AgentReply;
 import cn.org.chris.wake.domain.model.AgentRequest;
+import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.domain.model.Attachment;
 import cn.org.chris.wake.domain.model.ConversationAuditEntry;
 import cn.org.chris.wake.domain.model.InboundMessage;
@@ -63,6 +65,9 @@ class RunnerTest {
     /** 捕获失败分类的 Metrics。 */
     private CapturingMetrics metrics;
 
+    /** 捕获类型化 Agent 执行 incident 的运行时端口。 */
+    private CapturingRuntimeIncidentGateway runtimeIncidentGateway;
+
     /** 待测 Runner。 */
     private Runner runner;
 
@@ -76,6 +81,7 @@ class RunnerTest {
         agentGateway = new FakeAgentGateway();
         senderGateway = new FakeSenderGateway();
         metrics = new CapturingMetrics();
+        runtimeIncidentGateway = new CapturingRuntimeIncidentGateway();
         Deque<String> sessionIds = new ArrayDeque<>(List.of("s-first", "s-second", "s-third"));
         SessionRoutingService routingService = new SessionRoutingService(
                 routeRepository,
@@ -98,7 +104,8 @@ class RunnerTest {
                 attachmentService,
                 new SerialDispatchRegistry(Runnable::run),
                 new RoutingKeyResolver(),
-                metrics
+                metrics,
+                runtimeIncidentGateway
         );
     }
 
@@ -214,6 +221,101 @@ class RunnerTest {
                 "update:card-2:recovered"
         );
         assertThat(metrics.failures).containsExactly("runner:IllegalStateException");
+    }
+
+    /**
+     * 带项目上下文的团队 Agent 子任务取消应自动上报 incident，同时向 Cron 保留原始异常。
+     */
+    @Test
+    void shouldReportTypedTeamAgentFailureAndPreserveOriginalCause() {
+        AgentExecutionException original = new AgentExecutionException(
+                AgentExecutionException.FailureType.CHILD_CANCELLED,
+                "code_impl=CANCELLED"
+        );
+        agentGateway.behavior = request -> CompletableFuture.failedFuture(original);
+        InboundMessage wake = message(
+                "team:rd",
+                "__wake__:new_mail:todo-mvp",
+                true,
+                null,
+                Map.of("wake_reason", "new_mail")
+        );
+
+        CompletableFuture<Void> failed = runner.dispatch(wake);
+
+        assertThatThrownBy(failed::join).hasCause(original);
+        assertThat(runtimeIncidentGateway.reports).containsExactly(
+                "todo-mvp:rd:" + wake.msgId() + ":CHILD_CANCELLED"
+        );
+        assertThat(senderGateway.events).isEmpty();
+    }
+
+    /** 通用 heartbeat 没有 project_id 时必须走唯一处理中项目的保守归属入口。 */
+    @Test
+    void shouldReportUnscopedHeartbeatAgentFailure() {
+        AgentExecutionException original = new AgentExecutionException(
+                AgentExecutionException.FailureType.CHILD_FAILED,
+                "code_impl=FAILED"
+        );
+        agentGateway.behavior = request -> CompletableFuture.failedFuture(original);
+        InboundMessage heartbeat = message(
+                "team:rd", "__wake__:heartbeat", true, null, Map.of("wake_reason", "heartbeat")
+        );
+
+        CompletableFuture<Void> failed = runner.dispatch(heartbeat);
+
+        assertThatThrownBy(failed::join).hasCause(original);
+        assertThat(runtimeIncidentGateway.reports).containsExactly(
+                "unscoped:rd:" + heartbeat.msgId() + ":CHILD_FAILED"
+        );
+    }
+
+    /**
+     * 普通团队业务异常不得被误判为运行时 incident。
+     */
+    @Test
+    void shouldNotReportUntypedTeamFailureAsRuntimeIncident() {
+        agentGateway.behavior = request -> CompletableFuture.failedFuture(
+                new IllegalStateException("业务规则拒绝")
+        );
+
+        CompletableFuture<Void> failed = runner.dispatch(message(
+                "team:rd",
+                "__wake__:new_mail:todo-mvp",
+                true,
+                null,
+                Map.of("wake_reason", "new_mail")
+        ));
+
+        assertThatThrownBy(failed::join).hasCauseInstanceOf(IllegalStateException.class);
+        assertThat(runtimeIncidentGateway.reports).isEmpty();
+    }
+
+    /**
+     * incident 端口自身失败不得覆盖 AgentScope 原始失败原因。
+     */
+    @Test
+    void shouldPreserveAgentFailureWhenIncidentReportingFails() {
+        AgentExecutionException original = new AgentExecutionException(
+                AgentExecutionException.FailureType.CHILD_FAILED,
+                "code_impl=FAILED"
+        );
+        agentGateway.behavior = request -> CompletableFuture.failedFuture(original);
+        runtimeIncidentGateway.failure = new IllegalStateException("incident store unavailable");
+
+        CompletableFuture<Void> failed = runner.dispatch(message(
+                "team:rd",
+                "__wake__:new_mail:todo-mvp",
+                true,
+                null,
+                Map.of("wake_reason", "new_mail")
+        ));
+
+        assertThatThrownBy(failed::join).hasCause(original);
+        assertThat(metrics.failures).contains(
+                "runner:AgentExecutionException",
+                "runtime_incident:IllegalStateException"
+        );
     }
 
     /**
@@ -412,6 +514,56 @@ class RunnerTest {
         @Override
         public void clearSession(String role, String userId, String sessionId) {
             // fake 不持久化状态。
+        }
+    }
+
+    /** 捕获 Runner 发出的运行时 incident，不执行真实状态机或 mailbox 副作用。 */
+    private static final class CapturingRuntimeIncidentGateway implements RuntimeIncidentGateway {
+
+        /** 按调用顺序保存项目、角色、occurrence 和失败分类。 */
+        private final List<String> reports = new ArrayList<>();
+
+        /** 非空时让下一次上报同步失败，用于验证原始异常优先级。 */
+        private RuntimeException failure;
+
+        /**
+         * 捕获类型化 Agent 执行故障，或按测试配置抛出同步异常。
+         *
+         * @param projectId 项目标识
+         * @param role 当前 Owner
+         * @param occurrenceId dispatch 标识
+         * @param failureType Agent 失败分类
+         */
+        @Override
+        public void reportAgentExecutionFailure(
+                String projectId,
+                String role,
+                String occurrenceId,
+                AgentExecutionException.FailureType failureType
+        ) {
+            if (failure != null) {
+                throw failure;
+            }
+            reports.add(projectId + ":" + role + ":" + occurrenceId + ":" + failureType.name());
+        }
+
+        /** 捕获没有 project_id 的 heartbeat Agent 故障。 */
+        @Override
+        public void reportUnscopedAgentExecutionFailure(
+                String role,
+                String occurrenceId,
+                AgentExecutionException.FailureType failureType
+        ) {
+            if (failure != null) {
+                throw failure;
+            }
+            reports.add("unscoped:" + role + ":" + occurrenceId + ":" + failureType.name());
+        }
+
+        /** 测试 Runner 不读取阻断状态。 */
+        @Override
+        public boolean isRuntimeBlocked(String projectId) {
+            return false;
         }
     }
 

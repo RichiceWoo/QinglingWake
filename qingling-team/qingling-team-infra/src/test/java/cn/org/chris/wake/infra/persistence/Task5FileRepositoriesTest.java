@@ -259,6 +259,43 @@ class Task5FileRepositoriesTest {
     }
 
     /**
+     * 运行时恢复应原子释放全部处理中任务分派，同时保留普通处理中邮件。
+     *
+     * @throws Exception 邮箱文件读取失败
+     */
+    @Test
+    void shouldAtomicallyReleaseOnlyInProgressTaskAssignments() throws Exception {
+        Path workspace = temporaryDirectory.resolve("workspace-release-tasks");
+        ObjectMapper mapper = new ObjectMapper();
+        new FileWorkspaceRepository(workspace).initializeProject("p1");
+        AtomicInteger ids = new AtomicInteger();
+        MailboxService service = new MailboxService(
+                new FileMailboxRepository(workspace, mapper),
+                () -> "msg-" + String.format("%08x", ids.incrementAndGet()),
+                Clock.systemUTC()
+        );
+        service.send("p1", "rd", "manager", "task_assign", "代码实现", Map.of());
+        service.send("p1", "rd", "manager", "error_alert", "普通通知", Map.of());
+        service.readInbox("p1", "rd");
+
+        assertThat(service.releaseInProgressTaskAssignments("p1", "rd")).isEqualTo(1);
+        assertThat(service.releaseInProgressTaskAssignments("p1", "rd")).isZero();
+        assertThat(service.readInbox("p1", "rd"))
+                .singleElement()
+                .satisfies(message -> {
+                    assertThat(message.type()).isEqualTo("task_assign");
+                    assertThat(message.status()).isEqualTo(MailStatus.IN_PROGRESS);
+                });
+
+        JsonNode onDisk = mapper.readTree(
+                workspace.resolve("shared/projects/p1/mailboxes/rd.json").toFile()
+        );
+        assertThat(onDisk.findValuesAsText("type")).containsExactly("task_assign", "error_alert");
+        assertThat(onDisk.get(1).path("status").asText()).isEqualTo("in_progress");
+        assertThat(onDisk.get(1).path("processing_since").isNull()).isFalse();
+    }
+
+    /**
      * 缺少 processing_since 字段的旧格式 unread 邮件仍应能够被读取和领取。
      *
      * @throws Exception 测试邮箱文件写入失败

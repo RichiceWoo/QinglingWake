@@ -2,9 +2,11 @@ package cn.org.chris.wake.app.mailbox;
 
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
 import cn.org.chris.wake.domain.gateway.MailboxRepository;
+import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.MailMessage;
+import cn.org.chris.wake.domain.model.AgentExecutionException;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -36,7 +38,8 @@ class MailboxLeaseWatchdogTest {
         mailboxRepository.pmRestores.set(1);
         MailboxLeaseWatchdog watchdog = new MailboxLeaseWatchdog(
                 mailboxService, workspaceRepository, dispatchRegistry,
-                (role, projectId) -> "wake-" + wakes.incrementAndGet(), Duration.ofMinutes(10)
+                (role, projectId) -> "wake-" + wakes.incrementAndGet(),
+                new FixedRuntimeIncidentGateway(false), Duration.ofMinutes(10)
         );
 
         assertThat(watchdog.tick()).isEqualTo(1);
@@ -61,7 +64,8 @@ class MailboxLeaseWatchdogTest {
         dispatchRegistry.submit("team:pm", () -> activeDispatch);
         MailboxLeaseWatchdog watchdog = new MailboxLeaseWatchdog(
                 mailboxService, workspaceRepository, dispatchRegistry,
-                (role, projectId) -> "wake-" + wakes.incrementAndGet(), Duration.ofMinutes(10)
+                (role, projectId) -> "wake-" + wakes.incrementAndGet(),
+                new FixedRuntimeIncidentGateway(false), Duration.ofMinutes(10)
         );
 
         assertThat(watchdog.tick()).isZero();
@@ -71,6 +75,62 @@ class MailboxLeaseWatchdogTest {
         assertThat(watchdog.tick()).isEqualTo(1);
         assertThat(mailboxRepository.pmResetCalls).hasValue(1);
         assertThat(wakes).hasValue(1);
+    }
+
+    /**
+     * 已进入 BLOCKED 的项目不得被 watchdog 恢复 stale 邮件或重新唤醒。
+     */
+    @Test
+    void shouldNotRestoreBlockedProject() {
+        RecordingMailboxRepository mailboxRepository = new RecordingMailboxRepository();
+        MailboxService mailboxService = new MailboxService(mailboxRepository);
+        WorkspaceRepository workspaceRepository = mock(WorkspaceRepository.class);
+        SerialDispatchRegistry dispatchRegistry = new SerialDispatchRegistry(Runnable::run);
+        AtomicInteger wakes = new AtomicInteger();
+        when(workspaceRepository.listProjectIds()).thenReturn(List.of("p1"));
+        mailboxRepository.pmRestores.set(1);
+        MailboxLeaseWatchdog watchdog = new MailboxLeaseWatchdog(
+                mailboxService, workspaceRepository, dispatchRegistry,
+                (role, projectId) -> "wake-" + wakes.incrementAndGet(),
+                new FixedRuntimeIncidentGateway(true), Duration.ofMinutes(10)
+        );
+
+        assertThat(watchdog.tick()).isZero();
+        assertThat(mailboxRepository.pmResetCalls).hasValue(0);
+        assertThat(wakes).hasValue(0);
+    }
+
+    /** 提供固定 BLOCKED 查询结果且拒绝测试意外上报的运行时端口。 */
+    private record FixedRuntimeIncidentGateway(
+            /** 项目是否已经耗尽恢复预算。 */ boolean blocked
+    ) implements RuntimeIncidentGateway {
+
+        /** 本测试只验证查询路径，任何故障上报都属于测试装配错误。 */
+        @Override
+        public void reportAgentExecutionFailure(
+                String projectId,
+                String role,
+                String occurrenceId,
+                AgentExecutionException.FailureType failureType
+        ) {
+            throw new AssertionError("watchdog 不应上报 Agent 执行故障");
+        }
+
+        /** 本测试只验证查询路径，任何无项目故障上报都属于装配错误。 */
+        @Override
+        public void reportUnscopedAgentExecutionFailure(
+                String role,
+                String occurrenceId,
+                AgentExecutionException.FailureType failureType
+        ) {
+            throw new AssertionError("watchdog 不应上报无项目 Agent 执行故障");
+        }
+
+        /** 返回构造时固定的项目阻断状态。 */
+        @Override
+        public boolean isRuntimeBlocked(String projectId) {
+            return blocked;
+        }
     }
 
     /** 记录 stale 恢复调用的最小 mailbox 仓储。 */
@@ -104,6 +164,12 @@ class MailboxLeaseWatchdogTest {
         @Override
         public List<MailMessage> findInProgressTaskAssignments(String projectId, String role) {
             return List.of();
+        }
+
+        /** watchdog 测试不走即时任务释放路径。 */
+        @Override
+        public int releaseInProgressTaskAssignments(String projectId, String role) {
+            return 0;
         }
 
         /** 测试不使用邮件完成。 */

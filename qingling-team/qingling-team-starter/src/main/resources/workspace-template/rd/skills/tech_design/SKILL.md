@@ -14,6 +14,7 @@ RD 是从 spec 到 code 的桥梁。tech_design 不是"把 spec 照抄一遍"，
 2. **不启 uvicorn 长进程**：测试一律 `httpx.Client(app=app)`（in-process）。
 3. **分层明确**：routers / services / models / schemas / database 五层，business logic 不混入 router。
 4. **每个接口都想好错误场景**：400/404/409/422/500 要在方案里点名。
+5. **入口唯一**：技术方案必须把 `code/main.py` 定义为唯一 ASGI 入口；模块可放 `code/app/`，但禁止规划 `code/app/main.py` 或第二个 main.py。
 
 ## 步骤
 
@@ -32,12 +33,12 @@ RD 是从 spec 到 code 的桥梁。tech_design 不是"把 spec 照抄一遍"，
 - 测试：pytest + httpx.Client(app)
 
 ## 2. 分层架构
-- `main.py` — FastAPI app + router 挂载
-- `routers/{module}.py` — 薄路由层
-- `services/{module}.py` — 业务逻辑
-- `models/{module}.py` — SQLAlchemy ORM
-- `schemas/{module}.py` — Pydantic 请求/响应模型
-- `database.py` — engine + SessionLocal
+- `code/main.py` — 唯一 FastAPI ASGI app + router 挂载入口
+- `code/routers/{module}.py` — 薄路由层
+- `code/services/{module}.py` — 业务逻辑
+- `code/models/{module}.py` — SQLAlchemy ORM
+- `code/schemas/{module}.py` — Pydantic 请求/响应模型
+- `code/database.py` — engine + SessionLocal
 
 ## 3. 数据库 Schema
 ```sql
@@ -86,3 +87,4 @@ httpx
 - 必选 FastAPI + SQLite（除非强理由）
 - 必须包含"接口实现要点"章节，每接口至少 1 错误场景
 - 禁止 uvicorn 长进程
+- 禁止生成或规划 `code/app/main.py`；Driver、QA 与 Test Runner 只认 `code/main.py`

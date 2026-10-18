@@ -243,6 +243,37 @@ class TeamAgentFactoryTest {
         }
     }
 
+    /** Gateway 关闭时必须把已脱离活跃父回合但仍 RUNNING 的任务持久化为取消或失败终态。 */
+    @Test
+    void shouldPersistOrphanRunningTaskAsCancelledWhenGatewayCloses() {
+        HarnessAgent rd = factory.create("rd");
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(Map.of("rd", rd));
+        RuntimeContext context = RuntimeContext.builder()
+                .userId("team-rd")
+                .sessionId("session-shutdown")
+                .put(AgentScopeAgentGateway.ROLE_ATTRIBUTE, "rd")
+                .build();
+        CompletableFuture<String> childFuture = new CompletableFuture<>();
+        BackgroundTask child = rd.getTaskRepository().putTask(
+                context,
+                "task-shutdown",
+                "code_impl",
+                context.getSessionId(),
+                new TaskRunSpec.AdoptedTaskRunSpec(childFuture)
+        );
+        TaskSemanticsRegistry.forRepository(rd.getTaskRepository()).observeContext(context);
+
+        gateway.close();
+
+        assertThat(child.getTaskStatus()).isIn(TaskStatus.CANCELLED, TaskStatus.FAILED);
+        assertThat(rd.getWorkspaceManager().readTaskRecord(
+                context, rd.getName(), context.getSessionId(), child.getTaskId()
+        )).get().satisfies(record -> {
+            assertThat(record.getStatus()).isIn(TaskStatus.CANCELLED, TaskStatus.FAILED);
+            assertThat(record.isCancelRequested()).isTrue();
+        });
+    }
+
     /** 即使模型沿用 block=true 和十分钟 timeout，替换后的 task_output 也必须立即返回运行中快照。 */
     @Test
     void shouldKeepTaskOutputNonBlockingForLegacyBlockingArguments() {
@@ -287,6 +318,55 @@ class TeamAgentFactoryTest {
             assertThat(result).isNotNull();
             assertThat(result.getOutput().toString()).contains("task-running");
             assertThat(childFuture).isNotDone();
+        } finally {
+            childFuture.cancel(true);
+            rd.close();
+        }
+    }
+
+    /** 内置 spawn/send/cancel 工具必须安装语义包装器，并记录成功取消的模型来源。 */
+    @Test
+    void shouldTrackModelRequestedTaskCancellation() {
+        HarnessAgent rd = factory.create("rd");
+        RuntimeContext context = RuntimeContext.builder()
+                .userId("team-rd")
+                .sessionId("session-model-cancel")
+                .put(AgentScopeAgentGateway.ROLE_ATTRIBUTE, "rd")
+                .build();
+        CompletableFuture<String> childFuture = new CompletableFuture<>();
+        BackgroundTask child = rd.getTaskRepository().putTask(
+                context,
+                "task-model-cancel",
+                "code_impl",
+                context.getSessionId(),
+                new TaskRunSpec.AdoptedTaskRunSpec(childFuture)
+        );
+        Map<String, Object> input = Map.of("task_id", child.getTaskId());
+        ToolUseBlock use = new ToolUseBlock(
+                "call-task-cancel", "task_cancel", input,
+                "{\"task_id\":\"task-model-cancel\"}", Map.of()
+        );
+
+        try {
+            assertThat(rd.getToolkit().getTool("agent_spawn"))
+                    .isInstanceOf(TaskSemanticsTrackingTool.class);
+            assertThat(rd.getToolkit().getTool("agent_send"))
+                    .isInstanceOf(TaskSemanticsTrackingTool.class);
+            assertThat(rd.getToolkit().getTool("task_cancel"))
+                    .isInstanceOf(TaskSemanticsTrackingTool.class);
+
+            ToolResultBlock result = rd.getToolkit().callTool(ToolCallParam.builder()
+                    .toolUseBlock(use)
+                    .input(input)
+                    .agent(rd)
+                    .runtimeContext(context)
+                    .build()).block(Duration.ofSeconds(1));
+
+            assertThat(result).isNotNull();
+            assertThat(child.getTaskStatus()).isEqualTo(TaskStatus.CANCELLED);
+            assertThat(TaskSemanticsRegistry.forRepository(rd.getTaskRepository())
+                    .semantics(child.getTaskId()).cancelOrigin())
+                    .isEqualTo(TaskSemanticsRegistry.CancelOrigin.MODEL_REQUESTED);
         } finally {
             childFuture.cancel(true);
             rd.close();

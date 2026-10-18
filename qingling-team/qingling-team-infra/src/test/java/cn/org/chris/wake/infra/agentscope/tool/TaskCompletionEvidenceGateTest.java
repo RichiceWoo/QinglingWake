@@ -108,11 +108,41 @@ class TaskCompletionEvidenceGateTest {
                 false
         );
         registry.record("gate-project", "rd", WorkflowStage.CODE_IMPLEMENTATION, success);
+        workspace.write("gate-project", "rd", "code/main.py", "app = object()");
 
         assertThatCode(() -> gate.validate(
                 "gate-project", WorkflowStage.CODE_IMPLEMENTATION, "rd",
                 Map.of("evidence", evidence(success))
         )).doesNotThrowAnyException();
+    }
+
+    /** RD 即使测试全绿也必须交付唯一 code/main.py，且不得同时保留 code/app/main.py。 */
+    @Test
+    void shouldRejectMissingOrDuplicateRdEntrypoint() {
+        ProjectTestExecution success = execution(
+                "rd-entrypoint",
+                ProjectTestExecution.Status.SUCCEEDED,
+                0,
+                8,
+                8,
+                91.5D,
+                ProjectTestExecution.FailureType.NONE,
+                false
+        );
+        registry.record("gate-project", "rd", WorkflowStage.CODE_IMPLEMENTATION, success);
+
+        assertThatThrownBy(() -> gate.validate(
+                "gate-project", WorkflowStage.CODE_IMPLEMENTATION, "rd", evidence(success)
+        )).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("code/main.py");
+
+        workspace.write("gate-project", "rd", "code/main.py", "app = object()");
+        workspace.write("gate-project", "rd", "code/app/main.py", "app = object()");
+
+        assertThatThrownBy(() -> gate.validate(
+                "gate-project", WorkflowStage.CODE_IMPLEMENTATION, "rd", evidence(success)
+        )).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("code/app/main.py");
     }
 
     /**

@@ -15,6 +15,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
@@ -69,6 +70,7 @@ class RealSandboxToolContractIT {
                 ? projectRoot.resolve("target/e2e-workspace")
                 : Path.of(configuredWorkspace).toAbsolutePath().normalize();
         resetContractProject(projectRoot, workspaceRoot.resolve("shared/projects/tool-contract"));
+        resetContractProject(projectRoot, workspaceRoot.resolve("shared/projects/tool-contract-failure"));
         ensureSandboxPythonDependencies();
         ObjectMapper objectMapper = new ObjectMapper();
         new WorkspaceTemplateInitializer(workspaceRoot, objectMapper).initialize();
@@ -79,6 +81,14 @@ class RealSandboxToolContractIT {
         Files.writeString(codeDirectory.resolve("test_contract.py"),
                 "# 验证 RD 受控回归测试能够在真实沙盒执行。\n"
                         + "def test_contract():\n    assert 2 + 2 == 4\n");
+        workspaceRepository.initializeProject("tool-contract-failure");
+        Path failureCodeDirectory = workspaceRoot.resolve("shared/projects/tool-contract-failure/code");
+        Files.createDirectories(failureCodeDirectory);
+        Files.writeString(failureCodeDirectory.resolve("test_large_failure.py"),
+                "# 生成超过 MCP 响应上限的失败输出，验证终态元数据不会随正文一起被截断。\n"
+                        + "def test_large_failure():\n"
+                        + "    print('x' * 100000)\n"
+                        + "    assert False, 'expected contract failure'\n");
         Path qaContractDirectory = workspaceRoot.resolve(
                 "shared/projects/tool-contract/qa/contract_tests"
         );
@@ -119,9 +129,9 @@ class RealSandboxToolContractIT {
 
         Set<String> executionIds = new LinkedHashSet<>();
         try {
-            verifyRoleSubagent(factory, sandbox, "rd", "code_impl", 5, 3, executionIds, true);
-            verifyRoleSubagent(factory, sandbox, "qa", "test_run", 5, 2, executionIds, false);
-            assertThat(executionIds).hasSize(5);
+            verifyRoleSubagent(factory, sandbox, "rd", "code_impl", 5, 3, executionIds, true, true);
+            verifyRoleSubagent(factory, sandbox, "qa", "test_run", 5, 2, executionIds, false, false);
+            assertThat(executionIds).hasSize(6);
             assertThat(noCallModel.calls()).as("零模型契约不得触发百炼调用").isZero();
         } finally {
             sandbox.close();
@@ -176,6 +186,7 @@ class RealSandboxToolContractIT {
      * @param testRuns 结构化 pytest 连续调用次数
      * @param executionIds 跨角色收集的 execution ID
      * @param exerciseRecovery 是否在当前连接执行受控失效与重建
+     * @param verifyLargeFailure 是否执行一次大输出 pytest 失败终态回归
      */
     private static void verifyRoleSubagent(
             TeamAgentFactory factory,
@@ -185,7 +196,8 @@ class RealSandboxToolContractIT {
             int shellRuns,
             int testRuns,
             Set<String> executionIds,
-            boolean exerciseRecovery
+            boolean exerciseRecovery,
+            boolean verifyLargeFailure
     ) {
         HarnessAgent parent = factory.create(role);
         HarnessAgent child = null;
@@ -240,6 +252,33 @@ class RealSandboxToolContractIT {
                 assertThat(output).contains("execution_id", "SUCCEEDED", "exit_code", "pytest_passed");
                 String executionId = extractExecutionId(output);
                 assertThat(executionIds.add(executionId)).as("execution ID 必须唯一").isTrue();
+            }
+            if (verifyLargeFailure) {
+                ToolResultBlock failedTestResult = callTool(
+                        child,
+                        "pytest-large-business-failure-" + role,
+                        "run_project_tests",
+                        Map.of("project_id", "tool-contract-failure")
+                );
+                assertThat(failedTestResult.getState())
+                        .as("大输出 pytest 业务失败必须返回结构化成功工具结果")
+                        .isEqualTo(ToolResultState.SUCCESS);
+                String failedOutput = ((TextBlock) failedTestResult.getOutput().get(0)).getText();
+                assertThat(failedOutput)
+                        .contains(
+                                "TEST_FAILED",
+                                "PYTEST_FAILURE",
+                                "\"exit_code\":1",
+                                "\"pytest_collected\":1",
+                                "output truncated"
+                        )
+                        .doesNotContain("RESULT_UNAVAILABLE", "INFRASTRUCTURE_FAILED");
+                assertThat(executionIds.add(extractExecutionId(failedOutput)))
+                        .as("大输出失败 execution ID 必须唯一")
+                        .isTrue();
+                assertThat(sandbox.circuitHealth())
+                        .allSatisfy(health -> assertThat(health.state())
+                                .isEqualTo(McpSandboxConfiguration.CircuitState.CLOSED));
             }
             ToolResultBlock processResult = callTool(
                     child,

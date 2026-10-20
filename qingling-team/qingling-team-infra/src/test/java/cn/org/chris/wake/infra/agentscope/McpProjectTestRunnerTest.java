@@ -40,7 +40,9 @@ class McpProjectTestRunnerTest {
                 .contains("mkdir '/workspace/.qingling-test-runs/" + EXECUTION_ID + "'")
                 .contains("cd '/workspace/shared/projects/demo-project/code'")
                 .contains("test_targets='. ../qa/contract_tests/test_contract.py'")
-                .contains("timeout --signal=TERM --kill-after=5s 270s")
+                .contains("timeout --signal=TERM --kill-after=5s 30s")
+                .contains("python -m pytest --collect-only -q --disable-warnings --import-mode=importlib")
+                .contains("timeout --signal=TERM --kill-after=5s 240s")
                 .contains("python -m pytest --disable-warnings --import-mode=importlib")
                 .contains("--cov=. --cov-report=term-missing")
                 .doesNotContain("/tmp/code", "/workspace/rd/code");

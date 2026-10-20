@@ -64,6 +64,8 @@ public record QinglingTeamProperties(
             /** Sub-Agent 最大迭代次数。 */ @DefaultValue("20") int subAgentMaxIterations,
             /** 长工具转入 AgentScope 后台任务前的等待时间，必须短于核心五分钟工具超时。 */
             @DefaultValue("30s") Duration asyncToolOffloadTimeout,
+            /** 关闭阶段等待已接纳 dispatch 排空的独立短超时。 */
+            @DefaultValue("30s") Duration shutdownDrainTimeout,
             /** 单次 Agent 调用超时。 */ @DefaultValue("300s") Duration timeout,
             /** DashScope API Key，优先 DASHSCOPE_API_KEY、回退 QWEN_API_KEY。 */ @DefaultValue("") String apiKey
     ) { }

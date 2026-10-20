@@ -7,10 +7,10 @@ type: task
 # code_impl — 代码实现 + 单测
 
 ## ⚠️ 执行方式
-**必须真实调用 `sandbox_execute_bash` 跑测试**。文件写入与沙盒执行分工如下：
+**必须真实调用 `run_project_tests(project_id)` 跑正式测试**。文件写入与沙盒执行分工如下：
 - 用宿主机 Tool `write_shared(project_id, rel_path, content)` 逐个写 `code/` 文件；它会安全创建父目录，且产物立即映射到沙盒 `/workspace/shared/projects/{pid}/code/`。
 - `{pid}` 不是字面量：必须替换为当前 `task_assign.project_id`。第一次沙盒调用必须执行 `test -d /workspace/shared/projects/{pid}/code && cd /workspace/shared/projects/{pid}/code && pwd` 验证唯一目录；验证失败时发送 `clarification_request`，禁止猜测或切换目录。
-- 用 `sandbox_execute_bash` 安装依赖并跑 pytest；不要用 heredoc、`cat >`、`tee` 或 shell 重定向写源码，避免命令进入人工确认状态。
+- 用 `sandbox_execute_bash` 只做目录探针和依赖安装；正式 pytest 只能由 `run_project_tests` 在固定 Docker 目录执行。不要用 heredoc、`cat >`、`tee` 或 shell 重定向写源码。
 - 调用 `sandbox_execute_bash` 时优先省略 `timeout`；确需设置时必须传 JSON 整数秒（例如 `timeout=300`），禁止传字符串（例如 `timeout="300"`），否则工具参数校验会拒绝执行。
 - 用宿主机 Tool `send_mail` 发 task_done（因为 mailbox 在宿主机 filesystem）。
 
@@ -27,6 +27,8 @@ type: task
 10. **失败时先守住文档契约**：测试断言来自 `needs/requirements.md`、`design/product_spec.md` 和 `tech/tech_design.md`。实现返回值与断言不一致时，必须先回读这三份文档并修复业务代码；禁止仅因为当前实现返回 `422`、`500` 或其他结果，就把文档要求的 `400` 等期望值改成实际值来制造全绿。
 11. **依赖清单是测试前置门禁**：运行 pytest 前必须执行 `test -s requirements.txt`，并通过 `pip install -r requirements.txt` 安装依赖。文件缺失、为空或未列全 import 依赖时不得交付，也不得改成逐个 `pip install` 后声称硬约束通过。
 12. **应用入口唯一**：唯一入口必须是 `code/main.py`，并在其中创建或导出最终 ASGI `app`、挂载全部 router。允许把业务模块放入 `code/app/`，但禁止创建 `code/app/main.py` 或任何第二个 main.py；若技术方案写了替代入口，先按本条修正方案再实现。
+13. **测试必须引用真实公开符号**：创建或修改测试前先用 `read_shared` 回读被测实现，确认模块路径、类名、常量名和函数签名真实存在。禁止凭空引入 `TEXT_MAX_LEN`、`metadata`、`TodoService` 等未在实现中声明的符号。
+14. **收集失败优先收敛**：`run_project_tests` 会先执行受控 `pytest --collect-only`。若返回 `exit_code=2` 或 stdout/stderr 显示 collection/import error，本轮只修复已有导入、fixture 和公开契约，不得继续新增测试文件或扩大用例数量；收集通过后才处理业务断言失败。
 
 ## 步骤
 
@@ -50,8 +52,8 @@ type: task
 
 编写 `tests/conftest.py` 时优先采用 `tmp_path` 创建数据库文件，并确保应用的 `get_db` 与测试请求共用该文件/engine。每个测试结束后关闭 session 和 engine；不得让 API 测试与 service 测试各自创建互不可见的 `:memory:` 数据库。
 
-### Step 4 — 跑测试
-调用工具时只传 `cmd` 即可；不要自行添加字符串形式的 `timeout`。若测试确需延长单次执行时间，只能传整数秒。
+### Step 4 — 安装依赖并执行结构化测试
+调用 Shell 工具时只传 `cmd` 即可；不要自行添加字符串形式的 `timeout`。
 
 先把 `{pid}` 替换为当前邮件中的真实 `project_id`，验证目录后再安装和测试。若 `test -d` 失败，停止本任务并向 Manager 报告沙盒挂载异常；禁止 `ls /workspace` 后选择角色私有目录作为回退。
 
@@ -59,16 +61,18 @@ type: task
 test -d /workspace/shared/projects/{pid}/code && \
   cd /workspace/shared/projects/{pid}/code && \
   test -s requirements.txt && \
-  pip install -r requirements.txt -q && \
-  python -m pytest -x --cov=. --cov-report=term 2>&1 | tail -60
+  pip install -r requirements.txt -q
 ```
+
+安装成功后调用 `run_project_tests(project_id={pid})`。Java Test Runner 会先做收集预检；收集失败时不会继续正式 pytest，并返回相同 execution ID 下的结构化终态。
 
 ### Step 5 — 失败修复（≤ 3 轮）
 - 读 stderr 最后 30 行
-- 定位是哪个测试哪个断言失败
+- `exit_code=2` 时先定位 collection/import error，回读对应实现与测试，修复不存在的模块或符号引用；收集未通过前禁止新增测试
+- 收集成功后再定位是哪个测试哪个断言失败
 - 回读三份需求文档确定唯一期望；改代码（而非改测试）。只有断言与三份文档冲突时才允许修测试，并在 `task_done` 中说明文档依据
 - 禁止把断言改成当前实现的实际状态码或返回值来消除失败
-- 重跑 Step 4
+- 每轮修复后重跑 `run_project_tests(project_id={pid})`
 
 ### Step 6 — 记 metrics + 发 task_done
 AgentScope Tool：

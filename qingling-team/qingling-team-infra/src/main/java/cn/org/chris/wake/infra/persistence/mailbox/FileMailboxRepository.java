@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -78,7 +79,7 @@ public final class FileMailboxRepository implements MailboxRepository {
     }
 
     /**
-     * 在收件箱文件锁内追加邮件，并原子复用相同的未完成任务分派。
+     * 在收件箱文件锁内追加邮件，并原子复用相同的未完成任务或澄清答复。
      *
      * @param message 待保存邮件
      * @return 实际追加或复用的邮件
@@ -88,14 +89,14 @@ public final class FileMailboxRepository implements MailboxRepository {
         validateRole(message.to());
         Path inbox = inboxPath(message.projectId(), message.to());
         return withLockedInbox(inbox, messages -> {
-            if ("task_assign".equals(message.type())) {
-                MailMessage duplicate = messages.stream()
-                        .filter(existing -> isOpenDuplicateTask(existing, message))
+            if ("task_assign".equals(message.type()) || "clarification_answer".equals(message.type())) {
+                Map<String, Object> duplicate = messages.stream()
+                        .filter(existing -> isOpenDuplicateMessage(existing, message))
                         .findFirst()
-                        .map(existing -> fromMap(new LinkedHashMap<>(existing)))
                         .orElse(null);
                 if (duplicate != null) {
-                    return duplicate;
+                    refreshRecoveryTask(duplicate, message);
+                    return fromMap(new LinkedHashMap<>(duplicate));
                 }
             }
             messages.add(toMap(message));
@@ -104,22 +105,77 @@ public final class FileMailboxRepository implements MailboxRepository {
     }
 
     /**
-     * 判断磁盘邮件是否与候选邮件构成同一项尚未完成的任务分派。
+     * 判断磁盘邮件是否与候选邮件构成同一项尚未完成的任务或澄清答复。
      *
      * @param existing 磁盘中的邮件字段
      * @param candidate 候选任务分派
      * @return 相同任务且状态为 unread 或 in_progress 时返回 true
      */
-    private static boolean isOpenDuplicateTask(Map<String, Object> existing, MailMessage candidate) {
+    private static boolean isOpenDuplicateMessage(Map<String, Object> existing, MailMessage candidate) {
         String status = String.valueOf(existing.get("status"));
         boolean open = "unread".equals(status) || "in_progress".equals(status);
-        return open
+        boolean sameEnvelope = open
                 && candidate.from().equals(existing.get("from"))
                 && candidate.to().equals(existing.get("to"))
-                && candidate.type().equals(existing.get("type"))
-                && canonicalTaskSubject(candidate.subject()).equals(
-                        canonicalTaskSubject(String.valueOf(existing.get("subject")))
-                );
+                && candidate.type().equals(existing.get("type"));
+        if (!sameEnvelope) {
+            return false;
+        }
+        if ("task_assign".equals(candidate.type())) {
+            String existingStage = workflowStage(existing.get("content"));
+            String candidateStage = workflowStage(candidate.content());
+            if (!existingStage.isBlank() && existingStage.equals(candidateStage)) {
+                return true;
+            }
+            return canonicalTaskSubject(candidate.subject()).equals(
+                    canonicalTaskSubject(String.valueOf(existing.get("subject")))
+            );
+        }
+        return candidate.subject().equals(existing.get("subject"))
+                && Objects.equals(clarificationAnswer(existing.get("content")),
+                clarificationAnswer(candidate.content()));
+    }
+
+    /**
+     * 从结构化任务正文提取工作流阶段，使同阶段不同主题不能产生第二个开放任务。
+     *
+     * @param content 邮件正文
+     * @return 工作流阶段；正文不是 Map 或没有阶段时为空字符串
+     */
+    private static String workflowStage(Object content) {
+        if (!(content instanceof Map<?, ?> values)) {
+            return "";
+        }
+        return Objects.toString(values.get("workflow_stage"), "").trim();
+    }
+
+    /**
+     * 从结构化澄清通知提取答复文本，用于重复状态机调用的幂等保护。
+     *
+     * @param content 邮件正文
+     * @return 澄清答复；正文不是 Map 时为空字符串
+     */
+    private static String clarificationAnswer(Object content) {
+        if (!(content instanceof Map<?, ?> values)) {
+            return "";
+        }
+        return Objects.toString(values.get("clarification_answer"), "");
+    }
+
+    /**
+     * 工具恢复复用原开放任务时刷新受控恢复指令，同时保留原消息 ID 与租约状态。
+     *
+     * @param existing 已存在的开放邮件字段
+     * @param candidate 候选恢复任务
+     */
+    private static void refreshRecoveryTask(Map<String, Object> existing, MailMessage candidate) {
+        if (!"task_assign".equals(candidate.type())
+                || !(candidate.content() instanceof Map<?, ?> values)
+                || !"tool_execution_failed".equals(values.get("protocol"))) {
+            return;
+        }
+        existing.put("subject", candidate.subject());
+        existing.put("content", candidate.content());
     }
 
     /**

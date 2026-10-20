@@ -31,6 +31,8 @@ qingling:
     sub-agent-max-iterations: 20
     # 必须早于 AgentScope 核心 PT5M 工具超时卸载，避免父调用超时后子任务继续悬挂。
     async-tool-offload-timeout: 30s
+    # 与业务调用超时解耦，关闭时只有限等待已接纳 dispatch 排空。
+    shutdown-drain-timeout: ${QINGLING_SHUTDOWN_DRAIN_TIMEOUT:30s}
     timeout: 300s
     api-key: ${DASHSCOPE_API_KEY:${QWEN_API_KEY:}}
   sandbox:

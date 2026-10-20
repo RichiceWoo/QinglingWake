@@ -39,6 +39,9 @@ public final class AgentExecutionException extends IllegalStateException {
         CHILD_FAILED,
 
         /** 最新子任务保持 RUNNING 但真实事件与会话日志超过租约窗口没有进展。 */
-        CHILD_STALLED
+        CHILD_STALLED,
+
+        /** 没有运行中子任务时父 Agent 自身会话日志超过租约窗口没有进展。 */
+        PARENT_STALLED
     }
 }

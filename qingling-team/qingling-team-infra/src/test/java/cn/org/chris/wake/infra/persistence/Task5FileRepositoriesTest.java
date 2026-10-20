@@ -232,6 +232,84 @@ class Task5FileRepositoriesTest {
     }
 
     /**
+     * 同一工作流阶段即使主题变化也只能保留一个开放任务，工具恢复还必须刷新受控指令。
+     *
+     * @throws Exception 邮箱文件读取失败
+     */
+    @Test
+    void shouldReuseOpenTaskByWorkflowStageAndRefreshRecoveryInstruction() throws Exception {
+        Path workspace = temporaryDirectory.resolve("workspace-stage-idempotent-task");
+        ObjectMapper mapper = new ObjectMapper();
+        new FileWorkspaceRepository(workspace).initializeProject("p1");
+        AtomicInteger ids = new AtomicInteger();
+        MailboxService service = new MailboxService(
+                new FileMailboxRepository(workspace, mapper),
+                () -> "msg-" + String.format("%08x", ids.incrementAndGet()),
+                Clock.systemUTC()
+        );
+
+        String firstId = service.send(
+                "p1", "rd", "manager", "task_assign", "实现待办服务",
+                Map.of("workflow_stage", "CODE_IMPLEMENTATION", "protocol", "normal")
+        );
+        String reusedId = service.send(
+                "p1", "rd", "manager", "task_assign", "恢复失败的测试执行",
+                Map.of("workflow_stage", "CODE_IMPLEMENTATION", "protocol", "tool_execution_failed")
+        );
+
+        JsonNode inbox = mapper.readTree(
+                workspace.resolve("shared/projects/p1/mailboxes/rd.json").toFile()
+        );
+        assertThat(reusedId).isEqualTo(firstId);
+        assertThat(inbox).hasSize(1);
+        assertThat(inbox.get(0).path("subject").asText()).isEqualTo("恢复失败的测试执行");
+        assertThat(inbox.get(0).path("content").path("protocol").asText())
+                .isEqualTo("tool_execution_failed");
+    }
+
+    /**
+     * 状态机重放相同澄清答复时必须复用开放通知，不同答复仍应生成独立通知。
+     *
+     * @throws Exception 邮箱文件读取失败
+     */
+    @Test
+    void shouldIdempotentlyReuseSameClarificationAnswer() throws Exception {
+        Path workspace = temporaryDirectory.resolve("workspace-clarification-idempotent");
+        ObjectMapper mapper = new ObjectMapper();
+        new FileWorkspaceRepository(workspace).initializeProject("p1");
+        AtomicInteger ids = new AtomicInteger();
+        MailboxService service = new MailboxService(
+                new FileMailboxRepository(workspace, mapper),
+                () -> "msg-" + String.format("%08x", ids.incrementAndGet()),
+                Clock.systemUTC()
+        );
+        Map<String, Object> firstAnswer = Map.of(
+                "workflow_stage", "CODE_IMPLEMENTATION",
+                "clarification_answer", "保持 REST 路径不变"
+        );
+
+        String firstId = service.send(
+                "p1", "rd", "manager", "clarification_answer", "澄清答复", firstAnswer
+        );
+        String reusedId = service.send(
+                "p1", "rd", "manager", "clarification_answer", "澄清答复", firstAnswer
+        );
+        String differentId = service.send(
+                "p1", "rd", "manager", "clarification_answer", "澄清答复",
+                Map.of(
+                        "workflow_stage", "CODE_IMPLEMENTATION",
+                        "clarification_answer", "补充 404 错误码"
+                )
+        );
+
+        assertThat(reusedId).isEqualTo(firstId);
+        assertThat(differentId).isNotEqualTo(firstId);
+        assertThat(mapper.readTree(
+                workspace.resolve("shared/projects/p1/mailboxes/rd.json").toFile()
+        )).hasSize(2);
+    }
+
+    /**
      * 超时 in_progress 邮件应恢复为 unread，近期邮件保持不变。
      */
     @Test

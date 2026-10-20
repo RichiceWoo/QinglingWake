@@ -657,6 +657,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
             }
             String completionRejection = completionRejectionReason(eventSnapshot, mailSnapshot, dispatch);
             String protocolDeadEnd = workflowProtocolDeadEndReason(eventSnapshot, mailSnapshot, dispatch);
+            String mailboxConflict = duplicateOpenAssignmentReason(mailSnapshot);
             List<Map<String, Object>> mcpHealth = new ArrayList<>();
             Instant now = Instant.now();
             List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics =
@@ -716,6 +717,8 @@ final class RealTeamE2EDriver implements AutoCloseable {
             snapshot.put("terminal_incident", incident == null ? "" : sanitizeEvidenceText(incident));
             snapshot.put("mcp_failure", mcpFailure == null ? "" : sanitizeEvidenceText(mcpFailure));
             snapshot.put("cron_failure", cronFailure == null ? "" : sanitizeEvidenceText(cronFailure));
+            snapshot.put("mailbox_conflict", mailboxConflict == null
+                    ? "" : sanitizeEvidenceText(mailboxConflict));
             snapshot.put("hanging_dispatch", hangingDispatch == null
                     ? "" : sanitizeEvidenceText(hangingDispatch));
             lastRuntimeSnapshot = Map.copyOf(snapshot);
@@ -727,6 +730,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
             }
             if (cronFailure != null) {
                 throw new AssertionError("不可恢复 Cron dispatch 故障：" + cronFailure);
+            }
+            if (mailboxConflict != null) {
+                throw new AssertionError("不可恢复 mailbox 重复任务分派：" + mailboxConflict);
             }
             if (hangingDispatch != null) {
                 throw new AssertionError("不可恢复 AgentScope dispatch 悬挂：" + hangingDispatch);
@@ -795,27 +801,51 @@ final class RealTeamE2EDriver implements AutoCloseable {
             boolean hasFailedOrCancelled = tasks.stream()
                     .map(AgentScopeAgentGateway.ChildTaskDiagnostic::status)
                     .anyMatch(status -> "FAILED".equals(status) || "CANCELLED".equals(status));
-            if (!allTerminal || !hasFailedOrCancelled) {
+            if (allTerminal && hasFailedOrCancelled) {
+                unhealthyRoutes.add(route);
+                Instant observedAt = firstObservedAt.computeIfAbsent(route, ignored -> now);
+                if (Duration.between(observedAt, now).compareTo(grace) < 0) {
+                    continue;
+                }
+                return "route=" + route
+                        + ", role=" + diagnostic.role()
+                        + ", project_id=" + diagnostic.projectId()
+                        + ", dispatch_active_since=" + dispatch.activeSince()
+                        + ", terminal_child_tasks=" + childTaskStates(tasks);
+            }
+            if (tasks.stream().anyMatch(task -> !task.terminal())) {
                 continue;
             }
-            unhealthyRoutes.add(route);
-            Instant observedAt = firstObservedAt.computeIfAbsent(route, ignored -> now);
-            if (Duration.between(observedAt, now).compareTo(grace) < 0) {
-                continue;
+            Instant lastProgressAt = tasks.stream()
+                    .map(AgentScopeAgentGateway.ChildTaskDiagnostic::lastProgressAt)
+                    .filter(progressAt -> progressAt.isAfter(diagnostic.parentLastProgressAt()))
+                    .max(Comparator.naturalOrder())
+                    .orElse(diagnostic.parentLastProgressAt());
+            if (Duration.between(lastProgressAt, now).compareTo(runningProgressTimeout) >= 0) {
+                return "route=" + route
+                        + ", role=" + diagnostic.role()
+                        + ", project_id=" + diagnostic.projectId()
+                        + ", dispatch_active_since=" + dispatch.activeSince()
+                        + ", parent_last_progress_at=" + diagnostic.parentLastProgressAt()
+                        + ", terminal_child_tasks=" + childTaskStates(tasks);
             }
-            String taskStates = tasks.stream()
-                    .map(task -> task.taskId() + "=" + task.status())
-                    .sorted()
-                    .reduce((left, right) -> left + "," + right)
-                    .orElse("none");
-            return "route=" + route
-                    + ", role=" + diagnostic.role()
-                    + ", project_id=" + diagnostic.projectId()
-                    + ", dispatch_active_since=" + dispatch.activeSince()
-                    + ", terminal_child_tasks=" + taskStates;
         }
         firstObservedAt.keySet().removeIf(route -> !unhealthyRoutes.contains(route));
         return null;
+    }
+
+    /**
+     * 将子任务终态压缩为不含正文的稳定文本。
+     *
+     * @param tasks 当前逻辑子任务
+     * @return taskId=status 逗号列表；没有子任务时为 none
+     */
+    private static String childTaskStates(List<AgentScopeAgentGateway.ChildTaskDiagnostic> tasks) {
+        return tasks.stream()
+                .map(task -> task.taskId() + "=" + task.status())
+                .sorted()
+                .reduce((left, right) -> left + "," + right)
+                .orElse("none");
     }
 
     /**
@@ -961,6 +991,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
                 "routing_key", diagnostic.routingKey(),
                 "project_id", diagnostic.projectId(),
                 "started_at", diagnostic.startedAt().toString(),
+                "parent_last_progress_at", diagnostic.parentLastProgressAt().toString(),
                 "child_tasks", diagnostic.childTasks().stream().map(task -> Map.of(
                         "task_id", task.taskId(),
                         "agent_id", task.agentId(),
@@ -1020,6 +1051,46 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     return Map.copyOf(values);
                 })
                 .toList();
+    }
+
+    /**
+     * 检测同项目、阶段与 Owner 同时存在多个开放任务分派的确定性协议冲突。
+     *
+     * @param mailSnapshot 当前项目邮箱快照
+     * @return 脱敏冲突摘要；没有冲突时为 null
+     */
+    static String duplicateOpenAssignmentReason(List<JsonNode> mailSnapshot) {
+        Map<String, List<JsonNode>> assignmentsByScope = new LinkedHashMap<>();
+        for (JsonNode message : mailSnapshot) {
+            String status = message.path("status").asText();
+            String stage = message.path("content").path("workflow_stage").asText();
+            if (!"task_assign".equals(message.path("type").asText())
+                    || !Set.of("unread", "in_progress").contains(status)
+                    || stage.isBlank()) {
+                continue;
+            }
+            String key = message.path("project_id").asText("")
+                    + "|" + stage
+                    + "|" + message.path("to").asText("");
+            assignmentsByScope.computeIfAbsent(key, ignored -> new ArrayList<>()).add(message);
+        }
+        for (List<JsonNode> assignments : assignmentsByScope.values()) {
+            if (assignments.size() < 2) {
+                continue;
+            }
+            JsonNode first = assignments.get(0);
+            String states = assignments.stream()
+                    .map(message -> message.path("id").asText("unknown")
+                            + "=" + message.path("status").asText("unknown"))
+                    .sorted()
+                    .reduce((left, right) -> left + "," + right)
+                    .orElse("unknown");
+            return "project_id=" + first.path("project_id").asText("")
+                    + ", stage=" + first.path("content").path("workflow_stage").asText("unknown")
+                    + ", owner=" + first.path("to").asText("unknown")
+                    + ", assignments=" + states;
+        }
+        return null;
     }
 
     /**

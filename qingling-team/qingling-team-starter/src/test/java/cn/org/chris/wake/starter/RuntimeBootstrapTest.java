@@ -66,6 +66,7 @@ class RuntimeBootstrapTest {
             assertThat(context.getBean(DashScopeModelSelector.Selection.class).selectionMode())
                     .isEqualTo("explicit");
             assertThat(properties.agent().subAgentMaxIterations()).isEqualTo(20);
+            assertThat(properties.agent().shutdownDrainTimeout()).isEqualTo(java.time.Duration.ofSeconds(30));
             assertThat(properties.sandbox().enabled()).isFalse();
             assertThat(properties.team().roles()).containsExactly("manager", "pm", "rd", "qa");
             assertThat(context.getBean(RuntimeLifecycle.class).isRunning()).isTrue();

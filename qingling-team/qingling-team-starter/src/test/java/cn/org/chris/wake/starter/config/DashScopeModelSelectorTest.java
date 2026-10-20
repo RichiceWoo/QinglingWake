@@ -151,6 +151,7 @@ class DashScopeModelSelectorTest {
                 8_192,
                 20,
                 Duration.ofSeconds(30),
+                Duration.ofSeconds(30),
                 Duration.ofMinutes(5),
                 "test-api-key"
         );

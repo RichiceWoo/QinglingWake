@@ -34,8 +34,11 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
     /** 超长输出首尾各保留的字节数。 */
     private static final int OUTPUT_EDGE_LIMIT = 480;
 
-    /** pytest 进程硬超时秒数，低于 MCP 外层等待上限。 */
-    private static final int PROCESS_TIMEOUT_SECONDS = 270;
+    /** pytest 收集预检硬超时秒数，避免导入挂起占满正式执行窗口。 */
+    private static final int COLLECTION_TIMEOUT_SECONDS = 30;
+
+    /** pytest 正式执行硬超时秒数，预检加执行不超过工具五分钟终态窗口。 */
+    private static final int PROCESS_TIMEOUT_SECONDS = 240;
 
     /** 查询命令的 MCP 等待上限秒数。 */
     private static final int QUERY_TIMEOUT_SECONDS = 15;
@@ -132,11 +135,19 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
                 + ": > '" + runDirectory + "/stdout'; : > '" + runDirectory + "/stderr'; "
                 + "setsid sh -c \"set +e; cd '" + projectDirectory + "'; "
                 + targetSetup
+                + "timeout --signal=TERM --kill-after=5s " + COLLECTION_TIMEOUT_SECONDS + "s "
+                + "python -m pytest --collect-only -q --disable-warnings --import-mode=importlib "
+                + "\\$test_targets >'" + runDirectory + "/collect_stdout' "
+                + "2>'" + runDirectory + "/collect_stderr'; collect_rc=\\$?; "
+                + "if test \\$collect_rc -ne 0; then "
+                + "cp '" + runDirectory + "/collect_stdout' '" + runDirectory + "/stdout'; "
+                + "cp '" + runDirectory + "/collect_stderr' '" + runDirectory + "/stderr'; "
+                + "rc=\\$collect_rc; else "
                 + "timeout --signal=TERM --kill-after=5s " + PROCESS_TIMEOUT_SECONDS + "s "
                 + "python -m pytest --disable-warnings --import-mode=importlib "
                 + "--cov=. --cov-report=term-missing --verbose \\$test_targets "
-                + ">'" + runDirectory + "/stdout' 2>'" + runDirectory + "/stderr'; "
-                + "rc=\\$?; printf '%s' \\\"\\$rc\\\" > '" + runDirectory + "/exit_code.tmp'; "
+                + ">'" + runDirectory + "/stdout' 2>'" + runDirectory + "/stderr'; rc=\\$?; fi; "
+                + "printf '%s' \\\"\\$rc\\\" > '" + runDirectory + "/exit_code.tmp'; "
                 + "mv '" + runDirectory + "/exit_code.tmp' '" + runDirectory + "/exit_code'; "
                 + "printf FINISHED > '" + runDirectory + "/status'\" >/dev/null 2>&1 & "
                 + "printf '%s' \"$!\" > '" + runDirectory + "/runner_pid'; fi; "
@@ -177,8 +188,8 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
                 + "pid=$(cat \"$run/runner_pid\"); kill -0 \"$pid\" 2>/dev/null || status=ORPHANED; fi; "
                 + "printf '__QINGLING_STATUS__=%s\\n' \"$status\"; "
                 + "if test -n \"$exit_code\"; then printf '__QINGLING_EXIT_CODE__=%s\\n' \"$exit_code\"; fi; "
-                + "collected=$(grep -Eo 'collected [0-9]+ items?' \"$run/stdout\" 2>/dev/null "
-                + "| tail -n 1 | cut -d ' ' -f 2); "
+                + "collected=$(grep -Eo 'collected [0-9]+ items?|[0-9]+ tests? collected' "
+                + "\"$run/stdout\" 2>/dev/null | tail -n 1 | grep -Eo '[0-9]+' | head -n 1); "
                 + "passed=$(grep -Eo '[0-9]+ passed' \"$run/stdout\" 2>/dev/null "
                 + "| tail -n 1 | cut -d ' ' -f 1); "
                 + "coverage=$(grep -E '^TOTAL[[:space:]]' \"$run/stdout\" 2>/dev/null "

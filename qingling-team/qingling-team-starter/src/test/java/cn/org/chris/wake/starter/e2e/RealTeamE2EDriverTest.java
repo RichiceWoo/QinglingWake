@@ -192,6 +192,7 @@ class RealTeamE2EDriverTest {
                         "team:rd",
                         "todo-mvp",
                         activeSince,
+                        activeSince,
                         List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
                                 "task-code", "code_impl", "CANCELLED", true, activeSince,
                                 "SEND", "MODEL_REQUESTED", activeSince
@@ -222,7 +223,7 @@ class RealTeamE2EDriverTest {
         Instant activeSince = Instant.parse("2026-10-11T08:00:00Z");
         AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic =
                 new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
-                        "rd", "session-rd", "team:rd", "todo-mvp", activeSince,
+                        "rd", "session-rd", "team:rd", "todo-mvp", activeSince, activeSince,
                         List.of(
                                 new AgentScopeAgentGateway.ChildTaskDiagnostic(
                                         "task-1", "code_impl", "CANCELLED", true, activeSince,
@@ -255,7 +256,7 @@ class RealTeamE2EDriverTest {
         Instant lastProgressAt = activeSince.plusSeconds(30);
         AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic =
                 new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
-                        "rd", "session-rd", "team:rd", "todo-mvp", activeSince,
+                        "rd", "session-rd", "team:rd", "todo-mvp", activeSince, activeSince,
                         List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
                                 "task-stalled", "code_impl", "RUNNING", false,
                                 activeSince.plusSeconds(10), "SEND", "NONE", lastProgressAt
@@ -274,6 +275,55 @@ class RealTeamE2EDriverTest {
         assertThat(reason)
                 .contains("team:rd", "task-stalled", "code_impl", lastProgressAt.toString())
                 .doesNotContain("qa/test_plan.md", "code/main.py");
+    }
+
+    /** 子任务成功终态后父回合自身长期无进展时也应直接报告，不再等待下游产物超时。 */
+    @Test
+    void shouldDescribeParentWithoutProgressAfterChildCompletes() {
+        Instant activeSince = Instant.parse("2026-10-11T08:00:00Z");
+        Instant childProgressAt = activeSince.plusSeconds(30);
+        AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic =
+                new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
+                        "rd", "session-rd", "team:rd", "todo-mvp",
+                        activeSince, activeSince.plusSeconds(10),
+                        List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                                "task-complete", "code_impl", "COMPLETED", true,
+                                activeSince.plusSeconds(5), "SPAWN", "NONE", childProgressAt
+                        ))
+                );
+
+        String reason = RealTeamE2EDriver.hangingDispatchReason(
+                Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)),
+                List.of(diagnostic),
+                new java.util.LinkedHashMap<>(),
+                childProgressAt.plusSeconds(301),
+                Duration.ofSeconds(20),
+                Duration.ofMinutes(5)
+        );
+
+        assertThat(reason)
+                .contains("team:rd", "parent_last_progress_at", "task-complete=COMPLETED")
+                .doesNotContain("qa/test_plan.md");
+    }
+
+    /** 同阶段同 Owner 的多个开放 task_assign 应立即暴露其脱敏标识和状态。 */
+    @Test
+    void shouldDescribeDuplicateOpenAssignmentsDirectly() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode first = objectMapper.readTree("""
+                {"id":"msg-first","project_id":"todo-mvp","to":"rd","type":"task_assign",
+                "status":"in_progress","content":{"workflow_stage":"CODE_IMPLEMENTATION"}}
+                """);
+        JsonNode second = objectMapper.readTree("""
+                {"id":"msg-second","project_id":"todo-mvp","to":"rd","type":"task_assign",
+                "status":"unread","content":{"workflow_stage":"CODE_IMPLEMENTATION"}}
+                """);
+
+        assertThat(RealTeamE2EDriver.duplicateOpenAssignmentReason(List.of(first))).isNull();
+        assertThat(RealTeamE2EDriver.duplicateOpenAssignmentReason(List.of(first, second)))
+                .contains("todo-mvp", "CODE_IMPLEMENTATION", "owner=rd",
+                        "msg-first=in_progress", "msg-second=unread")
+                .doesNotContain("qa/test_plan.md");
     }
 
     /** 空闲 Cron 已记录 RD dispatch 失败时应报告取消主因，而不是继续等待 QA 文件。 */
@@ -327,7 +377,7 @@ class RealTeamE2EDriverTest {
         );
         AgentScopeAgentGateway.ActiveExecutionDiagnostic activeAgent =
                 new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
-                        "rd", "session-rd", "team:rd", "todo-mvp", now, List.of()
+                        "rd", "session-rd", "team:rd", "todo-mvp", now, now, List.of()
                 );
 
         assertThat(RealTeamE2EDriver.idleCronFailureReason(

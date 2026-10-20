@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -188,6 +189,38 @@ class AgentScopeAgentGatewayTest {
         assertThat(runtime.cancellations).hasValue(1);
     }
 
+    /** 父 Agent 即使先返回，也必须等运行中的子任务成功终态后才释放顶层 dispatch。 */
+    @Test
+    void shouldKeepParentDispatchUntilRunningChildCompletes() throws Exception {
+        CompletingParentRuntime runtime = new CompletingParentRuntime();
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime),
+                AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                Duration.ofMillis(5),
+                Duration.ofMillis(10)
+        );
+        AgentRequest request = new AgentRequest(
+                "rd", "team-rd", "session-wait-child", "执行实现", List.of(),
+                Map.of("routingKey", "team:rd", "projectId", "todo-mvp")
+        );
+
+        CompletableFuture<AgentReply> future = gateway.execute(request);
+        Thread.sleep(30L);
+
+        assertThat(future).isNotDone();
+        assertThat(gateway.activeExecutionDiagnostics()).singleElement().satisfies(diagnostic -> {
+            assertThat(diagnostic.parentLastProgressAt()).isAfterOrEqualTo(diagnostic.startedAt());
+            assertThat(diagnostic.childTasks())
+                    .extracting(AgentScopeAgentGateway.ChildTaskDiagnostic::status)
+                    .containsExactly("RUNNING");
+        });
+
+        runtime.completed.set(true);
+        assertThat(future.get(1, TimeUnit.SECONDS).content()).isEqualTo("parent-done");
+        assertThat(gateway.activeExecutionDiagnostics()).isEmpty();
+    }
+
     /** RUNNING 子任务超过真实进度租约后必须终止父 dispatch，并生成 CHILD_STALLED 类型化故障。 */
     @Test
     void shouldTerminateParentDispatchWhenRunningChildStopsMakingRealProgress() {
@@ -212,6 +245,34 @@ class AgentScopeAgentGatewayTest {
                 .rootCause()
                 .extracting(failure -> ((AgentExecutionException) failure).failureType())
                 .isEqualTo(AgentExecutionException.FailureType.CHILD_STALLED);
+        assertThat(runtime.cancellations).hasValue(1);
+        assertThat(gateway.activeExecutionDiagnostics()).isEmpty();
+    }
+
+    /** 子任务均已收敛或不存在时，父回合自身超过真实进度租约也必须进入类型化恢复。 */
+    @Test
+    void shouldTerminateParentDispatchWhenParentStopsMakingRealProgress() {
+        ParentStalledRuntime runtime = new ParentStalledRuntime();
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime),
+                AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                Duration.ofMillis(5),
+                Duration.ofMillis(5),
+                Duration.ofMillis(20)
+        );
+        AgentRequest request = new AgentRequest(
+                "rd", "team-rd", "session-parent-stalled", "继续实现", List.of(),
+                Map.of("routingKey", "team:rd", "projectId", "todo-mvp")
+        );
+
+        CompletableFuture<AgentReply> future = gateway.execute(request);
+
+        assertThatThrownBy(() -> future.get(1, TimeUnit.SECONDS))
+                .hasRootCauseInstanceOf(AgentExecutionException.class)
+                .rootCause()
+                .extracting(failure -> ((AgentExecutionException) failure).failureType())
+                .isEqualTo(AgentExecutionException.FailureType.PARENT_STALLED);
         assertThat(runtime.cancellations).hasValue(1);
         assertThat(gateway.activeExecutionDiagnostics()).isEmpty();
     }
@@ -444,6 +505,74 @@ class AgentScopeAgentGatewayTest {
                     "task-stalled", "code_impl", "RUNNING", false, lastProgressAt,
                     "SEND", "NONE", lastProgressAt
             ));
+        }
+
+        /** 本测试不需要清理持久会话。 */
+        @Override
+        public void clearContext(String userId, String sessionId) { }
+
+        /** 本测试运行时没有外部资源。 */
+        @Override
+        public void close() { }
+    }
+
+    /** 父调用立即返回但子任务稍后终态的运行时，用于验证顶层单飞生命周期。 */
+    private static final class CompletingParentRuntime implements AgentScopeAgentGateway.AgentRuntime {
+
+        /** 控制子任务是否已成功完成。 */
+        private final AtomicBoolean completed = new AtomicBoolean();
+
+        /** 立即生成父回复，Gateway 仍应等待子任务。 */
+        @Override
+        public Mono<Msg> call(String content, RuntimeContext context) {
+            return Mono.just(Msg.builder().textContent("parent-done").build());
+        }
+
+        /** 根据测试开关返回 RUNNING 或 COMPLETED。 */
+        @Override
+        public List<AgentScopeAgentGateway.ChildTaskDiagnostic> taskDiagnostics(RuntimeContext context) {
+            boolean terminal = completed.get();
+            String status = terminal ? "COMPLETED" : "RUNNING";
+            return List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                    "task-code", "code_impl", status, terminal, java.time.Instant.now(),
+                    "SPAWN", "NONE", java.time.Instant.now()
+            ));
+        }
+
+        /** 返回父 Agent 自身的稳定进度时间。 */
+        @Override
+        public java.time.Instant parentProgressAt(RuntimeContext context) {
+            return java.time.Instant.now();
+        }
+
+        /** 本测试不需要清理持久会话。 */
+        @Override
+        public void clearContext(String userId, String sessionId) { }
+
+        /** 本测试运行时没有外部资源。 */
+        @Override
+        public void close() { }
+    }
+
+    /** 返回永不结束且没有子任务的父回合，用于验证父 Agent 独立进度租约。 */
+    private static final class ParentStalledRuntime implements AgentScopeAgentGateway.AgentRuntime {
+
+        /** 收到的父回合取消次数。 */
+        private final AtomicInteger cancellations = new AtomicInteger();
+
+        /** 保持父回合悬挂，等待独立父进度租约终止。 */
+        @Override
+        public Mono<Msg> call(String content, RuntimeContext context) {
+            return Mono.never();
+        }
+
+        /** 记录父进度租约到期触发的取消。 */
+        @Override
+        public void cancel(
+                RuntimeContext context,
+                TaskSemanticsRegistry.CancelOrigin origin
+        ) {
+            cancellations.incrementAndGet();
         }
 
         /** 本测试不需要清理持久会话。 */

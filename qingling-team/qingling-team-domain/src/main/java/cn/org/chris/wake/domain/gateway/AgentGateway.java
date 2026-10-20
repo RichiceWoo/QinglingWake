@@ -19,6 +19,17 @@ public interface AgentGateway {
     CompletableFuture<AgentReply> execute(AgentRequest request);
 
     /**
+     * 查询指定项目与角色是否仍有父 Agent 回合执行，用于避免错误回收 mailbox 租约。
+     *
+     * @param projectId 项目标识
+     * @param role 团队角色
+     * @return 存在活跃父回合时为 true
+     */
+    default boolean hasActiveExecution(String projectId, String role) {
+        return false;
+    }
+
+    /**
      * 清除指定 AgentScope 会话的框架状态。
      *
      * @param role 目标角色

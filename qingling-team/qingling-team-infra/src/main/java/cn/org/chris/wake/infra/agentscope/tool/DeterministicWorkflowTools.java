@@ -107,11 +107,14 @@ public final class DeterministicWorkflowTools {
             String messageId = "";
             String wakeId = "";
             if (!transition.assignee().isBlank()) {
+                String messageType = checkedSignal == WorkflowSignal.CLARIFICATION_ANSWERED
+                        ? "clarification_answer"
+                        : "task_assign";
                 messageId = mailboxService.send(
                         checkedProjectId,
                         transition.assignee(),
                         "manager",
-                        "task_assign",
+                        messageType,
                         transition.subject(),
                         assignmentContent(transition, checkedSignal, feedback)
                 );

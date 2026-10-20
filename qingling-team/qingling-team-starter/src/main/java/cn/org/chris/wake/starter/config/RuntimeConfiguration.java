@@ -105,6 +105,7 @@ public class RuntimeConfiguration {
                     "qingling.agent.async-tool-offload-timeout 必须不大于 PT4M，以早于 AgentScope 核心 PT5M 超时卸载"
             );
         }
+        requirePositive(properties.agent().shutdownDrainTimeout(), "qingling.agent.shutdown-drain-timeout");
         requirePositive(properties.agent().timeout(), "qingling.agent.timeout");
         requirePositive(properties.debug().replyTimeout(), "qingling.debug.reply-timeout");
         requirePositive(properties.cron().tickInterval(), "qingling.cron.tick-interval");
@@ -420,11 +421,12 @@ public class RuntimeConfiguration {
             WorkspaceRepository workspaceRepository,
             SerialDispatchRegistry dispatchRegistry,
             WakeScheduler wakeScheduler,
-            RuntimeIncidentGateway runtimeIncidentGateway
+            RuntimeIncidentGateway runtimeIncidentGateway,
+            AgentScopeAgentGateway agentGateway
     ) {
         return new MailboxLeaseWatchdog(
                 mailboxService, workspaceRepository, dispatchRegistry, wakeScheduler,
-                runtimeIncidentGateway
+                runtimeIncidentGateway, agentGateway
         );
     }
 

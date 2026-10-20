@@ -3,6 +3,7 @@ package cn.org.chris.wake.app.mailbox;
 import cn.org.chris.wake.app.cron.WakeScheduler;
 import cn.org.chris.wake.app.runner.RoutingKeyResolver;
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
+import cn.org.chris.wake.domain.gateway.AgentGateway;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
@@ -15,7 +16,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 周期恢复没有活跃角色 dispatch 的超时 mailbox 租约，并为恢复邮件安排唯一唤醒。
+ * 周期恢复没有活跃角色 dispatch 或父 Agent 回合的超时 mailbox 租约，并为恢复邮件安排唯一唤醒。
  */
 public final class MailboxLeaseWatchdog implements AutoCloseable {
 
@@ -40,6 +41,9 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
     /** 查询项目是否已因恢复耗尽进入 BLOCKED，防止 watchdog 重新激活。 */
     private final RuntimeIncidentGateway runtimeIncidentGateway;
 
+    /** 查询真实父 Agent 回合是否仍活跃，避免路由快照竞态误回收租约。 */
+    private final AgentGateway agentGateway;
+
     /** mailbox 处理租约时长。 */
     private final Duration leaseTimeout;
 
@@ -54,17 +58,20 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
      * @param dispatchRegistry 路由串行注册表
      * @param wakeScheduler 唤醒调度器
      * @param runtimeIncidentGateway 运行时阻断查询端口
+     * @param agentGateway 活跃父 Agent 查询端口
      */
     public MailboxLeaseWatchdog(
             MailboxService mailboxService,
             WorkspaceRepository workspaceRepository,
             SerialDispatchRegistry dispatchRegistry,
             WakeScheduler wakeScheduler,
-            RuntimeIncidentGateway runtimeIncidentGateway
+            RuntimeIncidentGateway runtimeIncidentGateway,
+            AgentGateway agentGateway
     ) {
         this(
                 mailboxService, workspaceRepository, dispatchRegistry,
-                wakeScheduler::scheduleMailWake, runtimeIncidentGateway, DEFAULT_LEASE_TIMEOUT
+                wakeScheduler::scheduleMailWake, runtimeIncidentGateway, agentGateway,
+                DEFAULT_LEASE_TIMEOUT
         );
     }
 
@@ -76,6 +83,7 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
      * @param dispatchRegistry 路由串行注册表
      * @param wakeScheduler 邮件唤醒端口
      * @param runtimeIncidentGateway 运行时阻断查询端口
+     * @param agentGateway 活跃父 Agent 查询端口
      * @param leaseTimeout mailbox 处理租约时长
      */
     public MailboxLeaseWatchdog(
@@ -84,6 +92,7 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
             SerialDispatchRegistry dispatchRegistry,
             MailWakeScheduler wakeScheduler,
             RuntimeIncidentGateway runtimeIncidentGateway,
+            AgentGateway agentGateway,
             Duration leaseTimeout
     ) {
         this.mailboxService = Objects.requireNonNull(mailboxService, "mailboxService 不能为空");
@@ -93,6 +102,7 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
         this.runtimeIncidentGateway = Objects.requireNonNull(
                 runtimeIncidentGateway, "runtimeIncidentGateway 不能为空"
         );
+        this.agentGateway = Objects.requireNonNull(agentGateway, "agentGateway 不能为空");
         this.leaseTimeout = requirePositive(leaseTimeout, "leaseTimeout");
     }
 
@@ -157,6 +167,9 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
      */
     private int restoreAndWake(String projectId, String role) {
         if (runtimeIncidentGateway.isRuntimeBlocked(projectId)) {
+            return 0;
+        }
+        if (agentGateway.hasActiveExecution(projectId, role)) {
             return 0;
         }
         int restored = mailboxService.resetStale(projectId, role, leaseTimeout);

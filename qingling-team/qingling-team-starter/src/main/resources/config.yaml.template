@@ -33,6 +33,8 @@ qingling:
     sub-agent-max-iterations: 20
     # 长工具必须在 AgentScope 核心 PT5M 超时前转入后台任务。
     async-tool-offload-timeout: 30s
+    # 关闭阶段独立短排空，不复用可能达到 30 分钟的业务 Agent 超时。
+    shutdown-drain-timeout: 30s
     timeout: 300s
 
   sandbox:

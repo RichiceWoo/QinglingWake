@@ -119,7 +119,7 @@ public final class RuntimeLifecycle implements SmartLifecycle {
                     wakeScheduler::stopAccepting,
                     cronService::stop,
                     dispatchRegistry::stopAccepting,
-                    () -> dispatchRegistry.awaitDrained(properties.agent().timeout()),
+                    () -> dispatchRegistry.awaitDrained(properties.agent().shutdownDrainTimeout()),
                     dispatchRegistry::cancelOutstanding,
                     this::closeAgentsAndMcp
             );

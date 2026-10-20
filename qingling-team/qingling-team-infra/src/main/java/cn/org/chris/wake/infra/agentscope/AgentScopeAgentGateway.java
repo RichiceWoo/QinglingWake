@@ -232,12 +232,11 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         activeInvocations.put(invocationKey, invocation);
         AtomicBoolean cancellationPropagated = new AtomicBoolean();
         Mono<AgentReply> parentCall = Mono.defer(() -> runtime.call(request.content(), context))
-                .map(message -> {
-                    AgentReply reply = toReply(message);
-                    scheduleMemoryIndex(request, reply, turnTimestampMs);
-                    return reply;
-                });
-        return Mono.firstWithSignal(parentCall, failWhenChildrenCannotProgress(invocation))
+                .map(AgentScopeAgentGateway::toReply)
+                .flatMap(reply -> awaitChildrenSettled(invocation)
+                        .then(Mono.fromCallable(() -> ensureChildrenSucceeded(invocation, reply))))
+                .doOnNext(reply -> scheduleMemoryIndex(request, reply, turnTimestampMs));
+        return Mono.firstWithSignal(parentCall, failWhenExecutionCannotProgress(invocation))
                 .doOnError(ignored -> cancelOnce(
                         invocation,
                         cancellationPropagated,
@@ -248,26 +247,100 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                         cancellationPropagated,
                         TaskSemanticsRegistry.CancelOrigin.RUNTIME_PARENT_FAILURE
                 ))
-                .doFinally(ignored -> activeInvocations.remove(invocationKey, invocation))
+                .doOnSuccess(ignored -> activeInvocations.remove(invocationKey, invocation))
+                .doOnError(ignored -> activeInvocations.remove(invocationKey, invocation))
+                .doOnCancel(() -> activeInvocations.remove(invocationKey, invocation))
                 .toFuture();
     }
 
     /**
-     * 当子任务异常终态或 RUNNING 真实进度租约过期时，使仍悬挂的父回合直接失败。
+     * 父 Agent 已返回时继续持有 dispatch，直到当前逻辑子任务全部进入终态。
+     *
+     * @param invocation 当前父回合
+     * @return 子任务全部终态后的完成信号
+     */
+    private Mono<Void> awaitChildrenSettled(ActiveInvocation invocation) {
+        if (childrenSettled(invocation)) {
+            return Mono.empty();
+        }
+        return Flux.interval(childTaskPollInterval)
+                .onBackpressureDrop()
+                .filter(ignored -> childrenSettled(invocation))
+                .next()
+                .then();
+    }
+
+    /**
+     * 判断每个逻辑子 Agent 最新任务是否均已终态；没有子任务时视为已收敛。
+     *
+     * @param invocation 当前父回合
+     * @return 子任务已全部收敛时为 true
+     */
+    private static boolean childrenSettled(ActiveInvocation invocation) {
+        return latestTasksByAgent(safeTaskDiagnostics(invocation)).stream()
+                .allMatch(ChildTaskDiagnostic::terminal);
+    }
+
+    /**
+     * 子任务收敛后拒绝 FAILED/CANCELLED 终态，避免父回复抢先结束 dispatch。
+     *
+     * @param invocation 当前父回合
+     * @param reply 父 Agent 已生成的回复
+     * @return 子任务全部成功时的原回复
+     */
+    private static AgentReply ensureChildrenSucceeded(ActiveInvocation invocation, AgentReply reply) {
+        AgentExecutionException failure = childFailureAfterSettlement(invocation);
+        if (failure != null) {
+            throw failure;
+        }
+        return reply;
+    }
+
+    /**
+     * 在子任务已经终态后生成稳定失败，复用统一故障分类且不套用 RUNNING 租约判断。
+     *
+     * @param invocation 当前父回合
+     * @return FAILED/CANCELLED 类型化失败；全部成功时为 null
+     */
+    private static AgentExecutionException childFailureAfterSettlement(ActiveInvocation invocation) {
+        List<ChildTaskDiagnostic> tasks = latestTasksByAgent(safeTaskDiagnostics(invocation));
+        List<ChildTaskDiagnostic> failedTasks = tasks.stream()
+                .filter(task -> "FAILED".equals(task.status()) || "CANCELLED".equals(task.status()))
+                .toList();
+        if (failedTasks.isEmpty()) {
+            return null;
+        }
+        AgentExecutionException.FailureType failureType = failedTasks.stream()
+                .anyMatch(task -> "FAILED".equals(task.status()))
+                ? AgentExecutionException.FailureType.CHILD_FAILED
+                : AgentExecutionException.FailureType.CHILD_CANCELLED;
+        List<String> failures = failedTasks.stream()
+                .map(task -> task.agentId() + "=" + task.status()
+                        + "[kind=" + task.taskKind() + ",cancel_origin=" + task.cancelOrigin() + "]")
+                .sorted()
+                .toList();
+        return new AgentExecutionException(
+                failureType,
+                "AgentScope 子任务异常终止，父 dispatch 已结束: " + String.join(",", failures)
+        );
+    }
+
+    /**
+     * 当父回合或子任务异常终态、真实进度租约过期时，使悬挂 dispatch 直接失败。
      *
      * @param invocation 当前父回合
      * @return 仅在确认异常终态持续超过宽限期后发出错误的信号
      */
-    private Mono<AgentReply> failWhenChildrenCannotProgress(ActiveInvocation invocation) {
+    private Mono<AgentReply> failWhenExecutionCannotProgress(ActiveInvocation invocation) {
         return Flux.interval(childTaskPollInterval)
                 .onBackpressureDrop()
                 .concatMap(ignored -> {
-                    AgentExecutionException failure = childFailure(invocation, Instant.now());
+                    AgentExecutionException failure = executionFailure(invocation, Instant.now());
                     if (failure == null) {
                         return Mono.<AgentExecutionException>empty();
                     }
                     return Mono.delay(childTaskFailureGrace)
-                            .map(ignoredDelay -> childFailure(invocation, Instant.now()))
+                            .map(ignoredDelay -> executionFailure(invocation, Instant.now()))
                             .filter(rechecked -> sameFailure(failure, rechecked));
                 })
                 .next()
@@ -275,12 +348,13 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     }
 
     /**
-     * 仅使用每个逻辑 Sub-Agent 最新 continuation 的终态或真实进度租约生成类型化异常。
+     * 使用父 Agent 日志和每个逻辑 Sub-Agent 最新 continuation 生成类型化停滞或终态异常。
      *
      * @param invocation 当前父回合
+     * @param now 当前诊断时间
      * @return 稳定失败异常，未满足终止条件时为 null
      */
-    private AgentExecutionException childFailure(ActiveInvocation invocation, Instant now) {
+    private AgentExecutionException executionFailure(ActiveInvocation invocation, Instant now) {
         List<ChildTaskDiagnostic> latestTasks = latestTasksByAgent(safeTaskDiagnostics(invocation));
         List<ChildTaskDiagnostic> stalledTasks = latestTasks.stream()
                 .filter(task -> "RUNNING".equals(task.status()))
@@ -301,13 +375,26 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                             + String.join(",", failures)
             );
         }
-        if (latestTasks.isEmpty() || latestTasks.stream().anyMatch(task -> !task.terminal())) {
+        if (latestTasks.stream().anyMatch(task -> !task.terminal())) {
             return null;
         }
         List<ChildTaskDiagnostic> failedTasks = latestTasks.stream()
                 .filter(task -> "FAILED".equals(task.status()) || "CANCELLED".equals(task.status()))
                 .toList();
         if (failedTasks.isEmpty()) {
+            Instant parentLastProgressAt = safeParentProgressAt(invocation);
+            Instant lastProgressAt = latestTasks.stream()
+                    .map(ChildTaskDiagnostic::lastProgressAt)
+                    .filter(progressAt -> progressAt.isAfter(parentLastProgressAt))
+                    .max(Comparator.naturalOrder())
+                    .orElse(parentLastProgressAt);
+            if (Duration.between(lastProgressAt, now).compareTo(childTaskStallTimeout) >= 0) {
+                return new AgentExecutionException(
+                        AgentExecutionException.FailureType.PARENT_STALLED,
+                        "AgentScope 父回合真实进度租约过期，当前没有运行中子任务"
+                                + "[last_progress_at=" + lastProgressAt + "]"
+                );
+            }
             return null;
         }
         AgentExecutionException.FailureType failureType = failedTasks.stream()
@@ -393,6 +480,25 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     }
 
     /**
+     * 查询项目 Owner 是否仍有活跃父回合，使 mailbox watchdog 不会仅凭路由瞬时空闲回收租约。
+     *
+     * @param projectId 项目标识
+     * @param role 团队角色
+     * @return 命中活跃父回合时为 true
+     */
+    @Override
+    public boolean hasActiveExecution(String projectId, String role) {
+        String checkedProjectId = Objects.requireNonNullElse(projectId, "");
+        String checkedRole = Objects.requireNonNullElse(role, "");
+        return activeInvocations.entrySet().stream().anyMatch(entry ->
+                checkedRole.equals(entry.getKey().role())
+                        && checkedProjectId.equals(Objects.toString(
+                        entry.getValue().context().get(PROJECT_ID_ATTRIBUTE), ""
+                ))
+        );
+    }
+
+    /**
      * 把活跃回合转换为只含路由和任务状态的安全诊断。
      *
      * @param key 回合唯一键
@@ -403,14 +509,34 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         RuntimeContext context = invocation.context();
         String routingKey = Objects.toString(context.get(ROUTING_KEY_ATTRIBUTE), "");
         String projectId = Objects.toString(context.get(PROJECT_ID_ATTRIBUTE), "");
+        Instant parentLastProgressAt = safeParentProgressAt(invocation);
         return new ActiveExecutionDiagnostic(
                 key.role(),
                 key.sessionId(),
                 routingKey,
                 projectId,
                 invocation.startedAt(),
+                parentLastProgressAt,
                 safeTaskDiagnostics(invocation)
         );
+    }
+
+    /**
+     * 安全读取父 Agent 自身会话日志进度，诊断读取失败时回退到回合开始时间。
+     *
+     * @param invocation 当前父回合
+     * @return 不早于回合开始时间的最后父进度
+     */
+    private static Instant safeParentProgressAt(ActiveInvocation invocation) {
+        try {
+            Instant progressAt = invocation.runtime().parentProgressAt(invocation.context());
+            if (progressAt != null && progressAt.isAfter(invocation.startedAt())) {
+                return progressAt;
+            }
+        } catch (RuntimeException ignored) {
+            // 诊断旁路失败不得改变正在执行的父回合。
+        }
+        return invocation.startedAt();
     }
 
     /**
@@ -650,6 +776,16 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         }
 
         /**
+         * 返回父 Agent 自身会话日志的最后真实变化时间，不使用 heartbeat 或轮询时间续租。
+         *
+         * @param context 当前父回合上下文
+         * @return 最后真实进度时间；无法读取时为纪元时间
+         */
+        default Instant parentProgressAt(RuntimeContext context) {
+            return Instant.EPOCH;
+        }
+
+        /**
          * 终态化运行时曾观察到的全部父会话任务，覆盖已脱离 activeInvocations 的后台任务。
          *
          * @param origin 本次全局取消来源
@@ -790,6 +926,17 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                     })
                     .sorted(Comparator.comparing(ChildTaskDiagnostic::taskId))
                     .toList();
+        }
+
+        /**
+         * 读取父角色自身 session 日志的最新修改时间，作为独立于子任务的进度租约。
+         *
+         * @param context 当前父回合上下文
+         * @return 父角色会话日志最后修改时间
+         */
+        @Override
+        public Instant parentProgressAt(RuntimeContext context) {
+            return sessionLogEvidence(context, agent.getName()).lastModifiedAt();
         }
 
         /**
@@ -959,6 +1106,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
      * @param routingKey 对应 dispatch 路由
      * @param projectId 继承到 Sub-Agent 的项目标识
      * @param startedAt 父回合开始时间
+     * @param parentLastProgressAt 父 Agent 自身会话日志最后真实变化时间
      * @param childTasks 当前 session 的子任务状态
      */
     public record ActiveExecutionDiagnostic(
@@ -967,10 +1115,13 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
             /** 对应 dispatch 路由。 */ String routingKey,
             /** 继承到 Sub-Agent 的项目标识。 */ String projectId,
             /** 父回合开始时间。 */ Instant startedAt,
+            /** 父 Agent 自身最后真实进度时间。 */ Instant parentLastProgressAt,
             /** 当前 session 的子任务状态。 */ List<ChildTaskDiagnostic> childTasks
     ) {
-        /** 对子任务列表执行不可变复制。 */
+        /** 校验进度时间并对子任务列表执行不可变复制。 */
         public ActiveExecutionDiagnostic {
+            Objects.requireNonNull(startedAt, "startedAt 不能为空");
+            Objects.requireNonNull(parentLastProgressAt, "parentLastProgressAt 不能为空");
             childTasks = List.copyOf(childTasks);
         }
     }

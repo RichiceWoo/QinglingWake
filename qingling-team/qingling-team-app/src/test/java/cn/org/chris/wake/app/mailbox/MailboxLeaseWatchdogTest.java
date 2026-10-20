@@ -1,6 +1,7 @@
 package cn.org.chris.wake.app.mailbox;
 
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
+import cn.org.chris.wake.domain.gateway.AgentGateway;
 import cn.org.chris.wake.domain.gateway.MailboxRepository;
 import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
@@ -39,7 +40,8 @@ class MailboxLeaseWatchdogTest {
         MailboxLeaseWatchdog watchdog = new MailboxLeaseWatchdog(
                 mailboxService, workspaceRepository, dispatchRegistry,
                 (role, projectId) -> "wake-" + wakes.incrementAndGet(),
-                new FixedRuntimeIncidentGateway(false), Duration.ofMinutes(10)
+                new FixedRuntimeIncidentGateway(false), mock(AgentGateway.class),
+                Duration.ofMinutes(10)
         );
 
         assertThat(watchdog.tick()).isEqualTo(1);
@@ -65,7 +67,8 @@ class MailboxLeaseWatchdogTest {
         MailboxLeaseWatchdog watchdog = new MailboxLeaseWatchdog(
                 mailboxService, workspaceRepository, dispatchRegistry,
                 (role, projectId) -> "wake-" + wakes.incrementAndGet(),
-                new FixedRuntimeIncidentGateway(false), Duration.ofMinutes(10)
+                new FixedRuntimeIncidentGateway(false), mock(AgentGateway.class),
+                Duration.ofMinutes(10)
         );
 
         assertThat(watchdog.tick()).isZero();
@@ -92,7 +95,34 @@ class MailboxLeaseWatchdogTest {
         MailboxLeaseWatchdog watchdog = new MailboxLeaseWatchdog(
                 mailboxService, workspaceRepository, dispatchRegistry,
                 (role, projectId) -> "wake-" + wakes.incrementAndGet(),
-                new FixedRuntimeIncidentGateway(true), Duration.ofMinutes(10)
+                new FixedRuntimeIncidentGateway(true), mock(AgentGateway.class),
+                Duration.ofMinutes(10)
+        );
+
+        assertThat(watchdog.tick()).isZero();
+        assertThat(mailboxRepository.pmResetCalls).hasValue(0);
+        assertThat(wakes).hasValue(0);
+    }
+
+    /** 路由快照空闲但真实父 Agent 仍活跃时不得恢复 mailbox 租约。 */
+    @Test
+    void shouldSkipMailboxWhileParentAgentExecutionIsActive() {
+        RecordingMailboxRepository mailboxRepository = new RecordingMailboxRepository();
+        MailboxService mailboxService = new MailboxService(mailboxRepository);
+        WorkspaceRepository workspaceRepository = mock(WorkspaceRepository.class);
+        AgentGateway agentGateway = mock(AgentGateway.class);
+        AtomicInteger wakes = new AtomicInteger();
+        when(workspaceRepository.listProjectIds()).thenReturn(List.of("p1"));
+        when(agentGateway.hasActiveExecution("p1", "pm")).thenReturn(true);
+        mailboxRepository.pmRestores.set(1);
+        MailboxLeaseWatchdog watchdog = new MailboxLeaseWatchdog(
+                mailboxService,
+                workspaceRepository,
+                new SerialDispatchRegistry(Runnable::run),
+                (role, projectId) -> "wake-" + wakes.incrementAndGet(),
+                new FixedRuntimeIncidentGateway(false),
+                agentGateway,
+                Duration.ofMinutes(10)
         );
 
         assertThat(watchdog.tick()).isZero();

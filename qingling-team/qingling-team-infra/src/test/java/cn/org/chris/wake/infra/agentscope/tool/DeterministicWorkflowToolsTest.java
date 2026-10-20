@@ -199,8 +199,9 @@ class DeterministicWorkflowToolsTest {
                 .withFailMessage(accepted.toPrettyString())
                 .isZero();
         assertThat(accepted.path("completed_assignment_id").asText()).isEqualTo(recoveryAssignment.id());
+        assertThat(recoveryAssignment.id()).isEqualTo(codeAssignment.id());
         assertThat(accepted.path("completed_assignment_ids")).extracting(JsonNode::asText)
-                .containsExactly(codeAssignment.id(), recoveryAssignment.id());
+                .containsExactly(codeAssignment.id());
         assertThat(repeatedDone.path("errcode").asInt()).isZero();
         assertThat(repeatedDone.path("already_done").asBoolean()).isTrue();
         assertThat(mailbox.findMessage("flow-project", "rd", codeAssignment.id()))
@@ -285,7 +286,7 @@ class DeterministicWorkflowToolsTest {
     }
 
     /**
-     * Manager 的澄清答复必须由 Java 保持代码实现阶段、生成结构化继续任务并重新唤醒 RD。
+     * Manager 的澄清答复必须保持原任务唯一，仅发送结构化通知并重新唤醒 RD。
      *
      * @throws Exception JSON 解析失败
      */
@@ -311,11 +312,19 @@ class DeterministicWorkflowToolsTest {
         assertThat(repeated.path("msg_id").asText()).isEqualTo(first.path("msg_id").asText());
         assertThat(tools.currentStage("flow-project")).isEqualTo(WorkflowStage.CODE_IMPLEMENTATION);
 
-        List<MailMessage> continuationTasks = mailbox.readInbox("flow-project", "rd").stream()
+        List<MailMessage> inbox = mailbox.readInbox("flow-project", "rd");
+        List<MailMessage> continuationMessages = inbox.stream()
                 .filter(message -> "继续代码实现".equals(message.subject()))
                 .toList();
-        assertThat(continuationTasks).hasSize(1);
-        JsonNode content = objectMapper.valueToTree(continuationTasks.get(0).content());
+        assertThat(continuationMessages).hasSize(1)
+                .allMatch(message -> "clarification_answer".equals(message.type()));
+        assertThat(inbox.stream()
+                .filter(message -> "task_assign".equals(message.type()))
+                .filter(message -> "CODE_IMPLEMENTATION".equals(
+                        objectMapper.valueToTree(message.content()).path("workflow_stage").asText()
+                )))
+                .hasSize(1);
+        JsonNode content = objectMapper.valueToTree(continuationMessages.get(0).content());
         assertThat(content.path("workflow_stage").asText()).isEqualTo("CODE_IMPLEMENTATION");
         assertThat(content.path("protocol").asText()).isEqualTo("clarification_answer");
         assertThat(content.path("resume_current_stage").asBoolean()).isTrue();

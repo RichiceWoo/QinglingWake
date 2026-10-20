@@ -480,15 +480,49 @@ class WorkspaceTemplateContractTest {
                 .contains("advance_workflow(signal=\"clarification_answered\"")
                 .contains("禁止直接发送 `clarification_answer`、`info` 或 `task_assign`")
                 .contains("保持当前阶段")
+                .contains("原有唯一任务")
                 .contains("重新唤醒该角色");
         assertThat(featureSop)
                 .contains("澄清恢复的唯一协议")
                 .contains("from_role=<请求角色>")
                 .contains("resume_current_stage=true")
+                .contains("type=clarification_answer")
                 .contains("成功后才可 `mark_done` 原 `clarification_request`");
-        assertThat(pmInstructions).contains("使用 `clarification_answer` 恢复原产品设计阶段");
-        assertThat(rdInstructions).contains("使用 `clarification_answer` 恢复原技术设计、代码实现或缺陷修复阶段");
-        assertThat(qaInstructions).contains("使用 `clarification_answer` 恢复原测试设计或测试执行阶段");
+        assertThat(pmInstructions).contains("继续处理原有唯一 `task_assign`");
+        assertThat(rdInstructions).contains("继续处理原有唯一 `task_assign`");
+        assertThat(qaInstructions).contains("继续处理原有唯一 `task_assign`");
+    }
+
+    /**
+     * RD 模板必须要求测试引用真实实现，并在 collection 失败时停止扩张测试集。
+     *
+     * @throws Exception 模板文件读取失败
+     */
+    @Test
+    void shouldRequireImplementationAlignedCollectionFirstTesting() throws Exception {
+        Path templateRoot = templateRoot();
+        String rdInstructions = Files.readString(templateRoot.resolve("rd/AGENTS.md"));
+        String implementationSkill = Files.readString(
+                templateRoot.resolve("rd/skills/code_impl/SKILL.md")
+        );
+        String implementationSubagent = Files.readString(
+                templateRoot.resolve("rd/subagents/code_impl.md")
+        );
+
+        assertThat(rdInstructions)
+                .contains("写测试前必须回读被测实现")
+                .contains("collection 预检未通过时只修现有导入、fixture 或实现契约")
+                .contains("禁止继续新增测试");
+        assertThat(implementationSkill)
+                .contains("只做目录探针和依赖安装")
+                .contains("正式 pytest 只能由 `run_project_tests`")
+                .contains("测试必须引用真实公开符号")
+                .contains("pytest --collect-only")
+                .contains("收集未通过前禁止新增测试");
+        assertThat(implementationSubagent)
+                .contains("只能导入真实存在的公开模块、类、函数与常量")
+                .contains("出现 `exit_code=2` 或 collection/import error 时")
+                .contains("收集通过前禁止新增测试或扩大用例数量");
     }
 
     /**

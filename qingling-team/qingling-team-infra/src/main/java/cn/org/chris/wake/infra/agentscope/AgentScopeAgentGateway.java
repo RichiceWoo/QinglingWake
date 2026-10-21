@@ -271,13 +271,17 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     }
 
     /**
-     * 判断每个逻辑子 Agent 最新任务是否均已终态；没有子任务时视为已收敛。
+     * 判断每个逻辑子 Agent 是否只有唯一最新任务且均已终态；没有子任务时视为已收敛。
      *
      * @param invocation 当前父回合
      * @return 子任务已全部收敛时为 true
      */
     private static boolean childrenSettled(ActiveInvocation invocation) {
-        return latestTasksByAgent(safeTaskDiagnostics(invocation)).stream()
+        List<ChildTaskDiagnostic> diagnostics = safeTaskDiagnostics(invocation);
+        if (!duplicateNonTerminalTasks(diagnostics).isEmpty()) {
+            return false;
+        }
+        return latestTasksByAgent(diagnostics).stream()
                 .allMatch(ChildTaskDiagnostic::terminal);
     }
 
@@ -348,14 +352,27 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     }
 
     /**
-     * 使用父 Agent 日志和每个逻辑 Sub-Agent 最新 continuation 生成类型化停滞或终态异常。
+     * 使用父 Agent 日志和子任务快照生成重复 continuation、停滞或异常终态的类型化故障。
      *
      * @param invocation 当前父回合
      * @param now 当前诊断时间
      * @return 稳定失败异常，未满足终止条件时为 null
      */
     private AgentExecutionException executionFailure(ActiveInvocation invocation, Instant now) {
-        List<ChildTaskDiagnostic> latestTasks = latestTasksByAgent(safeTaskDiagnostics(invocation));
+        List<ChildTaskDiagnostic> diagnostics = safeTaskDiagnostics(invocation);
+        List<ChildTaskDiagnostic> duplicateTasks = duplicateNonTerminalTasks(diagnostics);
+        if (!duplicateTasks.isEmpty()) {
+            List<String> failures = duplicateTasks.stream()
+                    .map(task -> task.agentId() + "=" + task.taskId() + "[status=" + task.status() + "]")
+                    .sorted()
+                    .toList();
+            return new AgentExecutionException(
+                    AgentExecutionException.FailureType.DUPLICATE_CHILD_TASK,
+                    "AgentScope continuation 单飞失效，父 dispatch 已结束: "
+                            + String.join(",", failures)
+            );
+        }
+        List<ChildTaskDiagnostic> latestTasks = latestTasksByAgent(diagnostics);
         List<ChildTaskDiagnostic> stalledTasks = latestTasks.stream()
                 .filter(task -> "RUNNING".equals(task.status()))
                 .filter(task -> !task.terminal())
@@ -432,6 +449,29 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         }
         return latestByAgent.values().stream()
                 .sorted(Comparator.comparing(ChildTaskDiagnostic::agentId))
+                .toList();
+    }
+
+    /**
+     * 返回同一逻辑子 Agent 下全部重复未终态任务，供父回合在短宽限后主动失败并级联取消。
+     *
+     * @param tasks 当前 session 的全部任务诊断
+     * @return 仅包含所属 agentId 出现至少两个未终态任务的稳定排序列表
+     */
+    private static List<ChildTaskDiagnostic> duplicateNonTerminalTasks(List<ChildTaskDiagnostic> tasks) {
+        Map<String, List<ChildTaskDiagnostic>> activeByAgent = tasks.stream()
+                .filter(task -> !task.terminal())
+                .collect(java.util.stream.Collectors.groupingBy(
+                        ChildTaskDiagnostic::agentId,
+                        LinkedHashMap::new,
+                        java.util.stream.Collectors.toList()
+                ));
+        return activeByAgent.values().stream()
+                .filter(activeTasks -> activeTasks.size() > 1)
+                .flatMap(List::stream)
+                .sorted(Comparator.comparing(ChildTaskDiagnostic::agentId)
+                        .thenComparing(ChildTaskDiagnostic::createdAt)
+                        .thenComparing(ChildTaskDiagnostic::taskId))
                 .toList();
     }
 

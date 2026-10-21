@@ -324,10 +324,11 @@ public final class ProjectTestAgentTool implements AgentTool {
         return executeOnce(executionId, projectId)
                 .onErrorResume(firstFailure -> {
                     ProjectTestExecution.FailureType firstFailureType = failureType(firstFailure);
-                    reportFailure(projectId, executionId, firstFailureType, true, 1);
                     return testRunner.recoverConnection().onErrorReturn(false).flatMap(recovered -> {
                         if (!recovered) {
-                            reportFailure(projectId, executionId, firstFailureType, false, 2);
+                            reportRecoveryExhausted(
+                                    projectId, executionId, firstFailureType, firstFailureType
+                            );
                             return Mono.error(firstFailure);
                         }
                         return executeOnce(executionId, projectId)
@@ -336,27 +337,42 @@ public final class ProjectTestAgentTool implements AgentTool {
                                             || secondExecution.status() == ProjectTestExecution.Status.TEST_FAILED) {
                                         return Mono.just(secondExecution);
                                     }
-                                    reportFailure(
-                                            projectId,
-                                            executionId,
-                                            secondExecution.failureType(),
-                                            false,
-                                            2
+                                    reportRecoveryExhausted(
+                                            projectId, executionId,
+                                            firstFailureType, secondExecution.failureType()
                                     );
                                     return Mono.just(withoutRetry(secondExecution));
                                 })
                                 .onErrorResume(secondFailure -> {
-                                    reportFailure(
-                                            projectId,
-                                            executionId,
-                                            failureType(secondFailure),
-                                            false,
-                                            2
+                                    reportRecoveryExhausted(
+                                            projectId, executionId,
+                                            firstFailureType, failureType(secondFailure)
                                     );
                                     return Mono.error(secondFailure);
                                 });
                     });
                 });
+    }
+
+    /**
+     * 仅在同一 execution 的一次受控恢复仍未取得业务终态时连续记录恢复与耗尽事件。
+     *
+     * <p>恢复后得到 SUCCESS 或 TEST_FAILED 时不会写入临时 RECOVERING incident，避免已经
+     * 证明可用的业务终态再次唤醒 Owner 并创建重复 continuation。</p>
+     *
+     * @param projectId 项目标识
+     * @param executionId 稳定执行标识
+     * @param firstFailureType 首次基础设施失败分类
+     * @param finalFailureType 恢复后仍存在的失败分类
+     */
+    private void reportRecoveryExhausted(
+            String projectId,
+            String executionId,
+            ProjectTestExecution.FailureType firstFailureType,
+            ProjectTestExecution.FailureType finalFailureType
+    ) {
+        reportFailure(projectId, executionId, firstFailureType, true, 1);
+        reportFailure(projectId, executionId, finalFailureType, false, 2);
     }
 
     /**

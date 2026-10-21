@@ -249,6 +249,38 @@ class AgentScopeAgentGatewayTest {
         assertThat(gateway.activeExecutionDiagnostics()).isEmpty();
     }
 
+    /** 同一逻辑子 Agent 出现两个未终态 continuation 时必须终止父 dispatch 并级联取消。 */
+    @Test
+    void shouldTerminateParentDispatchWhenDuplicateContinuationsAreRunning() {
+        DuplicateContinuationRuntime runtime = new DuplicateContinuationRuntime();
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime),
+                AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                Duration.ofMillis(5),
+                Duration.ofMillis(5),
+                Duration.ofMinutes(1)
+        );
+        AgentRequest request = new AgentRequest(
+                "rd", "team-rd", "session-duplicate", "继续实现", List.of(),
+                Map.of("routingKey", "team:rd", "projectId", "todo-mvp")
+        );
+
+        CompletableFuture<AgentReply> future = gateway.execute(request);
+
+        assertThatThrownBy(() -> future.get(1, TimeUnit.SECONDS))
+                .hasRootCauseInstanceOf(AgentExecutionException.class)
+                .rootCause()
+                .satisfies(failure -> {
+                    AgentExecutionException typed = (AgentExecutionException) failure;
+                    assertThat(typed.failureType())
+                            .isEqualTo(AgentExecutionException.FailureType.DUPLICATE_CHILD_TASK);
+                    assertThat(typed.getMessage()).contains("task-first", "task-second", "code_impl");
+                });
+        assertThat(runtime.cancellations).hasValue(1);
+        assertThat(gateway.activeExecutionDiagnostics()).isEmpty();
+    }
+
     /** 子任务均已收敛或不存在时，父回合自身超过真实进度租约也必须进入类型化恢复。 */
     @Test
     void shouldTerminateParentDispatchWhenParentStopsMakingRealProgress() {
@@ -505,6 +537,52 @@ class AgentScopeAgentGatewayTest {
                     "task-stalled", "code_impl", "RUNNING", false, lastProgressAt,
                     "SEND", "NONE", lastProgressAt
             ));
+        }
+
+        /** 本测试不需要清理持久会话。 */
+        @Override
+        public void clearContext(String userId, String sessionId) { }
+
+        /** 本测试运行时没有外部资源。 */
+        @Override
+        public void close() { }
+    }
+
+    /** 返回两个同 agentId 的运行中任务，用于验证 late-arrival 单飞兜底。 */
+    private static final class DuplicateContinuationRuntime implements AgentScopeAgentGateway.AgentRuntime {
+
+        /** 收到的父子级联取消次数。 */
+        private final AtomicInteger cancellations = new AtomicInteger();
+
+        /** 保持父回合悬挂，等待 Gateway 识别重复 continuation。 */
+        @Override
+        public Mono<Msg> call(String content, RuntimeContext context) {
+            return Mono.never();
+        }
+
+        /** 记录重复任务故障触发的父子级联取消。 */
+        @Override
+        public void cancel(
+                RuntimeContext context,
+                TaskSemanticsRegistry.CancelOrigin origin
+        ) {
+            cancellations.incrementAndGet();
+        }
+
+        /** 返回同一 code_impl 下两个同时运行的任务。 */
+        @Override
+        public List<AgentScopeAgentGateway.ChildTaskDiagnostic> taskDiagnostics(RuntimeContext context) {
+            java.time.Instant now = java.time.Instant.now();
+            return List.of(
+                    new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                            "task-first", "code_impl", "RUNNING", false,
+                            now.minusSeconds(2), "SPAWN", "NONE", now
+                    ),
+                    new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                            "task-second", "code_impl", "RUNNING", false,
+                            now.minusSeconds(1), "SEND", "NONE", now
+                    )
+            );
         }
 
         /** 本测试不需要清理持久会话。 */

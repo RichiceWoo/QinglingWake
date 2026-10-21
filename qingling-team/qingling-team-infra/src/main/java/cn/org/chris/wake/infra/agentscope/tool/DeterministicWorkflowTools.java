@@ -326,7 +326,32 @@ public final class DeterministicWorkflowTools {
             return;
         }
         WorkflowStage current = currentStage(checkedProjectId);
-        WorkflowSignal signal = retryable
+        String failureFingerprint = Objects.toString(
+                additionalPayload.get("failure_fingerprint"),
+                checkedTool + ":" + checkedFailureType
+        );
+        List<Map<?, ?>> matchingIncidents = toolIncidentPayloads(
+                eventService.readAll(checkedProjectId),
+                current,
+                checkedRole,
+                checkedTool,
+                failureFingerprint
+        );
+        if (matchingIncidents.stream().anyMatch(payload -> "BLOCKED".equals(
+                String.valueOf(payload.get("runtime_status"))
+        ))) {
+            return;
+        }
+        boolean previousRecoveryExists = matchingIncidents.stream().anyMatch(payload -> "RECOVERING".equals(
+                String.valueOf(payload.get("runtime_status"))
+        ));
+        int effectiveAttempt = retryable && attempt == 1 && previousRecoveryExists ? 2 : attempt;
+        boolean effectiveRetryable = retryable && effectiveAttempt == 1;
+        incidentId = checkedExecutionId + ":" + effectiveAttempt;
+        if (hasIncident(checkedProjectId, incidentId)) {
+            return;
+        }
+        WorkflowSignal signal = effectiveRetryable
                 ? WorkflowSignal.TOOL_EXECUTION_FAILED
                 : WorkflowSignal.TOOL_RETRY_EXHAUSTED;
         WorkflowTransition transition = stateMachine.transition(current, signal);
@@ -343,14 +368,15 @@ public final class DeterministicWorkflowTools {
         payload.put("execution_id", checkedExecutionId);
         payload.put("tool", checkedTool);
         payload.put("failure_type", checkedFailureType);
-        payload.put("retryable", retryable);
-        payload.put("attempt", attempt);
+        payload.put("failure_fingerprint", failureFingerprint);
+        payload.put("retryable", effectiveRetryable);
+        payload.put("attempt", effectiveAttempt);
         payload.put("workflow_stage", current.name());
         payload.put("owner", checkedRole);
-        payload.put("runtime_status", retryable ? "RECOVERING" : "BLOCKED");
+        payload.put("runtime_status", effectiveRetryable ? "RECOVERING" : "BLOCKED");
         payload.putAll(additionalPayload);
         eventService.appendToolExecutionFailed(checkedProjectId, payload);
-        if (retryable) {
+        if (effectiveRetryable) {
             if (releaseTaskAssignments) {
                 mailboxService.releaseInProgressTaskAssignments(checkedProjectId, checkedRole);
             }
@@ -358,11 +384,44 @@ public final class DeterministicWorkflowTools {
                     checkedProjectId,
                     checkedExecutionId,
                     checkedFailureType,
-                    attempt,
+                    effectiveAttempt,
                     current,
                     transition
             );
         }
+    }
+
+    /**
+     * 按阶段、Owner、工具和稳定失败指纹筛选恢复预算事件，避免新 execution ID 重置次数。
+     *
+     * @param events 项目全部事件
+     * @param stage 当前工作流阶段
+     * @param role 当前阶段 Owner
+     * @param tool 工具名称
+     * @param failureFingerprint 不包含 execution ID 的稳定失败指纹
+     * @return 按事件顺序排列的同类 incident payload
+     */
+    private static List<Map<?, ?>> toolIncidentPayloads(
+            List<Map<String, Object>> events,
+            WorkflowStage stage,
+            String role,
+            String tool,
+            String failureFingerprint
+    ) {
+        return events.stream()
+                .filter(event -> "tool_execution_failed".equals(event.get("action")))
+                .map(event -> event.get("payload"))
+                .filter(Map.class::isInstance)
+                .map(Map.class::cast)
+                .filter(payload -> stage.name().equals(String.valueOf(payload.get("workflow_stage"))))
+                .filter(payload -> role.equals(String.valueOf(payload.get("owner"))))
+                .filter(payload -> tool.equals(String.valueOf(payload.get("tool"))))
+                .filter(payload -> failureFingerprint.equals(Objects.toString(
+                        payload.get("failure_fingerprint"),
+                        String.valueOf(payload.get("tool")) + ":" + payload.get("failure_type")
+                )))
+                .map(payload -> (Map<?, ?>) payload)
+                .collect(java.util.stream.Collectors.toList());
     }
 
     /**

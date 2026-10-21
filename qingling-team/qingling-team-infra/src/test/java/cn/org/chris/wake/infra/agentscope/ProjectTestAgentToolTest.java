@@ -146,6 +146,83 @@ class ProjectTestAgentToolTest {
         assertThat(evidence.path("stderr").asText()).contains("AssertionError");
     }
 
+    /** runner 进入短暂 FINALIZING 窗口时应继续查询，不得重建连接或写入工具故障。 */
+    @Test
+    void shouldPollThroughFinalizingWindowWithoutRecovery() throws Exception {
+        AtomicInteger queries = new AtomicInteger();
+        AtomicInteger recoveries = new AtomicInteger();
+        List<String> incidents = new ArrayList<>();
+        ProjectTestExecution running = execution(
+                ProjectTestExecution.Status.RUNNING,
+                null,
+                0,
+                0,
+                -1D,
+                ProjectTestExecution.FailureType.NONE,
+                false,
+                "",
+                ""
+        );
+        ProjectTestExecution failed = execution(
+                ProjectTestExecution.Status.TEST_FAILED,
+                1,
+                27,
+                24,
+                97D,
+                ProjectTestExecution.FailureType.PYTEST_FAILURE,
+                false,
+                "24 passed, 3 failed",
+                "AssertionError"
+        );
+        ProjectTestRunner runner = new ProjectTestRunner() {
+            /** 模拟 runner 已启动但仍在原子写入退出码。 */
+            @Override
+            public Mono<ProjectTestExecution> start(String executionId, String projectId) {
+                return Mono.just(withExecutionId(executionId, running));
+            }
+
+            /** 第一次保持 FINALIZING 映射的 RUNNING，第二次返回真实业务终态。 */
+            @Override
+            public Mono<ProjectTestExecution> query(String executionId) {
+                return Mono.just(withExecutionId(
+                        executionId,
+                        queries.incrementAndGet() == 1 ? running : failed
+                ));
+            }
+
+            /** 正常收尾不会触发取消。 */
+            @Override
+            public Mono<ProjectTestExecution> cancel(String executionId) {
+                return Mono.error(new AssertionError("不应取消"));
+            }
+
+            /** 记录错误触发的连接恢复，正常收尾时必须保持为零。 */
+            @Override
+            public Mono<Boolean> recoverConnection() {
+                recoveries.incrementAndGet();
+                return Mono.just(true);
+            }
+        };
+        ProjectTestAgentTool tool = new ProjectTestAgentTool(
+                runner,
+                objectMapper,
+                Duration.ofMillis(1),
+                Duration.ofSeconds(1),
+                "rd",
+                (projectId, role, toolName, executionId, failureType, retryable, attempt) ->
+                        incidents.add(failureType + ":" + retryable + ":" + attempt)
+        );
+
+        JsonNode evidence = invoke(tool, "demo-project");
+
+        assertThat(queries).hasValue(2);
+        assertThat(recoveries).hasValue(0);
+        assertThat(incidents).isEmpty();
+        assertThat(evidence.path("status").asText()).isEqualTo("TEST_FAILED");
+        assertThat(evidence.path("exit_code").asInt()).isEqualTo(1);
+        assertThat(evidence.path("pytest_passed").asInt()).isEqualTo(24);
+    }
+
     /**
      * 不具备恢复能力的 MCP 异常必须转换为脱敏、不可继续重试的基础设施失败结构。
      *
@@ -375,9 +452,88 @@ class ProjectTestAgentToolTest {
 
         assertThat(starts).hasValue(2);
         assertThat(recoveries).hasValue(1);
-        assertThat(incidents).containsExactly("demo-project:rd:true:1");
+        assertThat(incidents).isEmpty();
         assertThat(evidence.path("execution_id").asText()).isEqualTo(firstExecutionId.get());
         assertThat(evidence.path("status").asText()).isEqualTo("SUCCEEDED");
+    }
+
+    /**
+     * 首次终态查询短暂不可用、恢复后取得 pytest 业务失败时不得留下 RECOVERING incident。
+     *
+     * @throws Exception JSON 解析失败
+     */
+    @Test
+    void shouldDiscardTransientUnavailableIncidentAfterRecoveringBusinessFailure() throws Exception {
+        AtomicInteger starts = new AtomicInteger();
+        List<String> incidents = new ArrayList<>();
+        ProjectTestRunner runner = new ProjectTestRunner() {
+            /** 首次返回可恢复结果缺失，第二次按同一 execution ID 返回 pytest 业务失败。 */
+            @Override
+            public Mono<ProjectTestExecution> start(String executionId, String projectId) {
+                if (starts.incrementAndGet() == 1) {
+                    return Mono.just(new ProjectTestExecution(
+                            executionId,
+                            ProjectTestExecution.Status.INFRASTRUCTURE_FAILED,
+                            null,
+                            0,
+                            0,
+                            -1D,
+                            ProjectTestExecution.FailureType.RESULT_UNAVAILABLE,
+                            true,
+                            "",
+                            ""
+                    ));
+                }
+                return Mono.just(new ProjectTestExecution(
+                        executionId,
+                        ProjectTestExecution.Status.TEST_FAILED,
+                        1,
+                        27,
+                        24,
+                        97D,
+                        ProjectTestExecution.FailureType.PYTEST_FAILURE,
+                        false,
+                        "24 passed, 3 failed",
+                        "AssertionError"
+                ));
+            }
+
+            /** 本替身直接由 start 返回终态，不进入轮询。 */
+            @Override
+            public Mono<ProjectTestExecution> query(String executionId) {
+                return Mono.error(new AssertionError("不应查询"));
+            }
+
+            /** 本替身不会触发超时取消。 */
+            @Override
+            public Mono<ProjectTestExecution> cancel(String executionId) {
+                return Mono.error(new AssertionError("不应取消"));
+            }
+
+            /** 模拟连接重建和探针成功。 */
+            @Override
+            public Mono<Boolean> recoverConnection() {
+                return Mono.just(true);
+            }
+        };
+        ProjectTestAgentTool tool = new ProjectTestAgentTool(
+                runner,
+                objectMapper,
+                Duration.ofMillis(1),
+                Duration.ofSeconds(1),
+                "rd",
+                (projectId, role, toolName, executionId, failureType, retryable, attempt) ->
+                        incidents.add(failureType + ":" + retryable + ":" + attempt)
+        );
+
+        JsonNode evidence = invoke(tool, "demo-project");
+
+        assertThat(starts).hasValue(2);
+        assertThat(incidents).isEmpty();
+        assertThat(evidence.path("status").asText()).isEqualTo("TEST_FAILED");
+        assertThat(evidence.path("exit_code").asInt()).isEqualTo(1);
+        assertThat(evidence.path("pytest_passed").asInt()).isEqualTo(24);
+        assertThat(evidence.path("failure_type").asText()).isEqualTo("PYTEST_FAILURE");
     }
 
     /**

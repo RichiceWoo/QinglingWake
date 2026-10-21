@@ -43,6 +43,9 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
     /** 查询命令的 MCP 等待上限秒数。 */
     private static final int QUERY_TIMEOUT_SECONDS = 15;
 
+    /** runner 退出后等待原子退出码落盘的最大秒数，避免短暂收尾窗口被误判为孤儿进程。 */
+    private static final int FINALIZATION_GRACE_SECONDS = 5;
+
     /** 查询输出中的状态字段。 */
     private static final Pattern STATUS_PATTERN = Pattern.compile("__QINGLING_STATUS__=([^\\r\\n]+)");
 
@@ -185,7 +188,14 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
                 + "if test -n \"$exit_code\" && test \"$status\" != CANCELLED; then status=FINISHED; "
                 + "elif test \"$status\" = FINISHED; then status=FINALIZING; "
                 + "elif test \"$status\" = RUNNING && test -f \"$run/runner_pid\"; then "
-                + "pid=$(cat \"$run/runner_pid\"); kill -0 \"$pid\" 2>/dev/null || status=ORPHANED; fi; "
+                + "pid=$(cat \"$run/runner_pid\"); if ! kill -0 \"$pid\" 2>/dev/null; then "
+                + "now=$(date +%s); if test ! -f \"$run/finalizing_since\"; then "
+                + "printf '%s' \"$now\" > \"$run/finalizing_since.tmp.$$\"; "
+                + "mv \"$run/finalizing_since.tmp.$$\" \"$run/finalizing_since\"; status=FINALIZING; "
+                + "else since=$(cat \"$run/finalizing_since\" 2>/dev/null); "
+                + "case \"$since\" in ''|*[!0-9]*) status=FINALIZING ;; "
+                + "*) if test $((now - since)) -lt " + FINALIZATION_GRACE_SECONDS + "; "
+                + "then status=FINALIZING; else status=ORPHANED; fi ;; esac; fi; fi; fi; "
                 + "printf '__QINGLING_STATUS__=%s\\n' \"$status\"; "
                 + "if test -n \"$exit_code\"; then printf '__QINGLING_EXIT_CODE__=%s\\n' \"$exit_code\"; fi; "
                 + "collected=$(grep -Eo 'collected [0-9]+ items?|[0-9]+ tests? collected' "

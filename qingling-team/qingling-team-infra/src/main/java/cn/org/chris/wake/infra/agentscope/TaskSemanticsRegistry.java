@@ -4,16 +4,15 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.harness.agent.subagent.task.BackgroundTask;
 import io.agentscope.harness.agent.subagent.task.TaskRepository;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.WeakHashMap;
 
 /**
@@ -23,6 +22,9 @@ final class TaskSemanticsRegistry {
 
     /** 每个任务仓库最多保留的诊断条目数，避免长生命周期 Agent 无界占用内存。 */
     private static final int MAX_ENTRIES = 1_024;
+
+    /** 被取消工具调用的单飞占位最长保留时间，覆盖 AgentScope 五分钟后台完成窗口。 */
+    private static final Duration RESERVATION_TIMEOUT = Duration.ofMinutes(6);
 
     /** 按任务仓库弱引用共享语义表，使工具包装器与 Gateway 可读取同一份元数据。 */
     private static final Map<TaskRepository, TaskSemanticsRegistry> REGISTRIES =
@@ -40,8 +42,8 @@ final class TaskSemanticsRegistry {
     /** 保存父 session 内 label/agent_key 到声明式 agentId 的映射。 */
     private final LinkedHashMap<AgentAliasKey, String> agentAliases = new LinkedHashMap<>();
 
-    /** 保存已经进入工具调用但尚未登记后台任务的 agent/session 单飞占位。 */
-    private final Set<AgentSessionKey> continuationReservations = new LinkedHashSet<>();
+    /** 保存已经进入工具调用但尚未登记后台任务的 agent/session 单飞占位及创建时间。 */
+    private final LinkedHashMap<AgentSessionKey, Instant> continuationReservations = new LinkedHashMap<>();
 
     /** 保存曾创建或观察后台任务的最小父会话，用于 shutdown 终态协调。 */
     private final LinkedHashMap<ParentSessionKey, ParentSession> parentSessions = new LinkedHashMap<>();
@@ -213,7 +215,7 @@ final class TaskSemanticsRegistry {
     }
 
     /**
-     * 原子申请同一 agent/session 的 continuation 执行权；已有 RUNNING 任务时返回其 taskId。
+     * 原子申请同一 agent/session 的 continuation 执行权；已有任务或未过期占位时拒绝重复委托。
      *
      * @param context 当前父 Agent 运行上下文
      * @param agentId 声明式 Sub-Agent 标识
@@ -227,14 +229,17 @@ final class TaskSemanticsRegistry {
             return SingleFlightDecision.duplicate(activeTask.getTaskId());
         }
         AgentSessionKey key = agentSessionKey(context, safeAgentId);
-        if (!continuationReservations.add(key)) {
+        Instant now = Instant.now();
+        Instant reservedAt = continuationReservations.get(key);
+        if (reservedAt != null && Duration.between(reservedAt, now).compareTo(RESERVATION_TIMEOUT) < 0) {
             return SingleFlightDecision.duplicate("");
         }
+        continuationReservations.put(key, now);
         return SingleFlightDecision.granted();
     }
 
     /**
-     * 释放尚未登记后台任务的单飞占位；已创建任务仍由 TaskRepository 状态继续防重。
+     * 正常完成或明确失败后释放单飞占位；外层取消路径保留占位等待后台任务延迟落地。
      *
      * @param context 当前父 Agent 运行上下文
      * @param agentId 声明式 Sub-Agent 标识
@@ -317,7 +322,7 @@ final class TaskSemanticsRegistry {
         trimMap(agentAliases);
         trimMap(parentSessions);
         while (continuationReservations.size() > MAX_ENTRIES) {
-            continuationReservations.remove(continuationReservations.iterator().next());
+            continuationReservations.remove(continuationReservations.keySet().iterator().next());
         }
     }
 

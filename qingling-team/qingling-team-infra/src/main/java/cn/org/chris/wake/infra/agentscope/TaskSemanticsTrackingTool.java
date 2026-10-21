@@ -8,6 +8,7 @@ import io.agentscope.core.state.ToolContextState;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.ToolCallParam;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 
 import java.util.Map;
 import java.util.Objects;
@@ -129,7 +130,11 @@ final class TaskSemanticsTrackingTool implements AgentTool {
         }
         return delegate.callAsync(param)
                 .doOnNext(result -> recordCreatedTask(result, taskKind, param, agentId))
-                .doFinally(ignored -> registry.release(param.getRuntimeContext(), agentId));
+                .doFinally(signal -> {
+                    if (signal != SignalType.CANCEL) {
+                        registry.release(param.getRuntimeContext(), agentId);
+                    }
+                });
     }
 
     /**

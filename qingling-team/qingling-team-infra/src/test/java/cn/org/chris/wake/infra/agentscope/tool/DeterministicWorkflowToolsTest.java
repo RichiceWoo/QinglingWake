@@ -410,6 +410,39 @@ class DeterministicWorkflowToolsTest {
                 .hasSize(2);
     }
 
+    /** 不同 execution ID 的同阶段同类工具故障必须共享恢复预算，第二次直接进入 BLOCKED。 */
+    @Test
+    void shouldShareToolRecoveryBudgetAcrossExecutionIdsByStableFingerprint() {
+        tools.advanceWorkflow("flow-project", "checkpoint_approved", "", Map.of(), "");
+        tools.advanceWorkflow("flow-project", "stage_accepted", "pm", Map.of(), "");
+        tools.advanceWorkflow("flow-project", "stage_accepted", "rd", Map.of(), "");
+
+        tools.reportToolExecutionFailure(
+                "flow-project", "rd", "run_project_tests", "execution-a", "RESULT_UNAVAILABLE", true, 1
+        );
+        tools.reportToolExecutionFailure(
+                "flow-project", "rd", "run_project_tests", "execution-b", "RESULT_UNAVAILABLE", true, 1
+        );
+
+        List<Map<String, Object>> incidents = events.readAll("flow-project").stream()
+                .filter(event -> "tool_execution_failed".equals(event.get("action")))
+                .toList();
+        assertThat(incidents).hasSize(2);
+        assertThat(incidents.get(0).get("payload"))
+                .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                .containsEntry("execution_id", "execution-a")
+                .containsEntry("attempt", 1)
+                .containsEntry("runtime_status", "RECOVERING")
+                .containsEntry("failure_fingerprint", "run_project_tests:RESULT_UNAVAILABLE");
+        assertThat(incidents.get(1).get("payload"))
+                .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                .containsEntry("execution_id", "execution-b")
+                .containsEntry("attempt", 2)
+                .containsEntry("retryable", false)
+                .containsEntry("runtime_status", "BLOCKED");
+        assertThat(tools.isRuntimeBlocked("flow-project")).isTrue();
+    }
+
     /** Agent 父回合首次失败必须释放租约并恢复原 Owner，第二个 occurrence 必须明确阻断。 */
     @Test
     void shouldRecoverAndThenBlockAgentExecutionFailureByStableWorkflowExecution() {

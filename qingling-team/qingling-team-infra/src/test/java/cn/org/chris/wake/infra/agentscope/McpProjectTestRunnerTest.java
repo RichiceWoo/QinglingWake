@@ -215,7 +215,10 @@ class McpProjectTestRunnerTest {
         assertThat(execution.exitCode()).isNull();
         assertThat(execution.failureType()).isEqualTo(ProjectTestExecution.FailureType.NONE);
         assertThat(input.get().get("cmd").toString())
-                .contains("elif test \"$status\" = FINISHED; then status=FINALIZING");
+                .contains("elif test \"$status\" = FINISHED; then status=FINALIZING")
+                .contains("finalizing_since")
+                .contains("test $((now - since)) -lt 5")
+                .contains("else status=ORPHANED");
     }
 
     /**

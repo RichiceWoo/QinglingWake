@@ -646,6 +646,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
             List<JsonNode> mailSnapshot = project == null ? List.of() : readAvailableMail(project);
             List<CronJob> cronSnapshot = cronJobRepository.findAll();
             String incident = terminalIncidentReason(eventSnapshot);
+            String recoveringIncidentConflict = recoveringIncidentConflictReason(eventSnapshot);
             Map<String, Integer> dispatch = new LinkedHashMap<>();
             Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates = new LinkedHashMap<>();
             dispatch.put(routingKey, dispatchRegistry.pendingCount(routingKey));
@@ -715,6 +716,8 @@ final class RealTeamE2EDriver implements AutoCloseable {
             snapshot.put("cron_jobs", cronJobEvidence(cronSnapshot));
             snapshot.put("mcp_health", mcpHealth);
             snapshot.put("terminal_incident", incident == null ? "" : sanitizeEvidenceText(incident));
+            snapshot.put("recovering_incident_conflict", recoveringIncidentConflict == null
+                    ? "" : sanitizeEvidenceText(recoveringIncidentConflict));
             snapshot.put("mcp_failure", mcpFailure == null ? "" : sanitizeEvidenceText(mcpFailure));
             snapshot.put("cron_failure", cronFailure == null ? "" : sanitizeEvidenceText(cronFailure));
             snapshot.put("mailbox_conflict", mailboxConflict == null
@@ -724,6 +727,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
             lastRuntimeSnapshot = Map.copyOf(snapshot);
             if (incident != null) {
                 throw new AssertionError("不可恢复工具基础设施故障：" + incident);
+            }
+            if (recoveringIncidentConflict != null) {
+                throw new AssertionError("工具恢复预算未收敛：" + recoveringIncidentConflict);
             }
             if (mcpFailure != null) {
                 throw new AssertionError("不可恢复 MCP 故障：" + mcpFailure);
@@ -754,7 +760,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
     }
 
     /**
-     * 当失败或取消的子任务已全部终态、父 dispatch 却持续活跃时返回直接诊断原因。
+     * 当 continuation 重复、子任务停滞或异常终态后父 dispatch 仍活跃时返回直接诊断原因。
      *
      * @param dispatchStates dispatch 活跃快照
      * @param agentDiagnostics AgentScope 父子任务快照
@@ -776,10 +782,35 @@ final class RealTeamE2EDriver implements AutoCloseable {
         for (AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic : agentDiagnostics) {
             String route = diagnostic.routingKey();
             SerialDispatchRegistry.DispatchSnapshot dispatch = dispatchStates.get(route);
-            List<AgentScopeAgentGateway.ChildTaskDiagnostic> tasks = latestChildTasks(diagnostic.childTasks());
             if (dispatch == null || !dispatch.active()) {
                 continue;
             }
+            Map<String, List<AgentScopeAgentGateway.ChildTaskDiagnostic>> nonTerminalByAgent =
+                    diagnostic.childTasks().stream()
+                            .filter(task -> !task.terminal())
+                            .collect(java.util.stream.Collectors.groupingBy(
+                                    AgentScopeAgentGateway.ChildTaskDiagnostic::agentId,
+                                    LinkedHashMap::new,
+                                    java.util.stream.Collectors.toList()
+                            ));
+            for (Map.Entry<String, List<AgentScopeAgentGateway.ChildTaskDiagnostic>> entry
+                    : nonTerminalByAgent.entrySet()) {
+                if (entry.getValue().size() < 2) {
+                    continue;
+                }
+                String duplicateTaskIds = entry.getValue().stream()
+                        .map(AgentScopeAgentGateway.ChildTaskDiagnostic::taskId)
+                        .sorted()
+                        .reduce((left, right) -> left + "," + right)
+                        .orElse("none");
+                return "route=" + route
+                        + ", role=" + diagnostic.role()
+                        + ", project_id=" + diagnostic.projectId()
+                        + ", parent_session=" + diagnostic.sessionId()
+                        + ", duplicate_non_terminal_agent=" + entry.getKey()
+                        + ", task_ids=" + duplicateTaskIds;
+            }
+            List<AgentScopeAgentGateway.ChildTaskDiagnostic> tasks = latestChildTasks(diagnostic.childTasks());
             AgentScopeAgentGateway.ChildTaskDiagnostic stalledTask = tasks.stream()
                     .filter(task -> "RUNNING".equals(task.status()))
                     .filter(task -> !task.terminal())
@@ -1115,6 +1146,49 @@ final class RealTeamE2EDriver implements AutoCloseable {
                                 .asText(payload.path("stage").asText("unknown"))
                         + ", owner=" + payload.path("owner").asText("unknown");
             }
+        }
+        return null;
+    }
+
+    /**
+     * 识别同一阶段、Owner、工具和失败指纹出现多个 RECOVERING execution 的预算失配。
+     *
+     * @param eventSnapshot 事件快照
+     * @return 重复恢复的脱敏摘要；每类故障至多一次恢复时为 null
+     */
+    static String recoveringIncidentConflictReason(List<JsonNode> eventSnapshot) {
+        Map<String, Set<String>> executionsByFingerprint = new LinkedHashMap<>();
+        Map<String, JsonNode> payloadByFingerprint = new LinkedHashMap<>();
+        for (JsonNode event : eventSnapshot) {
+            if (!"tool_execution_failed".equals(event.path("action").asText())) {
+                continue;
+            }
+            JsonNode payload = event.path("payload");
+            if (!payload.path("retryable").asBoolean(false)
+                    || !"RECOVERING".equals(payload.path("runtime_status").asText())) {
+                continue;
+            }
+            String tool = payload.path("tool").asText("unknown");
+            String failureType = payload.path("failure_type").asText("unknown");
+            String fingerprint = payload.path("failure_fingerprint").asText(tool + ":" + failureType);
+            String key = payload.path("workflow_stage").asText("unknown")
+                    + "|" + payload.path("owner").asText("unknown")
+                    + "|" + tool + "|" + fingerprint;
+            executionsByFingerprint.computeIfAbsent(key, ignored -> new LinkedHashSet<>())
+                    .add(payload.path("execution_id").asText("unknown"));
+            payloadByFingerprint.putIfAbsent(key, payload);
+        }
+        for (Map.Entry<String, Set<String>> entry : executionsByFingerprint.entrySet()) {
+            if (entry.getValue().size() < 2) {
+                continue;
+            }
+            JsonNode payload = payloadByFingerprint.get(entry.getKey());
+            return "tool=" + payload.path("tool").asText("unknown")
+                    + ", failure_fingerprint=" + payload.path("failure_fingerprint")
+                            .asText(payload.path("failure_type").asText("unknown"))
+                    + ", stage=" + payload.path("workflow_stage").asText("unknown")
+                    + ", owner=" + payload.path("owner").asText("unknown")
+                    + ", recovering_executions=" + entry.getValue().stream().sorted().toList();
         }
         return null;
     }

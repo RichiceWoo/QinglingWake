@@ -72,6 +72,32 @@ class RealTeamE2EDriverTest {
                 .doesNotContain("qa/test_plan.md");
     }
 
+    /** 同一稳定故障指纹存在多个 RECOVERING execution 时应直接报告恢复预算未收敛。 */
+    @Test
+    void shouldDescribeRepeatedRecoveringExecutionsDirectly() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode first = objectMapper.readTree("""
+                {"action":"tool_execution_failed","payload":{"retryable":true,
+                "runtime_status":"RECOVERING","tool":"run_project_tests",
+                "execution_id":"exec-a","failure_type":"RESULT_UNAVAILABLE",
+                "failure_fingerprint":"run_project_tests:RESULT_UNAVAILABLE",
+                "workflow_stage":"CODE_IMPLEMENTATION","owner":"rd"}}
+                """);
+        JsonNode second = objectMapper.readTree("""
+                {"action":"tool_execution_failed","payload":{"retryable":true,
+                "runtime_status":"RECOVERING","tool":"run_project_tests",
+                "execution_id":"exec-b","failure_type":"RESULT_UNAVAILABLE",
+                "failure_fingerprint":"run_project_tests:RESULT_UNAVAILABLE",
+                "workflow_stage":"CODE_IMPLEMENTATION","owner":"rd"}}
+                """);
+
+        assertThat(RealTeamE2EDriver.recoveringIncidentConflictReason(List.of(first))).isNull();
+        assertThat(RealTeamE2EDriver.recoveringIncidentConflictReason(List.of(first, second)))
+                .contains("run_project_tests", "RESULT_UNAVAILABLE", "CODE_IMPLEMENTATION",
+                        "owner=rd", "exec-a", "exec-b")
+                .doesNotContain("qa/test_plan.md");
+    }
+
     /** 已完成的当前阶段任务缺少 task_done 时应直接报告协议断点而不是等待下游文件。 */
     @Test
     void shouldDescribeMissingTaskDoneAsWorkflowDeadEnd() throws Exception {
@@ -247,6 +273,39 @@ class RealTeamE2EDriverTest {
         );
 
         assertThat(reason).isNull();
+    }
+
+    /** 同一父 session 和 agentId 存在两个未终态任务时应直接报告全部 taskId。 */
+    @Test
+    void shouldDescribeDuplicateNonTerminalContinuationsDirectly() {
+        Instant activeSince = Instant.parse("2026-10-20T14:29:12Z");
+        AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic =
+                new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
+                        "rd", "session-rd", "team:rd", "todo-mvp", activeSince, activeSince,
+                        List.of(
+                                new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                                        "task-first", "code_impl", "RUNNING", false,
+                                        activeSince, "SPAWN", "NONE", activeSince.plusSeconds(10)
+                                ),
+                                new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                                        "task-second", "code_impl", "RUNNING", false,
+                                        activeSince.plusSeconds(1), "SEND", "NONE", activeSince.plusSeconds(11)
+                                )
+                        )
+                );
+
+        String reason = RealTeamE2EDriver.hangingDispatchReason(
+                Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)),
+                List.of(diagnostic),
+                new java.util.LinkedHashMap<>(),
+                activeSince.plusSeconds(12),
+                Duration.ofSeconds(20),
+                Duration.ofMinutes(5)
+        );
+
+        assertThat(reason)
+                .contains("team:rd", "parent_session=session-rd", "code_impl", "task-first", "task-second")
+                .doesNotContain("qa/test_plan.md");
     }
 
     /** RUNNING 子任务真实进度租约过期时应直接报告 taskId，而不是等待 code/main.py 超时。 */

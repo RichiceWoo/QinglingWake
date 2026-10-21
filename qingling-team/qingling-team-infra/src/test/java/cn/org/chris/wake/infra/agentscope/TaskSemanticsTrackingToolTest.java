@@ -12,6 +12,7 @@ import io.agentscope.harness.agent.subagent.task.TaskRepository;
 import io.agentscope.harness.agent.subagent.task.TaskRunSpec;
 import io.agentscope.harness.agent.subagent.task.TaskStatus;
 import org.junit.jupiter.api.Test;
+import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 
 import java.time.Instant;
@@ -124,6 +125,64 @@ class TaskSemanticsTrackingToolTest {
         assertThat(duplicate.getOutput().toString())
                 .contains("already_running", "task-real-shape", "deduplicated: true");
         assertThat(sendCalls).hasValue(0);
+    }
+
+    /** 外层取消 spawn 后必须保留有界单飞占位，并在真实任务延迟出现后返回其 taskId。 */
+    @Test
+    void shouldKeepReservationUntilCancelledSpawnAppearsInRepository() {
+        FakeTaskRepository repository = new FakeTaskRepository();
+        TaskSemanticsRegistry registry = TaskSemanticsRegistry.forRepository(repository);
+        RuntimeContext context = RuntimeContext.builder()
+                .userId("team-rd")
+                .sessionId("session-late-spawn")
+                .build();
+        AtomicInteger delegateCalls = new AtomicInteger();
+        AgentTool delayedSpawn = new AgentTool() {
+            /** 返回真实内置工具名。 */
+            @Override
+            public String getName() {
+                return "agent_spawn";
+            }
+
+            /** 返回延迟落地测试说明。 */
+            @Override
+            public String getDescription() {
+                return "模拟被外层取消但仍可能在后台落地的 spawn";
+            }
+
+            /** 返回接受任意对象的最小参数 schema。 */
+            @Override
+            public Map<String, Object> getParameters() {
+                return Map.of("type", "object");
+            }
+
+            /** 记录唯一委托并保持调用未完成，直到测试主动取消订阅。 */
+            @Override
+            public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+                delegateCalls.incrementAndGet();
+                return Mono.never();
+            }
+        };
+        TaskSemanticsTrackingTool tracked = new TaskSemanticsTrackingTool(delayedSpawn, registry);
+        ToolCallParam param = toolParam(
+                context,
+                "call-late-spawn",
+                "agent_spawn",
+                Map.of("agent_id", "code_impl", "task", "继续实现")
+        );
+
+        Disposable first = tracked.callAsync(param).subscribe();
+        first.dispose();
+        ToolResultBlock reserved = tracked.callAsync(param).block();
+        repository.addRunning("task-late", "code_impl");
+        ToolResultBlock resolved = tracked.callAsync(param).block();
+
+        assertThat(delegateCalls).hasValue(1);
+        assertThat(reserved).isNotNull();
+        assertThat(reserved.getOutput().toString()).contains("already_running", "deduplicated: true");
+        assertThat(resolved).isNotNull();
+        assertThat(resolved.getOutput().toString())
+                .contains("already_running", "task-late", "deduplicated: true");
     }
 
     /** 相同稳定指纹不得因轮询续租，只有真实事件指纹变化才更新最后进展时间。 */

@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 验证真实 E2E 隔离目录清理不会破坏 Docker bind mount 的根目录身份。
@@ -497,12 +498,43 @@ class RealTeamE2EDriverTest {
     /** 失败证据必须脱敏 API Key、Authorization 与 Bearer，并限制异常长度。 */
     @Test
     void shouldRedactFailureEvidence() {
-        String raw = "DASHSCOPE_API_KEY=secret Authorization:token Bearer abc.def " + "x".repeat(5_000);
+        String raw = "DASHSCOPE_API_KEY=secret NEWAPI_API_KEY=sk-newapi-secret "
+                + "Authorization:token Bearer abc.def standalone=sk-standalone-secret " + "x".repeat(5_000);
 
         String sanitized = RealTeamE2EDriver.sanitizeEvidenceText(raw);
 
-        assertThat(sanitized).doesNotContain("secret", "token", "abc.def").contains("[REDACTED]", "[TRUNCATED]");
+        assertThat(sanitized).doesNotContain(
+                "secret", "token", "abc.def", "sk-newapi-secret", "sk-standalone-secret"
+        ).contains("[REDACTED]", "[TRUNCATED]");
         assertThat(sanitized.length()).isLessThan(4_200);
+    }
+
+    /** DashScope Provider 只接受 DashScope 主 Key 或兼容 Qwen Key。 */
+    @Test
+    void shouldValidateDashScopeE2eCredential() {
+        RealTeamE2EDriver.requireModelConfiguration(Map.of("QWEN_API_KEY", "test-placeholder"));
+
+        assertThatThrownBy(() -> RealTeamE2EDriver.requireModelConfiguration(Map.of()))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("DASHSCOPE_API_KEY");
+    }
+
+    /** NewAPI Provider 必须同时提供独立 SK 与 HTTPS Base URL，不能借用 DashScope Key。 */
+    @Test
+    void shouldValidateNewApiE2eConfiguration() {
+        RealTeamE2EDriver.requireModelConfiguration(Map.of(
+                "QINGLING_MODEL_PROVIDER", "newapi",
+                "NEWAPI_API_KEY", "sk-xxx",
+                "NEWAPI_BASE_URL", "https://newapi.invalid/v1"
+        ));
+
+        assertThatThrownBy(() -> RealTeamE2EDriver.requireModelConfiguration(Map.of(
+                "QINGLING_MODEL_PROVIDER", "newapi",
+                "DASHSCOPE_API_KEY", "dashscope-placeholder"
+        )))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("NEWAPI_API_KEY")
+                .hasMessageNotContaining("dashscope-placeholder");
     }
 
     /** Spring 启动失败时也必须保存直接原因且不得泄漏凭据。 */

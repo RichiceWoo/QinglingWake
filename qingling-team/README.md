@@ -113,7 +113,7 @@ qingling-team/
 | JDK | 17 | 编译和运行 Java 服务 |
 | Maven | 3.8+ | 多模块构建与验证 |
 | Docker + Compose | 可用的本地或服务器 daemon | 运行 AIO-Sandbox |
-| DashScope API Key | 百炼可用模型凭据 | AgentScope 模型调用 |
+| 模型 Provider 凭据 | DashScope Key，或 NewAPI 的 SK 与 HTTPS Base URL | AgentScope 模型调用 |
 | PostgreSQL + pgvector | 可选 | 长期语义记忆 |
 
 ### 4.2 准备配置
@@ -125,7 +125,19 @@ cp qingling-team-starter/src/main/resources/config.yaml.template config.yaml
 export DASHSCOPE_API_KEY='在当前终端设置，不要写入配置或提交到 Git'
 ```
 
-服务启动时会自动读取项目根目录的 `config.yaml`。模型密钥优先使用 `DASHSCOPE_API_KEY`，仅为兼容旧 Python 部署而回退到 `QWEN_API_KEY`。
+服务启动时会自动读取项目根目录的 `config.yaml`。默认 Provider 是 `dashscope`；模型密钥优先使用 `DASHSCOPE_API_KEY`，仅为兼容旧 Python 部署而回退到 `QWEN_API_KEY`。
+
+若要切换到 NewAPI，父 Agent 与全部子 Agent 在首版中共用同一个 Provider。首个真实模型固定为 `qwen3.8`：
+
+```bash
+export QINGLING_MODEL_PROVIDER=newapi
+export QINGLING_AGENT_MODEL=qwen3.8
+export QINGLING_SUB_AGENT_MODEL=qwen3.8
+export NEWAPI_API_KEY=sk-xxx
+export NEWAPI_BASE_URL=https://newapi.example.com/v1
+```
+
+`NEWAPI_BASE_URL` 当前实际请求域名尚未开放，因此部署环境应保持为空并继续使用默认 DashScope；选择 `newapi` 但地址为空时服务会 fail-fast。NewAPI 失败不会回退到 DashScope，也不会借用 DashScope Key。只有 Task 7 回归完成、地址可达且用户单独授权后，才允许执行一次真实 Function Calling 最小探针。
 
 不要把 DashScope、飞书、百度或 MCP 鉴权凭据写入 `config.yaml`、命令输出、日志或版本库。
 
@@ -175,13 +187,15 @@ Java 配置采用 Spring Boot relaxed binding。可以修改 `config.yaml` 的�
 |---|---|---|
 | `workspace` | `qingling.workspace.root` / `QINGLING_WORKSPACE_ROOT` | 改为四角色共用的外部可写根目录 |
 | `data_dir` | `qingling.data-dir` / `QINGLING_DATA_DIR` | 保存 session、Cron、checkpoint、审计和日志相关数据 |
-| `QWEN_API_KEY` | `DASHSCOPE_API_KEY`，回退 `QWEN_API_KEY` | 密钥只从环境变量读取 |
-| CrewAI 模型配置 | `qingling.agent.*` / `QINGLING_AGENT_MODEL` | AgentScope `DashScopeChatModel`；主 Agent 与 Sub-Agent 可分别配置 |
+| `QWEN_API_KEY` | `DASHSCOPE_API_KEY`，回退 `QWEN_API_KEY` | DashScope Agent 密钥只从环境变量读取 |
+| CrewAI 模型配置 | `qingling.agent.*` / `QINGLING_MODEL_PROVIDER` / `QINGLING_AGENT_MODEL` | `dashscope` 创建 `DashScopeChatModel`，`newapi` 创建 OpenAI 兼容 Model；父子 Agent 首版共用 Provider |
+| 无 | `NEWAPI_API_KEY` / `NEWAPI_BASE_URL` | NewAPI 独立 SK 和 `/v1` 根地址；缺失时 fail-fast，不回退 DashScope |
 | `feishu.enabled/app_id/app_secret` | `qingling.feishu.enabled` + `QINGLING_FEISHU_ENABLED` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 凭据不进入 YAML |
 | `allowed_chats` | `qingling.feishu.allowed-chats` | 空列表表示不限制；入站 adapter 仍做二次校验 |
 | `SANDBOX_URL` | `qingling.sandbox.url` / `QINGLING_SANDBOX_URL` | Java 通过 AgentScope MCP 访问外部 AIO-Sandbox |
 | 沙盒工具列表 | `qingling.sandbox.enabled-tools` | 默认仅开放 `sandbox_execute_bash` |
-| `memory.db_dsn` | `qingling.memory.db-dsn` / `QINGLING_MEMORY_DB_DSN` | 空字符串关闭 pgvector，失败不阻断主链路 |
+| `memory.db_dsn` | `qingling.memory.db-dsn` / `QINGLING_MEMORY_DB_DSN` | 空字符串关闭 pgvector，不创建远程 Memory 客户端，失败不阻断主链路 |
+| Memory 模型凭据 | `QINGLING_MEMORY_DASHSCOPE_API_KEY` 与 `QINGLING_MEMORY_DASHSCOPE_*` | 仅在 pgvector 开启时必填；始终独立使用 DashScope，不继承 Agent Provider、Key 或模型 |
 | TestAPI 开关 | `qingling.debug.test-api-enabled` / `QINGLING_TEST_API_ENABLED` | 默认关闭 |
 | Metrics 开关 | `qingling.metrics.enabled` / `QINGLING_METRICS_ENABLED` | 默认开启根路径 `/metrics` |
 | `BAIDU_APPBUILDER_API_KEY` | 同名环境变量 | 空值时搜索工具返回可诊断错误 |
@@ -228,8 +242,9 @@ data/
 
 1. 部署方先在目标 PostgreSQL 数据库执行 `CREATE EXTENSION IF NOT EXISTS vector;`。
 2. 再执行 `qingling-team-infra/src/main/resources/db/optional/pgvector-memories.sql`。
-3. 设置 JDBC DSN，例如 `jdbc:postgresql://db:5432/qingling`。
-4. 使用 `mvn -Ppgvector-it verify` 在 Docker 可用环境验证真实 upsert 和向量字段。
+3. 设置 JDBC DSN，例如 `jdbc:postgresql://db:5432/qingling`，并设置独立的 `QINGLING_MEMORY_DASHSCOPE_API_KEY`。
+4. 可按需覆盖 `QINGLING_MEMORY_DASHSCOPE_BASE_URL`、`QINGLING_MEMORY_EXTRACT_MODEL` 和 `QINGLING_MEMORY_EMBEDDING_MODEL`；Embedding 始终校验为 1024 维。
+5. 使用 `mvn -Ppgvector-it verify` 在 Docker 可用环境验证真实 upsert 和向量字段。
 
 应用不会自动创建扩展或生产表。索引写入失败会记录告警并旁路，不能拖垮消息主链路。
 
@@ -313,7 +328,7 @@ mvn -Ppgvector-it verify
 | Runner | Java 实现 | `Runner`、`SerialDispatchRegistry`；串行、并行、失败恢复和附件测试 |
 | Cron 与 tasks store | Java 实现 | app cron + 文件 Repository；at/every/cron、热重载、wake 去重测试 |
 | 飞书监听/发送/下载 | Java 实现 | adapter/infra Feishu；SDK 事件、白名单、卡片、附件和重试测试 |
-| LLM | AgentScope 替代 | `DashScopeChatModel` 与 `DashScopeModelSelector`；配置和 Function Calling 探针 |
+| LLM | AgentScope 替代 | Provider 工厂创建 `DashScopeChatModel` 或 OpenAI 兼容 Model；`ModelAvailabilitySelector` 执行 Function Calling 探针 |
 | pgvector | Java 实现，可选 | `infra/memory` + optional DDL；空 DSN 旁路和 `pgvector-it` |
 | Cleanup | Java 实现 | app cleanup + infra 文件执行器；保留期与 data root 防逃逸测试 |
 | Metrics/日志 | Java 实现 | Micrometer `/metrics` + Logback JSON；七类指标和凭据掩码测试 |

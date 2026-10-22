@@ -51,6 +51,15 @@ public final class PgVectorMemoryIndexer implements TurnMemoryIndexer {
     private final Executor executor;
 
     /**
+     * 创建完全关闭的索引器；不会创建远程模型客户端或数据库连接。
+     *
+     * @return 对所有轮次都立即返回 SKIPPED 的索引器
+     */
+    public static PgVectorMemoryIndexer disabled() {
+        return new PgVectorMemoryIndexer("", DisabledMemoryExtractionPort.INSTANCE);
+    }
+
+    /**
      * 使用 DriverManager 和公共工作线程池创建索引器。
      *
      * @param dbDsn PostgreSQL JDBC DSN，空字符串表示关闭
@@ -260,6 +269,24 @@ public final class PgVectorMemoryIndexer implements TurnMemoryIndexer {
             current = current.getCause();
         }
         return current;
+    }
+
+    /** Memory 关闭时的防御性端口，任何误调用都立即暴露程序错误。 */
+    private enum DisabledMemoryExtractionPort implements MemoryExtractionPort {
+        /** 全局唯一的关闭态端口实例。 */
+        INSTANCE;
+
+        /** Memory 关闭时禁止执行摘要提取。 */
+        @Override
+        public MemoryExtractionClient.Extraction extract(String userMessage, String assistantReply) {
+            throw new IllegalStateException("Memory 已关闭，不得调用摘要模型");
+        }
+
+        /** Memory 关闭时禁止执行向量生成。 */
+        @Override
+        public List<float[]> embed(List<String> texts) {
+            throw new IllegalStateException("Memory 已关闭，不得调用向量模型");
+        }
     }
 
     /**

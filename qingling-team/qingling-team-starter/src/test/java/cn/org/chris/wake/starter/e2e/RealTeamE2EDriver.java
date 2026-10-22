@@ -9,7 +9,7 @@ import cn.org.chris.wake.infra.agentscope.McpSandboxConfiguration;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
 import cn.org.chris.wake.starter.QinglingTeamApplication;
-import cn.org.chris.wake.starter.config.DashScopeModelSelector;
+import cn.org.chris.wake.starter.config.ModelAvailabilitySelector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.WebApplicationType;
@@ -102,7 +102,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
     private final AgentScopeAgentGateway agentGateway;
 
     /** 记录本场景启动时动态选中的免费模型和脱敏探测结果。 */
-    private final DashScopeModelSelector.Selection modelSelection;
+    private final ModelAvailabilitySelector.Selection modelSelection;
 
     /** 当前测试路由，确保同场景 AgentScope session 稳定。 */
     private final String routingKey;
@@ -150,7 +150,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
         this.dispatchRegistry = applicationContext.getBean(SerialDispatchRegistry.class);
         this.cronJobRepository = applicationContext.getBean(CronJobRepository.class);
         this.agentGateway = applicationContext.getBean(AgentScopeAgentGateway.class);
-        this.modelSelection = applicationContext.getBean(DashScopeModelSelector.Selection.class);
+        this.modelSelection = applicationContext.getBean(ModelAvailabilitySelector.Selection.class);
         this.routingKey = "test:e2e-" + scenario;
         this.startedAt = Instant.now();
     }
@@ -163,7 +163,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
      * @throws Exception 目录准备或 Spring 启动失败
      */
     static RealTeamE2EDriver start(String scenario) throws Exception {
-        requireModelCredential();
+        requireModelConfiguration(System.getenv());
         String sandboxUrl = sandboxUrl();
         requireSandboxReachable(sandboxUrl);
         Path projectRoot = locateProjectRoot();
@@ -387,7 +387,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
         summary.put("outcome", failure == null ? "SUCCESS" : "FAILED");
         summary.put("project_id", project == null ? null : project.getFileName().toString());
         summary.put("routing_key", routingKey);
+        summary.put("model_provider", modelSelection.provider().name().toLowerCase(java.util.Locale.ROOT));
         summary.put("selected_model", modelSelection.modelName());
+        summary.put("model_connectivity_status", modelConnectivityStatus(modelSelection));
         summary.put("model_selection_mode", modelSelection.selectionMode());
         summary.put("free_model_selection_enabled", modelSelection.dynamicallySelected());
         summary.put("model_selection_attempts", modelSelection.attempts());
@@ -427,7 +429,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 场景启动后立即保存模型选择，确保后续业务失败仍可审计动态回退结果。 */
     private void saveModelSelectionEvidence() throws IOException {
         Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("provider", modelSelection.provider().name().toLowerCase(java.util.Locale.ROOT));
         evidence.put("selected_model", modelSelection.modelName());
+        evidence.put("connectivity_status", modelConnectivityStatus(modelSelection));
         evidence.put("selection_mode", modelSelection.selectionMode());
         evidence.put("free_model_selection_enabled", modelSelection.dynamicallySelected());
         evidence.put("dynamically_selected", modelSelection.dynamicallySelected());
@@ -460,6 +464,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
         summary.put("completed_at", Instant.now().toString());
         summary.put("outcome", "FAILED");
         summary.put("phase", "startup");
+        summary.put("model_provider", configuredProvider(System.getenv()));
         summary.put("configured_model", sanitizeEvidenceText(System.getenv("QINGLING_AGENT_MODEL")));
         summary.put("failure_type", root.getClass().getSimpleName());
         summary.put("failure_message", sanitizeEvidenceText(root.getMessage()));
@@ -1350,8 +1355,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
             return "";
         }
         String sanitized = text
-                .replaceAll("(?i)(DASHSCOPE_API_KEY|QWEN_API_KEY|authorization)\\s*[:=]\\s*[^\\s,;]+", "$1=[REDACTED]")
-                .replaceAll("(?i)Bearer\\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]");
+                .replaceAll("(?i)(DASHSCOPE_API_KEY|QWEN_API_KEY|NEWAPI_API_KEY|authorization)\\s*[:=]\\s*[^\\s,;]+", "$1=[REDACTED]")
+                .replaceAll("(?i)Bearer\\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]")
+                .replaceAll("(?i)\\bsk-[A-Za-z0-9._~+/=-]+", "sk-[REDACTED]");
         return sanitized.length() <= 4_096 ? sanitized : sanitized.substring(0, 4_096) + "...[TRUNCATED]";
     }
 
@@ -1409,13 +1415,61 @@ final class RealTeamE2EDriver implements AutoCloseable {
         }
     }
 
-    /** 验证模型密钥只从环境变量提供，且不把密钥写入测试参数或证据。 */
-    private static void requireModelCredential() {
-        String dashscope = System.getenv("DASHSCOPE_API_KEY");
-        String legacy = System.getenv("QWEN_API_KEY");
-        if ((dashscope == null || dashscope.isBlank()) && (legacy == null || legacy.isBlank())) {
-            throw new AssertionError("Task 18 需要真实模型密钥：请设置 DASHSCOPE_API_KEY（或兼容变量 QWEN_API_KEY）");
+    /**
+     * 按显式 Provider 校验 E2E 环境变量，不允许跨供应商凭据回退。
+     *
+     * @param environment 待读取的环境变量快照
+     */
+    static void requireModelConfiguration(Map<String, String> environment) {
+        String provider = configuredProvider(environment);
+        if ("dashscope".equals(provider)) {
+            String dashscope = environment.get("DASHSCOPE_API_KEY");
+            String legacy = environment.get("QWEN_API_KEY");
+            if (isBlank(dashscope) && isBlank(legacy)) {
+                throw new AssertionError(
+                        "Task 18 的 DashScope Provider 需要 DASHSCOPE_API_KEY（或兼容变量 QWEN_API_KEY）"
+                );
+            }
+            return;
         }
+        if ("newapi".equals(provider)) {
+            if (isBlank(environment.get("NEWAPI_API_KEY"))) {
+                throw new AssertionError("Task 18 的 NewAPI Provider 需要 NEWAPI_API_KEY");
+            }
+            String baseUrl = environment.get("NEWAPI_BASE_URL");
+            if (isBlank(baseUrl)) {
+                throw new AssertionError("Task 18 的 NewAPI Provider 需要 NEWAPI_BASE_URL");
+            }
+            new cn.org.chris.wake.starter.config.QinglingTeamProperties.NewApi(
+                    environment.get("NEWAPI_API_KEY"), baseUrl
+            ).normalizedBaseUrl();
+            return;
+        }
+        throw new AssertionError("QINGLING_MODEL_PROVIDER 只支持 dashscope 或 newapi");
+    }
+
+    /** 返回默认兼容 DashScope 的小写 Provider 名称。 */
+    private static String configuredProvider(Map<String, String> environment) {
+        String configured = environment.get("QINGLING_MODEL_PROVIDER");
+        return isBlank(configured) ? "dashscope" : configured.strip().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /** 判断环境变量是否为空白。 */
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    /**
+     * 将模型探针结果收敛为不包含端点、Header 或响应正文的连通状态。
+     *
+     * @param selection 已完成的模型选择结果
+     * @return not_probed、available 或最后一次稳定失败分类
+     */
+    private static String modelConnectivityStatus(ModelAvailabilitySelector.Selection selection) {
+        if (selection.attempts().isEmpty()) {
+            return "not_probed";
+        }
+        return selection.attempts().get(selection.attempts().size() - 1).status();
     }
 
     /** 返回命令行属性、环境变量或默认值中的 AIO-Sandbox MCP 地址。 */

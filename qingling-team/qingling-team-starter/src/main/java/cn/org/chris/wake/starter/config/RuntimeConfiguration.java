@@ -49,9 +49,7 @@ import cn.org.chris.wake.starter.runtime.RoutingSenderGateway;
 import cn.org.chris.wake.starter.runtime.RuntimeLifecycle;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lark.oapi.Client;
-import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
-import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -61,6 +59,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
 import java.io.IOException;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -85,8 +84,9 @@ public class RuntimeConfiguration {
      */
     @Bean
     public RuntimeSettings runtimeSettings(QinglingTeamProperties properties) {
-        requireText(properties.agent().apiKey(), "DASHSCOPE_API_KEY 或 QWEN_API_KEY 未配置");
+        validateAgentProvider(properties.agent());
         requireText(properties.agent().model(), "qingling.agent.model 未配置");
+        requireText(properties.agent().subAgentModel(), "qingling.agent.sub-agent-model 未配置");
         requirePositive(properties.agent().modelProbeTimeout(), "qingling.agent.model-probe-timeout");
         if (properties.agent().freeModelSelectionEnabled()
                 && (properties.agent().modelCandidates() == null || properties.agent().modelCandidates().isEmpty())) {
@@ -120,6 +120,7 @@ public class RuntimeConfiguration {
         properties.cleanup().rules().values().forEach(value ->
                 requireNonNegative(value, "qingling.cleanup.rules")
         );
+        validateMemoryProvider(properties.memory());
         if (properties.feishu().enabled()) {
             requireText(properties.feishu().appId(), "FEISHU_APP_ID 未配置");
             requireText(properties.feishu().appSecret(), "FEISHU_APP_SECRET 未配置");
@@ -136,6 +137,64 @@ public class RuntimeConfiguration {
         }
         rejectSensitiveHeaders(properties.sandbox().headers());
         return new RuntimeSettings(properties, properties.workspace().root(), properties.dataDir());
+    }
+
+    /**
+     * 按显式 Provider 校验对应凭据和协议地址，禁止根据现有 Key 自动推断供应商。
+     *
+     * @param agent Agent 模型与供应商配置
+     */
+    private static void validateAgentProvider(QinglingTeamProperties.Agent agent) {
+        if (agent.provider() == null) {
+            throw new IllegalStateException("qingling.agent.provider 未配置");
+        }
+        switch (agent.provider()) {
+            case DASHSCOPE -> {
+                requireText(agent.dashscope().apiKey(), "DASHSCOPE_API_KEY 或 QWEN_API_KEY 未配置");
+                requireHttpsUri(agent.dashscope().modelProbeUrl(), "qingling.agent.dashscope.model-probe-url");
+            }
+            case NEWAPI -> {
+                requireText(agent.newApi().apiKey(), "NEWAPI_API_KEY 未配置");
+                agent.newApi().normalizedBaseUrl();
+                if (agent.freeModelSelectionEnabled()) {
+                    throw new IllegalStateException("NewAPI 不支持 DashScope 免费候选模型选择");
+                }
+            }
+        }
+    }
+
+    /**
+     * 仅在 pgvector Memory 启用时校验独立 DashScope 凭据和模型契约。
+     *
+     * @param memory Memory 存储和模型配置
+     */
+    private static void validateMemoryProvider(QinglingTeamProperties.Memory memory) {
+        if (memory.dbDsn() == null || memory.dbDsn().isBlank()) {
+            return;
+        }
+        requireText(memory.dashscope().apiKey(), "QINGLING_MEMORY_DASHSCOPE_API_KEY 未配置");
+        requireHttpsUri(memory.dashscope().baseUrl(), "qingling.memory.dashscope.base-url");
+        requireText(memory.dashscope().extractModel(), "qingling.memory.dashscope.extract-model 未配置");
+        requireText(memory.dashscope().embeddingModel(), "qingling.memory.dashscope.embedding-model 未配置");
+    }
+
+    /**
+     * 校验不携带凭据和查询参数的 HTTPS 外部服务地址。
+     *
+     * @param uri 待校验地址
+     * @param name 脱敏配置项名称
+     */
+    private static void requireHttpsUri(URI uri, String name) {
+        if (uri == null
+                || !uri.isAbsolute()
+                || !"https".equalsIgnoreCase(uri.getScheme())
+                || uri.getHost() == null
+                || uri.getHost().isBlank()
+                || uri.getUserInfo() != null
+                || uri.getQuery() != null
+                || uri.getFragment() != null) {
+            throw new IllegalStateException(name + " 必须是无凭据、无查询参数的 HTTPS 地址");
+        }
     }
 
     /** 初始化外部 workspace 模板，保留 seed 文件和用户修改。 */
@@ -293,37 +352,36 @@ public class RuntimeConfiguration {
         );
     }
 
-    /** 创建仅在显式开关开启时执行启动探测的免费模型选择器。 */
+    /** 创建仅在显式开关开启时执行启动探测的 Provider 感知模型选择器。 */
     @Bean
-    public DashScopeModelSelector dashScopeModelSelector(ObjectMapper objectMapper) {
-        return new DashScopeModelSelector(HttpClient.newHttpClient(), objectMapper);
+    public ModelAvailabilitySelector modelAvailabilitySelector(ObjectMapper objectMapper) {
+        return new ModelAvailabilitySelector(HttpClient.newHttpClient(), objectMapper);
     }
 
-    /** 按免费选择开关决定直接使用显式模型或按候选优先级探测。 */
+    /** 按 Provider 与选择开关决定直接使用显式模型或按候选优先级探测。 */
     @Bean
-    public DashScopeModelSelector.Selection agentModelSelection(
+    public ModelAvailabilitySelector.Selection agentModelSelection(
             RuntimeSettings settings,
             CleanupService preparedRuntime,
-            DashScopeModelSelector selector
+            ModelAvailabilitySelector selector
     ) {
         return selector.select(settings.properties().agent());
     }
 
-    /** 创建显式传入 API Key 和最终选择结果的 DashScope 主模型。 */
+    /** 创建禁止跨供应商回退的 Provider 模型工厂。 */
+    @Bean
+    public AgentModelFactory agentModelFactory() {
+        return new AgentModelFactory();
+    }
+
+    /** 根据显式 Provider 和最终选择结果创建主模型。 */
     @Bean
     public Model agentModel(
             RuntimeSettings settings,
-            DashScopeModelSelector.Selection modelSelection
+            ModelAvailabilitySelector.Selection modelSelection,
+            AgentModelFactory modelFactory
     ) {
-        QinglingTeamProperties.Agent agent = settings.properties().agent();
-        return DashScopeChatModel.builder()
-                .apiKey(agent.apiKey())
-                .modelName(modelSelection.modelName())
-                .stream(true)
-                .enableThinking(false)
-                .defaultOptions(GenerateOptions.builder().maxTokens(agent.maxOutputTokens()).build())
-                .contextWindowSize(agent.maxInputTokens())
-                .build();
+        return modelFactory.create(settings.properties().agent(), modelSelection.modelName());
     }
 
     /** 创建启用或关闭状态明确的 AIO-Sandbox MCP 配置。 */
@@ -344,14 +402,18 @@ public class RuntimeConfiguration {
     @Bean
     public PgVectorMemoryIndexer memoryIndexer(
             RuntimeSettings settings,
-            ObjectMapper objectMapper,
-            DashScopeModelSelector.Selection modelSelection
+            ObjectMapper objectMapper
     ) {
-        String apiKey = settings.properties().agent().apiKey();
+        QinglingTeamProperties.Memory memory = settings.properties().memory();
+        if (memory.dbDsn() == null || memory.dbDsn().isBlank()) {
+            return PgVectorMemoryIndexer.disabled();
+        }
+        QinglingTeamProperties.MemoryDashScope dashscope = memory.dashscope();
         return new PgVectorMemoryIndexer(
-                settings.properties().memory().dbDsn(),
+                memory.dbDsn(),
                 new MemoryExtractionClient(
-                        HttpClient.newHttpClient(), objectMapper, apiKey, modelSelection.modelName()
+                        HttpClient.newHttpClient(), objectMapper, dashscope.apiKey(), dashscope.baseUrl(),
+                        dashscope.extractModel(), dashscope.embeddingModel()
                 )
         );
     }

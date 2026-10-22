@@ -43,8 +43,9 @@ public record QinglingTeamProperties(
             /** 允许接收消息的群聊 ID；空列表表示不限制。 */ @DefaultValue List<String> allowedChats
     ) { }
 
-    /** DashScope 主模型和 Agent 执行边界。 */
+    /** Agent 模型供应商、模型名称和执行边界。 */
     public record Agent(
+            /** 父 Agent 与子 Agent 共用的模型供应商。 */ @DefaultValue("dashscope") ModelProvider provider,
             /** 关闭免费模型选择时主 Agent 使用的显式模型名称。 */ @DefaultValue("qwen3-max") String model,
             /** 声明式 Sub-Agent 使用的模型名称。 */ @DefaultValue("qwen3-max") String subAgentModel,
             /** 是否在启动时按优先级探测免费模型。 */ @DefaultValue("false") boolean freeModelSelectionEnabled,
@@ -55,8 +56,6 @@ public record QinglingTeamProperties(
                     "qwen3.8-27b", "qwen3.8-2.4t-a95b", "deepseek-v4.1-flash", "glm-5.3",
                     "kimi-k3", "deepseek-v4-flash-0731", "qwen3.7-flash-2026-07-15", "qwen3.7-flash"
             }) List<String> modelCandidates,
-            /** OpenAI 兼容的模型可用性探测端点。 */
-            @DefaultValue("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions") URI modelProbeUrl,
             /** 单个候选模型探测超时。 */ @DefaultValue("20s") Duration modelProbeTimeout,
             /** 主 Agent 最大迭代次数。 */ @DefaultValue("30") int maxIterations,
             /** 主模型上下文窗口上限。 */ @DefaultValue("30000") int maxInputTokens,
@@ -67,8 +66,78 @@ public record QinglingTeamProperties(
             /** 关闭阶段等待已接纳 dispatch 排空的独立短超时。 */
             @DefaultValue("30s") Duration shutdownDrainTimeout,
             /** 单次 Agent 调用超时。 */ @DefaultValue("300s") Duration timeout,
-            /** DashScope API Key，优先 DASHSCOPE_API_KEY、回退 QWEN_API_KEY。 */ @DefaultValue("") String apiKey
+            /** DashScope Agent 模型和可用性探针配置。 */ @DefaultValue DashScope dashscope,
+            /** NewAPI OpenAI 兼容网关配置。 */ @DefaultValue NewApi newApi
     ) { }
+
+    /** Agent 模型供应商；父 Agent 与所有子 Agent 在首版中共用同一取值。 */
+    public enum ModelProvider {
+        /** 使用阿里云百炼 DashScope 原生 AgentScope 适配器。 */
+        DASHSCOPE,
+
+        /** 使用 NewAPI 提供的 OpenAI 兼容 Chat Completions 接口。 */
+        NEWAPI
+    }
+
+    /** DashScope Agent 模型凭据和 Function Calling 探针地址。 */
+    public record DashScope(
+            /** DashScope API Key，优先 DASHSCOPE_API_KEY、回退 QWEN_API_KEY。 */ @DefaultValue("") String apiKey,
+            /** DashScope OpenAI 兼容的模型可用性探测端点。 */
+            @DefaultValue("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions") URI modelProbeUrl
+    ) { }
+
+    /** NewAPI OpenAI 兼容网关凭据和协议根地址。 */
+    public record NewApi(
+            /** NewAPI 独立 SK，只允许通过 NEWAPI_API_KEY 注入。 */ @DefaultValue("") String apiKey,
+            /** NewAPI 协议根地址；未启用 NewAPI 时允许为空。 */ @DefaultValue("") String baseUrl
+    ) {
+        /**
+         * 将 NewAPI 地址收敛为不含凭据和查询参数的 HTTPS `/v1` 协议根地址。
+         *
+         * @return 规范化后的 NewAPI `/v1` 根地址
+         * @throws IllegalStateException 地址为空、结构非法或不是受支持的 HTTPS 根地址
+         */
+        public URI normalizedBaseUrl() {
+            if (baseUrl == null || baseUrl.isBlank()) {
+                throw new IllegalStateException("NEWAPI_BASE_URL 未配置");
+            }
+            try {
+                URI candidate = URI.create(baseUrl.strip());
+                if (!candidate.isAbsolute()
+                        || !"https".equalsIgnoreCase(candidate.getScheme())
+                        || candidate.getHost() == null
+                        || candidate.getHost().isBlank()
+                        || candidate.getUserInfo() != null
+                        || candidate.getQuery() != null
+                        || candidate.getFragment() != null) {
+                    throw new IllegalStateException("NEWAPI_BASE_URL 必须是无凭据、无查询参数的 HTTPS 地址");
+                }
+                String path = candidate.getPath() == null ? "" : candidate.getPath();
+                while (path.endsWith("/") && path.length() > 1) {
+                    path = path.substring(0, path.length() - 1);
+                }
+                if (!path.isEmpty() && !"/".equals(path) && !"/v1".equals(path)) {
+                    throw new IllegalStateException("NEWAPI_BASE_URL 路径必须为空或 /v1");
+                }
+                return new URI(
+                        "https", null, candidate.getHost(), candidate.getPort(), "/v1", null, null
+                );
+            } catch (IllegalArgumentException exception) {
+                throw new IllegalStateException("NEWAPI_BASE_URL 格式非法");
+            } catch (java.net.URISyntaxException exception) {
+                throw new IllegalStateException("NEWAPI_BASE_URL 无法规范化");
+            }
+        }
+
+        /**
+         * 生成唯一的 OpenAI Chat Completions 地址，避免 URI.resolve 覆盖 `/v1` 路径。
+         *
+         * @return 规范化后的 `/v1/chat/completions` 地址
+         */
+        public URI chatCompletionsUrl() {
+            return URI.create(normalizedBaseUrl().toString() + "/chat/completions");
+        }
+    }
 
     /** AIO-Sandbox MCP 连接参数。 */
     public record Sandbox(
@@ -85,7 +154,17 @@ public record QinglingTeamProperties(
     /** 记忆目录与可选 pgvector 连接。 */
     public record Memory(
             /** 兼容源项目的上下文数据目录。 */ @DefaultValue("./data/ctx") Path contextDir,
-            /** PostgreSQL JDBC DSN；空值关闭 pgvector。 */ @DefaultValue("") String dbDsn
+            /** PostgreSQL JDBC DSN；空值关闭 pgvector。 */ @DefaultValue("") String dbDsn,
+            /** Memory 摘要与向量生成专用的 DashScope 配置。 */ @DefaultValue MemoryDashScope dashscope
+    ) { }
+
+    /** Memory 专用 DashScope 凭据、协议地址和模型契约。 */
+    public record MemoryDashScope(
+            /** Memory 专用 DashScope API Key，不继承 Agent Provider 凭据。 */ @DefaultValue("") String apiKey,
+            /** Memory 使用的 DashScope OpenAI 兼容协议根地址。 */
+            @DefaultValue("https://dashscope.aliyuncs.com/compatible-mode/v1/") URI baseUrl,
+            /** 对话摘要和标签提取模型。 */ @DefaultValue("qwen3.6-max-preview") String extractModel,
+            /** 固定生成 1024 维向量的 Embedding 模型。 */ @DefaultValue("text-embedding-v3") String embeddingModel
     ) { }
 
     /** 固定团队角色。 */

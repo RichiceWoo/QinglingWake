@@ -11,7 +11,9 @@ qingling:
     allowed-chats: []
 
   agent:
-    # 当前使用节省计划中的显式模型；只有显式开启后才探测免费候选。
+    # 父 Agent 与子 Agent 首版共用 Provider；可选 dashscope 或 newapi。
+    provider: dashscope
+    # NewAPI 首个真实模型固定为 qwen3.8；默认 DashScope 保持 qwen3-max。
     model: qwen3-max
     sub-agent-model: qwen3-max
     free-model-selection-enabled: false
@@ -25,7 +27,6 @@ qingling:
       - deepseek-v4-flash-0731
       - qwen3.7-flash-2026-07-15
       - qwen3.7-flash
-    model-probe-url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
     model-probe-timeout: 20s
     max-iterations: 30
     max-input-tokens: 30000
@@ -36,6 +37,11 @@ qingling:
     # 关闭阶段独立短排空，不复用可能达到 30 分钟的业务 Agent 超时。
     shutdown-drain-timeout: 30s
     timeout: 300s
+    dashscope:
+      model-probe-url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+    new-api:
+      # 当前实际请求域名尚未开放；选择 newapi 前必须通过 NEWAPI_BASE_URL 提供 HTTPS `/v1` 根地址。
+      base-url: ""
 
   sandbox:
     enabled: true
@@ -50,6 +56,11 @@ qingling:
   memory:
     context-dir: ./data/ctx
     db-dsn: ""
+    dashscope:
+      # Memory 永远使用独立 DashScope 配置，不继承 Agent Provider。
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1/
+      extract-model: qwen3.6-max-preview
+      embedding-model: text-embedding-v3
 
   team:
     roles: [manager, pm, rd, qa]
@@ -79,7 +90,9 @@ qingling:
   search:
     baidu-api-key: ""
 
-# 必填模型密钥：export DASHSCOPE_API_KEY=sk-xxx
+# 默认 DashScope：export QINGLING_MODEL_PROVIDER=dashscope DASHSCOPE_API_KEY=sk-xxx
+# NewAPI（地址开放后）：export QINGLING_MODEL_PROVIDER=newapi NEWAPI_API_KEY=sk-xxx NEWAPI_BASE_URL=https://newapi.example.com/v1 QINGLING_AGENT_MODEL=qwen3.8 QINGLING_SUB_AGENT_MODEL=qwen3.8
+# pgvector 开启后独立配置：export QINGLING_MEMORY_DB_DSN=jdbc:postgresql://db:5432/qingling QINGLING_MEMORY_DASHSCOPE_API_KEY=sk-xxx
 # 工具链稳定期：export QINGLING_FREE_MODEL_SELECTION_ENABLED=false QINGLING_AGENT_MODEL=qwen3-max QINGLING_SUB_AGENT_MODEL=qwen3-max
 # 免费候选模式：export QINGLING_FREE_MODEL_SELECTION_ENABLED=true
 # 旧 QINGLING_DYNAMIC_MODEL_SELECTION_ENABLED 仅在新开关未设置时作为兼容回退。

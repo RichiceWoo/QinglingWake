@@ -106,6 +106,27 @@ public final class MemoryExtractionClient implements MemoryExtractionPort {
     }
 
     /**
+     * 使用独立的 Memory DashScope 配置创建客户端，不读取 Agent Provider 配置。
+     *
+     * @param httpClient JDK HTTP 客户端
+     * @param objectMapper JSON 序列化器
+     * @param apiKey Memory 专用 DashScope API Key
+     * @param baseUri Memory 专用 OpenAI 兼容根地址
+     * @param extractModel 摘要与标签提取模型
+     * @param embeddingModel 1024 维向量模型
+     */
+    public MemoryExtractionClient(
+            HttpClient httpClient,
+            ObjectMapper objectMapper,
+            String apiKey,
+            URI baseUri,
+            String extractModel,
+            String embeddingModel
+    ) {
+        this(jdkTransport(httpClient), objectMapper, apiKey, baseUri, extractModel, embeddingModel);
+    }
+
+    /**
      * 使用可替换传输和模型配置创建客户端。
      *
      * @param transport HTTP 传输端口

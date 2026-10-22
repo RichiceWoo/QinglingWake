@@ -220,7 +220,7 @@
 
 ## 12. 审查结论
 
-Task 1～7 已完成既有验证；Task 8 仍未完成。2026-10-20 暴露的四个直接运行时缺口已在 2026-10-21 完成代码闭环：Test Runner 终态宽限、恢复到业务终态时不生成临时 incident、稳定失败指纹跨 execution 共享恢复预算、取消/offload 后 continuation 单飞占位保留，以及 Gateway/Driver 的重复 continuation 与重复 RECOVERING 直接诊断。扩展定向测试 92 项、完整默认回归 270 项、零模型真实 Docker 工具契约 1 IT 均通过，未调用百炼。按用户要求本轮不运行 E2E，因此这些修复尚未取得真实模型场景证据；Task 8、Task 9 与父需求 Task 18 继续保持未完成，下一轮真实 `happy-path` 必须再次由用户明确确认。
+Task 1～7 已完成既有验证；Task 8 仍未完成。2026-10-22 在启动前重新通过默认 `mvn verify` 与零模型真实 Docker 工具契约后，只执行了一次干净的显式 `qwen3.8-flash happy-path`。流程完成 checkpoint、PM 产品设计、RD/QA 插入评审和 RD 技术设计，并进入 `CODE_IMPLEMENTATION/RD`；调用参数错误没有误开 MCP circuit，技术设计回合耗尽后同 session continuation 也能恢复并完成回报。新阻断发生在代码子任务：唯一 `code_impl` 的真实 session/产物在 21:17:45 后停止进展，但任务仍保持 RUNNING，内部 `sandbox_execute_bash` 最终达到 AgentScope `PT5M` 超时；Driver 没有先触发 `CHILD_STALLED`，而以等待 `code/main.py` 的 `PT30M` 超时结束，真实工具超时随后在 shutdown 阶段显现。Failsafe 1 failure、Maven 总耗时 48 分 59 秒，未产生代码入口或 Test Runner execution。finally 已保存 `target/e2e-evidence/happy-path`，子任务持久化为 CANCELLED，AIO shell session=0，且无 pytest/pip/tmux/Maven/E2E 残留。未重试、未启动后三个场景；Task 8、Task 9 与父需求 Task 18 继续保持未完成。
 
 ## 13. 确认记录（HARD-GATE）
 

@@ -45,6 +45,9 @@ public final class AgentExecutionException extends IllegalStateException {
         DUPLICATE_CHILD_TASK,
 
         /** 没有运行中子任务时父 Agent 自身会话日志超过租约窗口没有进展。 */
-        PARENT_STALLED
+        PARENT_STALLED,
+
+        /** MCP 调用结果不可判定，运行时已尝试受控重建且禁止重放原命令。 */
+        MCP_CONNECTION_UNAVAILABLE
     }
 }

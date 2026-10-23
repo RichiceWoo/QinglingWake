@@ -222,6 +222,14 @@
 
 Task 1～7 已完成既有验证；Task 8 仍未完成。2026-10-22 在启动前重新通过默认 `mvn verify` 与零模型真实 Docker 工具契约后，只执行了一次干净的显式 `qwen3.8-flash happy-path`。流程完成 checkpoint、PM 产品设计、RD/QA 插入评审和 RD 技术设计，并进入 `CODE_IMPLEMENTATION/RD`；调用参数错误没有误开 MCP circuit，技术设计回合耗尽后同 session continuation 也能恢复并完成回报。新阻断发生在代码子任务：唯一 `code_impl` 的真实 session/产物在 21:17:45 后停止进展，但任务仍保持 RUNNING，内部 `sandbox_execute_bash` 最终达到 AgentScope `PT5M` 超时；Driver 没有先触发 `CHILD_STALLED`，而以等待 `code/main.py` 的 `PT30M` 超时结束，真实工具超时随后在 shutdown 阶段显现。Failsafe 1 failure、Maven 总耗时 48 分 59 秒，未产生代码入口或 Test Runner execution。finally 已保存 `target/e2e-evidence/happy-path`，子任务持久化为 CANCELLED，AIO shell session=0，且无 pytest/pip/tmux/Maven/E2E 残留。未重试、未启动后三个场景；Task 8、Task 9 与父需求 Task 18 继续保持未完成。
 
+### 12.1 2026-10-23 非 E2E 修复结论
+
+已完成 2026-10-22 失败暴露的运行时竞态修复：通用 `sandbox_execute_bash` 在模型省略或请求过大 timeout 时统一使用 60 秒，Java 传输层只保留额外 5 秒固定宽限；参数错误继续保持 circuit CLOSED。每个 MCP 包装器绑定父 Agent 角色，Gateway 在一个父回合内只允许一次连接关闭、重建和无副作用探针，不重放此前可能产生副作用的 Shell 命令；无论重建成功与否，原调用结果都视为不可判定并抛出 `MCP_CONNECTION_UNAVAILABLE`，父回合成功出口还会比较连接失败计数以封住熔断轮询竞态。既有 Runner incident 边界据此保持 stage/Owner 并执行 RECOVERING，同类故障再次发生时进入 BLOCKED。
+
+RUNNING 与父回合真实进度租约从 5 分钟收紧到 4 分 30 秒，确保停滞诊断早于旧工具边界。E2E Driver 在等待技术方案、代码、QA 计划和 QA 报告前先确认 `TECH_DESIGN`、`CODE_IMPLEMENTATION`、`QA_TEST_DESIGN`、`QA_TEST_EXECUTION` 的真实迁移，避免提前出现的上游文件消耗下游阶段预算；失败路径先执行 shutdown 和任务终态化，再保存关闭前 MCP 健康及最终 dispatch/Agent 快照。
+
+定向 45 项、完整 `mvn verify` 287 项和零模型真实 Docker `RealSandboxToolContractIT` 1 IT 全部通过。真实契约首个 RD/QA Shell 探针均故意省略 timeout，确认生产包装层会真实注入 60 秒；IT 耗时 15.64 秒、Maven 总耗时 31.216 秒，NoCallModel 未调用百炼，结束后无 pytest/pip/tmux 孤儿进程。本轮未启动真实 E2E，Task 8、Task 9 与父需求 Task 18 仍保持未完成。
+
 ## 13. 确认记录（HARD-GATE）
 
 - **确认时间**：2026-10-07

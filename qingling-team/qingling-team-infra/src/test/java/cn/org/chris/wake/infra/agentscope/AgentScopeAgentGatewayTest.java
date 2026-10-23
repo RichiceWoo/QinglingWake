@@ -6,6 +6,14 @@ import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.infra.memory.TurnMemoryIndexer;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.tool.AgentTool;
+import io.agentscope.core.tool.ToolCallParam;
+import io.agentscope.core.tool.Toolkit;
+import io.agentscope.harness.agent.HarnessAgent;
+import io.agentscope.harness.agent.tools.McpServerConfig;
+import io.agentscope.harness.agent.tools.McpServerRegistrationResult;
 import reactor.core.publisher.Mono;
 import org.junit.jupiter.api.Test;
 
@@ -307,6 +315,192 @@ class AgentScopeAgentGatewayTest {
                 .isEqualTo(AgentExecutionException.FailureType.PARENT_STALLED);
         assertThat(runtime.cancellations).hasValue(1);
         assertThat(gateway.activeExecutionDiagnostics()).isEmpty();
+    }
+
+    /** 首次 MCP 熔断应先重建连接再终止父回合，禁止把未知命令结果当成成功或自动重放。 */
+    @Test
+    void shouldRecoverMcpConnectionThenFailParentForIncidentRecovery() {
+        AtomicInteger registrations = new AtomicInteger();
+        McpServerConfig server = new McpServerConfig();
+        server.setTransport(McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT);
+        server.setEnableTools(List.of("sandbox_execute_bash"));
+        McpSandboxConfiguration sandbox = new McpSandboxConfiguration(
+                "aio-sandbox",
+                server,
+                (toolkit, servers, listener) -> {
+                    AgentTool tool = registrations.incrementAndGet() == 1
+                            ? new AlwaysFailingMcpTool()
+                            : new ProbeSuccessMcpTool();
+                    toolkit.registerAgentTool(tool);
+                    listener.onCompleted(McpServerRegistrationResult.success(
+                            "aio-sandbox", McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT
+                    ));
+                }
+        );
+        Toolkit toolkit = new Toolkit();
+        sandbox.applyTo(HarnessAgent.builder(), toolkit, "rd");
+        AgentTool shell = toolkit.getTool("sandbox_execute_bash");
+        ToolUseBlock use = new ToolUseBlock("mcp-outage", "sandbox_execute_bash", Map.of("cmd", "pwd"));
+        ToolCallParam param = ToolCallParam.builder().toolUseBlock(use).input(use.getInput()).build();
+        shell.callAsync(param).block();
+
+        PendingRuntime runtime = new PendingRuntime();
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime),
+                AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                sandbox,
+                Duration.ofMillis(5),
+                Duration.ofMillis(5),
+                Duration.ofSeconds(10)
+        );
+        CompletableFuture<AgentReply> future = gateway.execute(new AgentRequest(
+                "rd", "team-rd", "session-mcp", "执行代码实现", List.of(),
+                Map.of("routingKey", "team:rd", "projectId", "todo-mvp")
+        ));
+
+        assertThatThrownBy(() -> future.get(1, TimeUnit.SECONDS))
+                .hasRootCauseInstanceOf(AgentExecutionException.class)
+                .rootCause()
+                .extracting(failure -> ((AgentExecutionException) failure).failureType())
+                .isEqualTo(AgentExecutionException.FailureType.MCP_CONNECTION_UNAVAILABLE);
+        assertThat(registrations).hasValue(2);
+        assertThat(sandbox.hasUnavailableConnection("rd")).isFalse();
+        assertThat(runtime.cancellations).hasValue(1);
+    }
+
+    /** 父回复抢先于熔断轮询完成时，成功出口仍须按失败计数重建连接并拒绝未知工具结果。 */
+    @Test
+    void shouldRejectParentSuccessWhenMcpFailureRacesCircuitPolling() {
+        AtomicInteger registrations = new AtomicInteger();
+        McpServerConfig server = new McpServerConfig();
+        server.setTransport(McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT);
+        server.setEnableTools(List.of("sandbox_execute_bash"));
+        McpSandboxConfiguration sandbox = new McpSandboxConfiguration(
+                "aio-sandbox",
+                server,
+                (toolkit, servers, listener) -> {
+                    AgentTool tool = registrations.incrementAndGet() == 1
+                            ? new AlwaysFailingMcpTool()
+                            : new ProbeSuccessMcpTool();
+                    toolkit.registerAgentTool(tool);
+                    listener.onCompleted(McpServerRegistrationResult.success(
+                            "aio-sandbox", McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT
+                    ));
+                }
+        );
+        Toolkit toolkit = new Toolkit();
+        sandbox.applyTo(HarnessAgent.builder(), toolkit, "rd");
+        AgentTool shell = toolkit.getTool("sandbox_execute_bash");
+        ToolUseBlock use = new ToolUseBlock("mcp-race", "sandbox_execute_bash", Map.of("cmd", "pwd"));
+        ToolCallParam param = ToolCallParam.builder().toolUseBlock(use).input(use.getInput()).build();
+        AtomicInteger cancellations = new AtomicInteger();
+        AgentScopeAgentGateway.AgentRuntime runtime = new AgentScopeAgentGateway.AgentRuntime() {
+            /** 在父调用内部制造连接失败，然后立即返回表面成功回复。 */
+            @Override
+            public Mono<Msg> call(String content, RuntimeContext context) {
+                return shell.callAsync(param).thenReturn(Msg.builder().textContent("表面成功").build());
+            }
+
+            /** 记录未知结果触发的父回合取消。 */
+            @Override
+            public void cancel(RuntimeContext context, TaskSemanticsRegistry.CancelOrigin origin) {
+                cancellations.incrementAndGet();
+            }
+
+            /** 该一次性测试运行时没有可清理的会话状态。 */
+            @Override
+            public void clearContext(String userId, String sessionId) {
+            }
+
+            /** 该一次性测试运行时没有需要关闭的资源。 */
+            @Override
+            public void close() {
+            }
+        };
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime),
+                AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                sandbox,
+                Duration.ofSeconds(10),
+                Duration.ofMillis(5),
+                Duration.ofSeconds(10)
+        );
+
+        CompletableFuture<AgentReply> future = gateway.execute(new AgentRequest(
+                "rd", "team-rd", "session-mcp-race", "执行代码实现", List.of(),
+                Map.of("routingKey", "team:rd", "projectId", "todo-mvp")
+        ));
+
+        assertThatThrownBy(() -> future.get(1, TimeUnit.SECONDS))
+                .hasRootCauseInstanceOf(AgentExecutionException.class)
+                .rootCause()
+                .extracting(failure -> ((AgentExecutionException) failure).failureType())
+                .isEqualTo(AgentExecutionException.FailureType.MCP_CONNECTION_UNAVAILABLE);
+        assertThat(registrations).hasValue(2);
+        assertThat(sandbox.hasUnavailableConnection("rd")).isFalse();
+        assertThat(cancellations).hasValue(1);
+    }
+
+    /** 每次调用都返回连接错误的 MCP 测试工具。 */
+    private static final class AlwaysFailingMcpTool implements AgentTool {
+
+        /** 返回生产工具名称。 */
+        @Override
+        public String getName() {
+            return "sandbox_execute_bash";
+        }
+
+        /** 返回测试工具说明。 */
+        @Override
+        public String getDescription() {
+            return "模拟首次 MCP 连接故障";
+        }
+
+        /** 返回最小输入 schema。 */
+        @Override
+        public Map<String, Object> getParameters() {
+            return Map.of("type", "object");
+        }
+
+        /** 返回不含真实连接信息的错误结果。 */
+        @Override
+        public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            return Mono.just(ToolResultBlock.error("connection unavailable"));
+        }
+    }
+
+    /** 恢复探针成功的 MCP 测试工具。 */
+    private static final class ProbeSuccessMcpTool implements AgentTool {
+
+        /** 记录恢复探针调用次数。 */
+        private final AtomicInteger calls = new AtomicInteger();
+
+        /** 返回生产工具名称。 */
+        @Override
+        public String getName() {
+            return "sandbox_execute_bash";
+        }
+
+        /** 返回恢复测试工具说明。 */
+        @Override
+        public String getDescription() {
+            return "模拟连接恢复探针成功";
+        }
+
+        /** 返回最小输入 schema。 */
+        @Override
+        public Map<String, Object> getParameters() {
+            return Map.of("type", "object");
+        }
+
+        /** 恢复探针返回成功；原始业务命令不会在该委托上重放。 */
+        @Override
+        public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            calls.incrementAndGet();
+            return Mono.just(ToolResultBlock.text("probe-ok"));
+        }
     }
 
     /**

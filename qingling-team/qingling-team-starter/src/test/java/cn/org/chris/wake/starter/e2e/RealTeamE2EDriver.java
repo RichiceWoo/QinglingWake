@@ -58,7 +58,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
     private static final Duration TERMINAL_CHILD_DISPATCH_GRACE = Duration.ofSeconds(20);
 
     /** RUNNING 子任务稳定事件和会话日志均无变化时允许的最长时间。 */
-    private static final Duration RUNNING_CHILD_PROGRESS_TIMEOUT = Duration.ofMinutes(5);
+    private static final Duration RUNNING_CHILD_PROGRESS_TIMEOUT = Duration.ofMinutes(4).plusSeconds(30);
 
     /** Cron dispatch 已失败且没有恢复动作时允许状态持久化收敛的短暂窗口。 */
     private static final Duration IDLE_CRON_FAILURE_GRACE = Duration.ofSeconds(20);
@@ -267,9 +267,13 @@ final class RealTeamE2EDriver implements AutoCloseable {
             }
         }
         waitForFile("design/product_spec.md", STAGE_TIMEOUT);
+        waitForWorkflowStage("TECH_DESIGN", STAGE_TIMEOUT);
         waitForFile("tech/tech_design.md", STAGE_TIMEOUT);
+        waitForWorkflowStage("CODE_IMPLEMENTATION", STAGE_TIMEOUT);
         waitForFile("code/main.py", STAGE_TIMEOUT);
+        waitForWorkflowStage("QA_TEST_DESIGN", STAGE_TIMEOUT);
         waitForFile("qa/test_plan.md", STAGE_TIMEOUT);
+        waitForWorkflowStage("QA_TEST_EXECUTION", STAGE_TIMEOUT);
         waitForFile("qa/test_report.md", STAGE_TIMEOUT);
         waitUntil(() -> hasEvent("delivery_requested") || hasEvent("delivery_sent"),
                 STAGE_TIMEOUT, "delivery request");
@@ -412,6 +416,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
         summary.put("called_tools", sandboxConfiguration.calledToolNames());
         summary.put("mcp_health", sandboxConfiguration.circuitHealth());
         summary.put("runtime_snapshot", lastRuntimeSnapshot);
+        summary.put("final_runtime_snapshot", finalRuntimeSnapshot());
         if (failure != null) {
             summary.put("failure_type", failure.getClass().getSimpleName());
             summary.put("failure_message", sanitizeEvidenceText(failure.getMessage()));
@@ -424,6 +429,57 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     evidenceDirectory.resolve("failure-summary.json").toFile(), summary
             );
         }
+    }
+
+    /**
+     * 先执行有界运行时关闭和任务终态化，再保存失败证据，确保晚到的熔断状态不会丢失。
+     *
+     * @param scenarioFailure 场景主失败，可为空
+     * @throws Exception 仅在场景本身成功但关闭或证据保存失败时抛出
+     */
+    void shutdownAndSaveEvidence(Throwable scenarioFailure) throws Exception {
+        RuntimeException shutdownFailure = null;
+        try {
+            close();
+        } catch (RuntimeException failure) {
+            shutdownFailure = failure;
+            if (scenarioFailure != null) {
+                scenarioFailure.addSuppressed(failure);
+            }
+        }
+        Throwable effectiveFailure = scenarioFailure == null ? shutdownFailure : scenarioFailure;
+        try {
+            saveEvidence(effectiveFailure);
+        } catch (Exception evidenceFailure) {
+            if (effectiveFailure != null) {
+                effectiveFailure.addSuppressed(evidenceFailure);
+            } else {
+                throw evidenceFailure;
+            }
+        }
+        if (scenarioFailure == null && shutdownFailure != null) {
+            throw shutdownFailure;
+        }
+    }
+
+    /**
+     * 采集关闭完成后的脱敏状态，证明没有仍接纳的 dispatch、活跃 Agent 或遗留 MCP 假健康。
+     *
+     * @return 可直接写入 summary.json 的最终运行时快照
+     */
+    private Map<String, Object> finalRuntimeSnapshot() {
+        Map<String, Integer> pending = new LinkedHashMap<>();
+        pending.put(routingKey, dispatchRegistry.pendingCount(routingKey));
+        for (String role : List.of("manager", "pm", "rd", "qa")) {
+            String teamRoute = "team:" + role;
+            pending.put(teamRoute, dispatchRegistry.pendingCount(teamRoute));
+        }
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("dispatch_accepting", dispatchRegistry.isAccepting());
+        snapshot.put("dispatch_pending", pending);
+        snapshot.put("agentscope_active", agentDiagnosticEvidence(agentGateway.activeExecutionDiagnostics()));
+        snapshot.put("mcp_health", sandboxConfiguration.circuitHealth());
+        return Map.copyOf(snapshot);
     }
 
     /** 场景启动后立即保存模型选择，确保后续业务失败仍可审计动态回退结果。 */
@@ -603,6 +659,32 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 等待当前项目产生指定相对路径文件。 */
     private void waitForFile(String relativePath, Duration timeout) throws Exception {
         waitUntil(() -> fileExists(relativePath), timeout, "file:" + relativePath);
+    }
+
+    /**
+     * 等待 Java 状态机真实进入目标阶段，使后续产物预算从 Owner 获得执行权时开始计算。
+     *
+     * @param stage 目标 workflow 阶段名称
+     * @param timeout 等待阶段迁移的最长时间
+     */
+    private void waitForWorkflowStage(String stage, Duration timeout) throws Exception {
+        waitUntil(() -> hasWorkflowStage(stage), timeout, "workflow stage:" + stage);
+    }
+
+    /**
+     * 判断事件账本是否曾真实迁移到目标阶段，允许阶段在两次轮询之间继续前进。
+     *
+     * @param stage 目标 workflow 阶段名称
+     * @return 至少存在一次迁移到目标阶段的事件时为 true
+     */
+    private boolean hasWorkflowStage(String stage) {
+        try {
+            return events().stream()
+                    .filter(event -> "workflow_transitioned".equals(event.path("action").asText()))
+                    .anyMatch(event -> stage.equals(event.path("payload").path("to_stage").asText()));
+        } catch (Exception exception) {
+            throw new IllegalStateException("读取 E2E workflow 阶段失败", exception);
+        }
     }
 
     /** 判断当前项目是否已经产生指定相对路径。 */

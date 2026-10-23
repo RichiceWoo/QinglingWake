@@ -215,17 +215,22 @@ class RealSandboxToolContractIT {
                     .contains("sandbox_execute_bash", "run_project_tests")
                     .doesNotContain("read_file", "write_file", "list_files", "edit_file");
             for (int index = 0; index < shellRuns; index++) {
+                Map<String, Object> shellInput = new java.util.LinkedHashMap<>();
+                shellInput.put(
+                        "cmd",
+                        "test \"$(pwd)\" = /workspace "
+                                + "&& test -d /workspace/shared/projects/tool-contract/code "
+                                + "&& printf '__QINGLING_TOOL_CONTRACT_OK__'"
+                );
+                shellInput.put("cwd", System.getProperty("user.dir"));
+                if (index != 0) {
+                    shellInput.put("timeout", 30);
+                }
                 ToolResultBlock shellResult = callTool(
                         child,
                         "shell-" + role + "-" + index,
                         "sandbox_execute_bash",
-                        Map.of(
-                                "cmd", "test \"$(pwd)\" = /workspace "
-                                        + "&& test -d /workspace/shared/projects/tool-contract/code "
-                                        + "&& printf '__QINGLING_TOOL_CONTRACT_OK__'",
-                                "timeout", 30,
-                                "cwd", System.getProperty("user.dir")
-                        )
+                        shellInput
                 );
                 assertThat(shellResult.getState())
                         .as("Shell 探针失败，工具输出=%s", shellResult.getOutput())

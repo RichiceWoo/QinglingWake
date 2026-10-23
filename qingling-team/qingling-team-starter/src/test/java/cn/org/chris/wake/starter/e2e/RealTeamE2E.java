@@ -63,15 +63,7 @@ class RealTeamE2E {
                 failure = scenarioFailure;
                 throw scenarioFailure;
             } finally {
-                try {
-                    driver.saveEvidence(failure);
-                } catch (Exception evidenceFailure) {
-                    if (failure != null) {
-                        failure.addSuppressed(evidenceFailure);
-                    } else {
-                        throw evidenceFailure;
-                    }
-                }
+                driver.shutdownAndSaveEvidence(failure);
             }
         }
     }

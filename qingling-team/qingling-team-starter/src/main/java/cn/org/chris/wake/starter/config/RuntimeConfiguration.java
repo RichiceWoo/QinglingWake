@@ -438,7 +438,7 @@ public class RuntimeConfiguration {
                 settings.properties().agent().maxInputTokens(),
                 settings.properties().agent().asyncToolOffloadTimeout()
         );
-        return new AgentScopeAgentGateway(factory.createAll(), memoryIndexer);
+        return new AgentScopeAgentGateway(factory.createAll(), memoryIndexer, sandboxConfiguration);
     }
 
     /** 创建 Session 路由与只写审计服务。 */

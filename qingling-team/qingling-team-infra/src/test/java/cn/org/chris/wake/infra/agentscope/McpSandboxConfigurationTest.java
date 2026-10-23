@@ -319,10 +319,28 @@ class McpSandboxConfigurationTest {
 
         assertThat(result).isNotNull();
         assertThat(captured.get()).isNotNull();
-        assertThat(captured.get().getInput()).containsEntry("new_session", false);
+        assertThat(captured.get().getInput())
+                .containsEntry("new_session", false)
+                .containsEntry("timeout", McpSandboxConfiguration.DEFAULT_SHELL_TIMEOUT_SECONDS);
         assertThat(captured.get().getToolUseBlock().getContent())
                 .contains("\"new_session\":false")
+                .contains("\"timeout\":60")
                 .doesNotContain("\"new_session\":true");
+
+        ToolUseBlock oversizedTimeoutUse = new ToolUseBlock(
+                "call-oversized-timeout",
+                "sandbox_execute_bash",
+                Map.of("cmd", "pwd", "timeout", 600)
+        );
+        toolkit.getTool("sandbox_execute_bash")
+                .callAsync(ToolCallParam.builder()
+                        .toolUseBlock(oversizedTimeoutUse)
+                        .input(oversizedTimeoutUse.getInput())
+                        .build())
+                .block();
+
+        assertThat(captured.get().getInput())
+                .containsEntry("timeout", McpSandboxConfiguration.MAX_SHELL_TIMEOUT_SECONDS);
     }
 
     /**

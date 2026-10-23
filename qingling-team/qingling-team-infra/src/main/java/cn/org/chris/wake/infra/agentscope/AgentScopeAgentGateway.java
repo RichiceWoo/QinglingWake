@@ -44,7 +44,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     private static final Duration DEFAULT_CHILD_TASK_FAILURE_GRACE = Duration.ofSeconds(2);
 
     /** RUNNING 子任务真实事件与会话日志均无变化时允许保持的最长租约。 */
-    private static final Duration DEFAULT_CHILD_TASK_STALL_TIMEOUT = Duration.ofMinutes(5);
+    private static final Duration DEFAULT_CHILD_TASK_STALL_TIMEOUT = Duration.ofMinutes(4).plusSeconds(30);
 
     /** RuntimeContext 中保存目标角色的键。 */
     public static final String ROLE_ATTRIBUTE = "role";
@@ -63,6 +63,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
 
     /** Agent 回复后触发的可选非阻塞记忆索引器。 */
     private final TurnMemoryIndexer memoryIndexer;
+
+    /** 提供按角色 MCP 熔断状态和一次受控连接重建，不重放原 Shell 命令。 */
+    private final McpSandboxConfiguration sandboxConfiguration;
 
     /** 检查当前父 session 子任务状态的轮询间隔。 */
     private final Duration childTaskPollInterval;
@@ -86,6 +89,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 adaptAgents(agents),
                 RuntimeMode.PRODUCTION,
                 noOpMemoryIndexer(),
+                McpSandboxConfiguration.disabled(),
                 DEFAULT_CHILD_TASK_POLL_INTERVAL,
                 DEFAULT_CHILD_TASK_FAILURE_GRACE,
                 DEFAULT_CHILD_TASK_STALL_TIMEOUT
@@ -103,6 +107,30 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 adaptAgents(agents),
                 RuntimeMode.PRODUCTION,
                 memoryIndexer,
+                McpSandboxConfiguration.disabled(),
+                DEFAULT_CHILD_TASK_POLL_INTERVAL,
+                DEFAULT_CHILD_TASK_FAILURE_GRACE,
+                DEFAULT_CHILD_TASK_STALL_TIMEOUT
+        );
+    }
+
+    /**
+     * 以实际 HarnessAgent、记忆索引器和 MCP 健康边界创建生产 Gateway。
+     *
+     * @param agents 四角色 HarnessAgent
+     * @param memoryIndexer 非阻塞记忆索引入口
+     * @param sandboxConfiguration AIO-Sandbox 熔断与连接恢复边界
+     */
+    public AgentScopeAgentGateway(
+            Map<String, HarnessAgent> agents,
+            TurnMemoryIndexer memoryIndexer,
+            McpSandboxConfiguration sandboxConfiguration
+    ) {
+        this(
+                adaptAgents(agents),
+                RuntimeMode.PRODUCTION,
+                memoryIndexer,
+                sandboxConfiguration,
                 DEFAULT_CHILD_TASK_POLL_INTERVAL,
                 DEFAULT_CHILD_TASK_FAILURE_GRACE,
                 DEFAULT_CHILD_TASK_STALL_TIMEOUT
@@ -120,6 +148,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 runtimes,
                 ignored,
                 noOpMemoryIndexer(),
+                McpSandboxConfiguration.disabled(),
                 DEFAULT_CHILD_TASK_POLL_INTERVAL,
                 DEFAULT_CHILD_TASK_FAILURE_GRACE,
                 DEFAULT_CHILD_TASK_STALL_TIMEOUT
@@ -142,6 +171,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 runtimes,
                 ignored,
                 memoryIndexer,
+                McpSandboxConfiguration.disabled(),
                 DEFAULT_CHILD_TASK_POLL_INTERVAL,
                 DEFAULT_CHILD_TASK_FAILURE_GRACE,
                 DEFAULT_CHILD_TASK_STALL_TIMEOUT
@@ -168,6 +198,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 runtimes,
                 ignored,
                 memoryIndexer,
+                McpSandboxConfiguration.disabled(),
                 childTaskPollInterval,
                 childTaskFailureGrace,
                 DEFAULT_CHILD_TASK_STALL_TIMEOUT
@@ -192,12 +223,46 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
             Duration childTaskFailureGrace,
             Duration childTaskStallTimeout
     ) {
+        this(
+                runtimes,
+                ignored,
+                memoryIndexer,
+                McpSandboxConfiguration.disabled(),
+                childTaskPollInterval,
+                childTaskFailureGrace,
+                childTaskStallTimeout
+        );
+    }
+
+    /**
+     * 使用可观测运行时、MCP 健康边界及完整时序创建测试适配器。
+     *
+     * @param runtimes 测试运行时
+     * @param ignored 区分生产构造器的内部标记
+     * @param memoryIndexer 非阻塞记忆索引入口
+     * @param sandboxConfiguration MCP 熔断与恢复边界
+     * @param childTaskPollInterval 子任务状态轮询间隔
+     * @param childTaskFailureGrace 异常终态宽限时间
+     * @param childTaskStallTimeout RUNNING 子任务真实进度租约
+     */
+    AgentScopeAgentGateway(
+            Map<String, AgentRuntime> runtimes,
+            RuntimeMode ignored,
+            TurnMemoryIndexer memoryIndexer,
+            McpSandboxConfiguration sandboxConfiguration,
+            Duration childTaskPollInterval,
+            Duration childTaskFailureGrace,
+            Duration childTaskStallTimeout
+    ) {
         Objects.requireNonNull(ignored, "runtimeMode 不能为空");
         if (runtimes == null || runtimes.isEmpty()) {
             throw new IllegalArgumentException("Agent 运行时不能为空");
         }
         this.runtimes = Map.copyOf(runtimes);
         this.memoryIndexer = Objects.requireNonNull(memoryIndexer, "memoryIndexer 不能为空");
+        this.sandboxConfiguration = Objects.requireNonNull(
+                sandboxConfiguration, "sandboxConfiguration 不能为空"
+        );
         this.childTaskPollInterval = requirePositiveDuration(
                 childTaskPollInterval, "childTaskPollInterval"
         );
@@ -228,13 +293,19 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 .put(ATTACHMENT_PATHS_ATTRIBUTE, request.attachmentPaths())
                 .build();
         InvocationKey invocationKey = new InvocationKey(request.role(), request.sessionId());
-        ActiveInvocation invocation = new ActiveInvocation(runtime, context, Instant.now());
+        ActiveInvocation invocation = new ActiveInvocation(
+                runtime,
+                context,
+                Instant.now(),
+                sandboxConfiguration.totalConnectionFailures(request.role())
+        );
         activeInvocations.put(invocationKey, invocation);
         AtomicBoolean cancellationPropagated = new AtomicBoolean();
         Mono<AgentReply> parentCall = Mono.defer(() -> runtime.call(request.content(), context))
                 .map(AgentScopeAgentGateway::toReply)
                 .flatMap(reply -> awaitChildrenSettled(invocation)
                         .then(Mono.fromCallable(() -> ensureChildrenSucceeded(invocation, reply))))
+                .flatMap(reply -> terminateWhenMcpOutcomeUnknown(invocation).thenReturn(reply))
                 .doOnNext(reply -> scheduleMemoryIndex(request, reply, turnTimestampMs));
         return Mono.firstWithSignal(parentCall, failWhenExecutionCannotProgress(invocation))
                 .doOnError(ignored -> cancelOnce(
@@ -338,17 +409,53 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     private Mono<AgentReply> failWhenExecutionCannotProgress(ActiveInvocation invocation) {
         return Flux.interval(childTaskPollInterval)
                 .onBackpressureDrop()
-                .concatMap(ignored -> {
-                    AgentExecutionException failure = executionFailure(invocation, Instant.now());
-                    if (failure == null) {
-                        return Mono.<AgentExecutionException>empty();
-                    }
-                    return Mono.delay(childTaskFailureGrace)
-                            .map(ignoredDelay -> executionFailure(invocation, Instant.now()))
-                            .filter(rechecked -> sameFailure(failure, rechecked));
-                })
+                .concatMap(ignored -> recoverInfrastructureOrDiagnose(invocation))
+                .concatMap(failure -> failure.failureType()
+                        == AgentExecutionException.FailureType.MCP_CONNECTION_UNAVAILABLE
+                        ? Mono.just(failure)
+                        : Mono.delay(childTaskFailureGrace)
+                                .map(ignoredDelay -> executionFailure(invocation, Instant.now()))
+                                .filter(rechecked -> sameFailure(failure, rechecked)))
                 .next()
                 .flatMap(failure -> Mono.error(failure));
+    }
+
+    /**
+     * 首次观察到当前角色 MCP 熔断时重建连接但不重放命令，随后立即终止结果不可判定的父回合。
+     *
+     * @param invocation 当前父回合
+     * @return 本轮稳定故障；成功恢复或仍健康时为空
+     */
+    private Mono<AgentExecutionException> recoverInfrastructureOrDiagnose(ActiveInvocation invocation) {
+        String role = Objects.toString(invocation.context().get(ROLE_ATTRIBUTE), "");
+        if (!sandboxConfiguration.hasUnavailableConnection(role)) {
+            return Mono.justOrEmpty(executionFailure(invocation, Instant.now()));
+        }
+        if (!invocation.infrastructureRecoveryAttempted().compareAndSet(false, true)) {
+            return Mono.just(mcpConnectionFailure(role));
+        }
+        return sandboxConfiguration.recoverUnavailableConnections(role)
+                .onErrorReturn(false)
+                // 连接恢复不能证明原始非幂等命令是否执行，必须结束本轮并由 incident 唤醒 Owner。
+                .map(recovered -> mcpConnectionFailure(role));
+    }
+
+    /**
+     * 在父回合成功出口核对连接失败计数，封住父回复与熔断轮询并发时遗漏工具故障的窗口。
+     *
+     * @param invocation 当前父回合
+     * @return 没有新增连接失败时完成；否则完成一次受控重建后发出类型化错误
+     */
+    private Mono<Void> terminateWhenMcpOutcomeUnknown(ActiveInvocation invocation) {
+        String role = Objects.toString(invocation.context().get(ROLE_ATTRIBUTE), "");
+        int currentFailures = sandboxConfiguration.totalConnectionFailures(role);
+        if (currentFailures <= invocation.initialConnectionFailures()) {
+            return Mono.empty();
+        }
+        invocation.infrastructureRecoveryAttempted().compareAndSet(false, true);
+        return sandboxConfiguration.recoverUnavailableConnections(role)
+                .onErrorReturn(false)
+                .then(Mono.error(mcpConnectionFailure(role)));
     }
 
     /**
@@ -359,6 +466,11 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
      * @return 稳定失败异常，未满足终止条件时为 null
      */
     private AgentExecutionException executionFailure(ActiveInvocation invocation, Instant now) {
+        String role = Objects.toString(invocation.context().get(ROLE_ATTRIBUTE), "");
+        if (invocation.infrastructureRecoveryAttempted().get()
+                && sandboxConfiguration.hasUnavailableConnection(role)) {
+            return mcpConnectionFailure(role);
+        }
         List<ChildTaskDiagnostic> diagnostics = safeTaskDiagnostics(invocation);
         List<ChildTaskDiagnostic> duplicateTasks = duplicateNonTerminalTasks(diagnostics);
         if (!duplicateTasks.isEmpty()) {
@@ -426,6 +538,20 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         return new AgentExecutionException(
                 failureType,
                 "AgentScope 子任务异常终止，父 dispatch 已结束: " + String.join(",", failures)
+        );
+    }
+
+    /**
+     * 创建不含 URL、命令、输出或鉴权信息的稳定 MCP 连接故障。
+     *
+     * @param role 当前父 Agent 角色
+     * @return 可交给 Runner incident 边界的类型化异常
+     */
+    private static AgentExecutionException mcpConnectionFailure(String role) {
+        return new AgentExecutionException(
+                AgentExecutionException.FailureType.MCP_CONNECTION_UNAVAILABLE,
+                "AIO-Sandbox MCP 调用结果不可判定，已尝试一次受控连接重建，父 dispatch 已结束[role="
+                        + role + "]"
         );
     }
 
@@ -1135,8 +1261,20 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     private record ActiveInvocation(
             /** 负责本回合的角色运行时。 */ AgentRuntime runtime,
             /** 会被本地 Sub-Agent 继承的执行上下文。 */ RuntimeContext context,
-            /** 父回合开始时间。 */ Instant startedAt
-    ) { }
+            /** 父回合开始时间。 */ Instant startedAt,
+            /** 父回合开始前该角色累计的 MCP 连接失败数。 */ int initialConnectionFailures,
+            /** 当前父回合是否已经消耗唯一一次 MCP 连接重建机会。 */ AtomicBoolean infrastructureRecoveryAttempted
+    ) {
+        /** 为新父回合创建尚未消耗 MCP 恢复预算的诊断状态。 */
+        private ActiveInvocation(
+                AgentRuntime runtime,
+                RuntimeContext context,
+                Instant startedAt,
+                int initialConnectionFailures
+        ) {
+            this(runtime, context, startedAt, initialConnectionFailures, new AtomicBoolean());
+        }
+    }
 
     /**
      * 表示活跃父 Agent 回合的脱敏诊断。

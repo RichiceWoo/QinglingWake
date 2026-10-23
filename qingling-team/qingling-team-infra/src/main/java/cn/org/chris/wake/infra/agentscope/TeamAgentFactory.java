@@ -149,7 +149,7 @@ public final class TeamAgentFactory {
                 // 正式产物只能经团队共享工具读写，避免 Harness 相对路径文件工具写入错误目录或长时间阻塞。
                 .disableFilesystemTools()
                 .disableShellTool();
-        HarnessAgent.Builder configuredBuilder = sandboxConfiguration.applyTo(builder, toolkit);
+        HarnessAgent.Builder configuredBuilder = sandboxConfiguration.applyTo(builder, toolkit, role);
         if (sandboxConfiguration.enabled() && Set.of("rd", "qa").contains(role)) {
             toolkit.registerAgentTool(toolkitFactory.createProjectTestTool(toolkit, role));
         }

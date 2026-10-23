@@ -47,6 +47,15 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public final class McpSandboxConfiguration implements AutoCloseable {
 
+    /** 模型省略 Bash timeout 时注入的默认秒数，避免工具占满 AgentScope 五分钟上限。 */
+    static final int DEFAULT_SHELL_TIMEOUT_SECONDS = 60;
+
+    /** 模型显式 timeout 允许的最大秒数，保证 Java 故障诊断早于子任务停滞租约。 */
+    static final int MAX_SHELL_TIMEOUT_SECONDS = 60;
+
+    /** MCP 调用层在服务端命令时限之外保留的响应传输宽限。 */
+    private static final Duration SHELL_TRANSPORT_GRACE = Duration.ofSeconds(5);
+
     /** 只用于同步受控 MCP 输入与 ToolUse content，不序列化凭据或工具输出。 */
     private static final ObjectMapper TOOL_INPUT_MAPPER = new ObjectMapper();
 
@@ -90,6 +99,9 @@ public final class McpSandboxConfiguration implements AutoCloseable {
 
     /** 每个父 Toolkit 中可重建连接的 MCP 工具包装器。 */
     private final List<CircuitBreakingMcpAgentTool> managedTools = new CopyOnWriteArrayList<>();
+
+    /** 关闭前固化的最后健康快照，供失败路径在 Spring shutdown 后保存直接原因。 */
+    private volatile List<CircuitHealth> closedCircuitHealth = List.of();
 
     /** 在全部 MCP client 关闭后释放 AIO-Sandbox 服务端 shell 会话。 */
     private final McpSessionCleaner sessionCleaner;
@@ -347,15 +359,32 @@ public final class McpSandboxConfiguration implements AutoCloseable {
      * @return 同一 builder，便于继续链式构建
      */
     public synchronized HarnessAgent.Builder applyTo(HarnessAgent.Builder builder, Toolkit toolkit) {
+        return applyTo(builder, toolkit, "unknown");
+    }
+
+    /**
+     * 按角色注册并包装 MCP 工具，使连接故障能够精确终止对应 Owner 的父回合。
+     *
+     * @param builder 待配置的角色 Agent builder
+     * @param toolkit 该角色将交给 Harness 的父 Toolkit
+     * @param ownerRole 工具所属团队角色
+     * @return 同一 builder，便于继续链式构建
+     */
+    public synchronized HarnessAgent.Builder applyTo(
+            HarnessAgent.Builder builder,
+            Toolkit toolkit,
+            String ownerRole
+    ) {
         Objects.requireNonNull(builder, "builder 不能为空");
         Objects.requireNonNull(toolkit, "toolkit 不能为空");
+        String checkedOwnerRole = requireText(ownerRole, "ownerRole");
         if (toolsConfig == null) {
             return builder.disableToolsConfig();
         }
         int statusStart = registrationStatuses.size();
         toolRegistrar.register(toolkit, toolsConfig.getMcpServers(), registrationListener());
         assertSuccessfulRegistration(statusStart, toolkit);
-        installCircuitBreakingTools(toolkit);
+        installCircuitBreakingTools(toolkit, checkedOwnerRole);
         return builder.disableToolsConfig().hook(toolCallObserver());
     }
 
@@ -366,8 +395,9 @@ public final class McpSandboxConfiguration implements AutoCloseable {
      * Harness，声明式子代理会留下永不闭合的 pending tool。</p>
      *
      * @param toolkit 已完成 MCP 注册的父 Toolkit
+     * @param ownerRole 工具所属团队角色
      */
-    private void installCircuitBreakingTools(Toolkit toolkit) {
+    private void installCircuitBreakingTools(Toolkit toolkit, String ownerRole) {
         enabledToolNames().forEach(toolName -> {
             AgentTool original = toolkit.getTool(toolName);
             if (original == null) {
@@ -375,7 +405,7 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             }
             String serverName = serverNameFor(toolName);
             CircuitBreakingMcpAgentTool managed = new CircuitBreakingMcpAgentTool(
-                    toolkit, serverName, original
+                    toolkit, serverName, ownerRole, original
             );
             toolkit.removeToolIfSame(toolName, original);
             toolkit.registerAgentTool(managed);
@@ -493,7 +523,57 @@ public final class McpSandboxConfiguration implements AutoCloseable {
      * @return 不包含 URL、Header、参数或输出的健康记录
      */
     public List<CircuitHealth> circuitHealth() {
+        if (managedTools.isEmpty() && !closedCircuitHealth.isEmpty()) {
+            return closedCircuitHealth;
+        }
         return managedTools.stream().map(CircuitBreakingMcpAgentTool::health).toList();
+    }
+
+    /**
+     * 判断指定角色是否存在已熔断连接，不泄漏调用参数或底层异常。
+     *
+     * @param ownerRole 当前父回合角色
+     * @return 至少一个所属工具为 OPEN 或 HALF_OPEN 时为 true
+     */
+    public boolean hasUnavailableConnection(String ownerRole) {
+        String checkedOwnerRole = requireText(ownerRole, "ownerRole");
+        return managedTools.stream()
+                .filter(tool -> checkedOwnerRole.equals(tool.ownerRole))
+                .anyMatch(tool -> tool.state.get() != CircuitState.CLOSED);
+    }
+
+    /**
+     * 汇总指定角色的连接层失败次数，用于父回合成功出口识别刚发生并已被重建的竞态故障。
+     *
+     * @param ownerRole 当前父回合角色
+     * @return 该角色全部受管工具的生命周期连接失败总数
+     */
+    public int totalConnectionFailures(String ownerRole) {
+        String checkedOwnerRole = requireText(ownerRole, "ownerRole");
+        return managedTools.stream()
+                .filter(tool -> checkedOwnerRole.equals(tool.ownerRole))
+                .mapToInt(tool -> tool.totalFailures.get())
+                .sum();
+    }
+
+    /**
+     * 仅重建指定角色已经熔断的连接；不会重放此前可能产生副作用的 Shell 命令。
+     *
+     * @param ownerRole 当前父回合角色
+     * @return 所有失效连接均完成重建和无副作用探针时为 true
+     */
+    public Mono<Boolean> recoverUnavailableConnections(String ownerRole) {
+        String checkedOwnerRole = requireText(ownerRole, "ownerRole");
+        List<CircuitBreakingMcpAgentTool> unavailable = managedTools.stream()
+                .filter(tool -> checkedOwnerRole.equals(tool.ownerRole))
+                .filter(tool -> tool.state.get() != CircuitState.CLOSED)
+                .toList();
+        if (unavailable.isEmpty()) {
+            return Mono.just(true);
+        }
+        return reactor.core.publisher.Flux.fromIterable(unavailable)
+                .concatMap(CircuitBreakingMcpAgentTool::recoverConnection)
+                .all(Boolean.TRUE::equals);
     }
 
     /**
@@ -527,6 +607,9 @@ public final class McpSandboxConfiguration implements AutoCloseable {
         }
         closed = true;
         boolean hadManagedTools = !managedTools.isEmpty();
+        closedCircuitHealth = managedTools.stream()
+                .map(CircuitBreakingMcpAgentTool::health)
+                .toList();
         Set<Toolkit> closedToolkits = Collections.newSetFromMap(new IdentityHashMap<>());
         RuntimeException firstFailure = null;
         for (CircuitBreakingMcpAgentTool managedTool : managedTools) {
@@ -734,6 +817,9 @@ public final class McpSandboxConfiguration implements AutoCloseable {
         /** MCP client 名称，不含 URL 或凭据。 */
         private final String serverName;
 
+        /** 工具所属父 Agent 角色，用于把熔断精确桥接到当前 Owner。 */
+        private final String ownerRole;
+
         /** 当前可用的 AgentScope MCP 委托。 */
         private volatile AgentTool delegate;
 
@@ -757,11 +843,18 @@ public final class McpSandboxConfiguration implements AutoCloseable {
          *
          * @param toolkit 工具所属父 Toolkit
          * @param serverName MCP client 名称
+         * @param ownerRole 工具所属父 Agent 角色
          * @param delegate 初始 AgentScope MCP 工具
          */
-        private CircuitBreakingMcpAgentTool(Toolkit toolkit, String serverName, AgentTool delegate) {
+        private CircuitBreakingMcpAgentTool(
+                Toolkit toolkit,
+                String serverName,
+                String ownerRole,
+                AgentTool delegate
+        ) {
             this.toolkit = Objects.requireNonNull(toolkit, "toolkit 不能为空");
             this.serverName = Objects.requireNonNull(serverName, "serverName 不能为空");
+            this.ownerRole = requireText(ownerRole, "ownerRole");
             this.delegate = Objects.requireNonNull(delegate, "delegate 不能为空");
         }
 
@@ -815,7 +908,11 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             } catch (IllegalArgumentException failure) {
                 return Mono.just(ToolResultBlock.error("AIO-Sandbox tool arguments invalid"));
             }
-            return delegate.callAsync(safeParam)
+            Mono<ToolResultBlock> delegated = delegate.callAsync(safeParam);
+            if ("sandbox_execute_bash".equals(getName())) {
+                delegated = delegated.timeout(shellTransportTimeout(safeParam));
+            }
+            return delegated
                     .map(CircuitBreakingMcpAgentTool::normalizeResult)
                     .map(result -> {
                         if (isConnectionFailure(result)) {
@@ -845,6 +942,7 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             }
             Map<String, Object> input = new LinkedHashMap<>(param.getInput());
             input.put("new_session", false);
+            normalizeShellTimeout(input);
             workspacePathMapping.ifPresent(mapping -> normalizeWorkingDirectory(input, mapping));
             Map<String, Object> safeInput = Collections.unmodifiableMap(input);
             ToolUseBlock originalUse = Objects.requireNonNull(param.getToolUseBlock(), "toolUseBlock 不能为空");
@@ -860,6 +958,39 @@ public final class McpSandboxConfiguration implements AutoCloseable {
                     .toolUseBlock(safeUse)
                     .input(safeInput)
                     .build();
+        }
+
+        /**
+         * 为 Bash 注入有界命令超时；非法类型在本地作为参数错误返回且不触发熔断。
+         *
+         * @param input 待委托的可变参数副本
+         */
+        private static void normalizeShellTimeout(Map<String, Object> input) {
+            Object rawTimeout = input.get("timeout");
+            if (rawTimeout == null) {
+                input.put("timeout", DEFAULT_SHELL_TIMEOUT_SECONDS);
+                return;
+            }
+            if (!(rawTimeout instanceof Number number)) {
+                throw new IllegalArgumentException("sandbox_execute_bash.timeout 必须为数字");
+            }
+            double numericTimeout = number.doubleValue();
+            if (!Double.isFinite(numericTimeout) || numericTimeout <= 0) {
+                throw new IllegalArgumentException("sandbox_execute_bash.timeout 必须大于零");
+            }
+            int boundedTimeout = (int) Math.min(Math.ceil(numericTimeout), MAX_SHELL_TIMEOUT_SECONDS);
+            input.put("timeout", boundedTimeout);
+        }
+
+        /**
+         * 根据已归一化命令时限计算 Java 传输上限，防止 MCP 永不返回。
+         *
+         * @param param 已归一化的 Bash 调用
+         * @return 命令时限加固定传输宽限
+         */
+        private static Duration shellTransportTimeout(ToolCallParam param) {
+            Number timeout = (Number) param.getInput().get("timeout");
+            return Duration.ofSeconds(timeout.longValue()).plus(SHELL_TRANSPORT_GRACE);
         }
 
         /**
@@ -1025,6 +1156,7 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             return new CircuitHealth(
                     serverName,
                     getName(),
+                    ownerRole,
                     state.get(),
                     consecutiveFailures.get(),
                     totalFailures.get(),
@@ -1059,6 +1191,7 @@ public final class McpSandboxConfiguration implements AutoCloseable {
      *
      * @param serverName MCP 服务逻辑名称
      * @param toolName 工具名称
+     * @param ownerRole 工具所属父 Agent 角色
      * @param state 当前熔断状态
      * @param consecutiveFailures 当前连续失败次数
      * @param totalFailures 生命周期失败总数
@@ -1067,6 +1200,7 @@ public final class McpSandboxConfiguration implements AutoCloseable {
     public record CircuitHealth(
             String serverName,
             String toolName,
+            String ownerRole,
             CircuitState state,
             int consecutiveFailures,
             int totalFailures,
@@ -1076,6 +1210,7 @@ public final class McpSandboxConfiguration implements AutoCloseable {
         public CircuitHealth {
             Objects.requireNonNull(serverName, "serverName 不能为空");
             Objects.requireNonNull(toolName, "toolName 不能为空");
+            Objects.requireNonNull(ownerRole, "ownerRole 不能为空");
             Objects.requireNonNull(state, "state 不能为空");
         }
     }
@@ -1116,6 +1251,20 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             throw new IllegalArgumentException(name + " 必须大于零");
         }
         return duration;
+    }
+
+    /**
+     * 校验内部角色和标识文本非空。
+     *
+     * @param value 待校验文本
+     * @param name 参数名称
+     * @return 去除首尾空白后的文本
+     */
+    private static String requireText(String value, String name) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(name + " 不能为空");
+        }
+        return value.trim().toLowerCase(Locale.ROOT);
     }
 
     /**

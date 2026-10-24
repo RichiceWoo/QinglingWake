@@ -653,6 +653,71 @@ class RealTeamE2EDriverTest {
                 .doesNotContain("不应出现在超时摘要");
     }
 
+    /** 业务进展应刷新空闲租约，但绝不能延长等待本身的硬总预算。 */
+    @Test
+    void shouldResetNoProgressLeaseWithoutExtendingHardDeadline() {
+        Instant startedAt = Instant.parse("2026-10-25T08:00:00Z");
+        RealTeamE2EDriver.WaitProgressTracker tracker = new RealTeamE2EDriver.WaitProgressTracker(
+                startedAt, Duration.ofMinutes(90), Duration.ofMinutes(12), "phase-a"
+        );
+
+        assertThat(tracker.noProgressExpired(startedAt.plus(Duration.ofMinutes(11)))).isFalse();
+        tracker.observe("phase-b", startedAt.plus(Duration.ofMinutes(11)));
+        assertThat(tracker.noProgressExpired(startedAt.plus(Duration.ofMinutes(22)))).isFalse();
+        assertThat(tracker.noProgressExpired(startedAt.plus(Duration.ofMinutes(23)))).isTrue();
+        assertThat(tracker.totalExpired(startedAt.plus(Duration.ofMinutes(89)))).isFalse();
+        assertThat(tracker.totalExpired(startedAt.plus(Duration.ofMinutes(90)))).isTrue();
+    }
+
+    /** Cron 心跳和 MCP 轮询变化不得伪造业务进展，事件或 mailbox 变化才允许续租。 */
+    @Test
+    void shouldExcludePeriodicRuntimeNoiseFromProgressFingerprint() {
+        Map<String, Object> first = Map.of(
+                "event_count", 5,
+                "mailbox_open", List.of(Map.of("id", "msg-review", "status", "in_progress")),
+                "cron_jobs", List.of(Map.of("last_run_at_ms", 1L)),
+                "mcp_health", List.of(Map.of("failures", 0))
+        );
+        Map<String, Object> heartbeatOnly = Map.of(
+                "event_count", 5,
+                "mailbox_open", List.of(Map.of("id", "msg-review", "status", "in_progress")),
+                "cron_jobs", List.of(Map.of("last_run_at_ms", 2L)),
+                "mcp_health", List.of(Map.of("failures", 1))
+        );
+        Map<String, Object> realProgress = Map.of(
+                "event_count", 6,
+                "mailbox_open", List.of(Map.of("id", "msg-review", "status", "done"))
+        );
+
+        assertThat(RealTeamE2EDriver.runtimeProgressFingerprint(heartbeatOnly))
+                .isEqualTo(RealTeamE2EDriver.runtimeProgressFingerprint(first));
+        assertThat(RealTeamE2EDriver.runtimeProgressFingerprint(realProgress))
+                .isNotEqualTo(RealTeamE2EDriver.runtimeProgressFingerprint(first));
+    }
+
+    /** 超过 watchdog 窗口仍无 dispatch、Agent 或恢复 wake 的 in_progress 邮件应直接报租约悬挂。 */
+    @Test
+    void shouldDescribeOrphanedMailboxAfterWatchdogRecoveryWindow() throws Exception {
+        Instant claimedAt = Instant.parse("2026-10-25T08:00:00Z");
+        JsonNode assignment = new ObjectMapper().readTree("""
+                {"id":"msg-review","project_id":"todo-mvp","to":"pm","type":"review_request",
+                "status":"in_progress","processing_since":"2026-10-25T08:00:00Z"}
+                """);
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> idleDispatch = Map.of(
+                "team:pm", new SerialDispatchRegistry.DispatchSnapshot(0, null)
+        );
+        Duration recoveryWindow = Duration.ofMinutes(11);
+
+        assertThat(RealTeamE2EDriver.orphanedMailboxReason(
+                List.of(assignment), idleDispatch, List.of(), List.of(),
+                claimedAt.plus(Duration.ofMinutes(10)), recoveryWindow
+        )).isNull();
+        assertThat(RealTeamE2EDriver.orphanedMailboxReason(
+                List.of(assignment), idleDispatch, List.of(), List.of(),
+                claimedAt.plus(Duration.ofMinutes(12)), recoveryWindow
+        )).contains("msg-review", "todo-mvp", "owner=pm", "active_dispatch=false", "recovery_wake=false");
+    }
+
     /** 失败证据必须脱敏 API Key、Authorization 与 Bearer，并限制异常长度。 */
     @Test
     void shouldRedactFailureEvidence() {

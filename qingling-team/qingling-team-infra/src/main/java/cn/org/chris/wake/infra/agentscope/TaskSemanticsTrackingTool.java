@@ -4,12 +4,14 @@ import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultState;
+import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.state.ToolContextState;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.ToolCallParam;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -31,6 +33,9 @@ final class TaskSemanticsTrackingTool implements AgentTool {
 
     /** 从 agent_spawn 响应中提取可用于后续 agent_send 的稳定 agent_key。 */
     private static final Pattern AGENT_KEY_PATTERN = Pattern.compile("(?m)^\\s*-?\\s*agent_key:\\s*(\\S+)\\s*$");
+
+    /** AgentScope 用零秒同步等待表示从调用开始就交由 TaskRepository 异步执行。 */
+    private static final int BACKGROUND_TIMEOUT_SECONDS = 0;
 
     /** 保留全部原始工具行为和 schema 的委托。 */
     private final AgentTool delegate;
@@ -111,10 +116,11 @@ final class TaskSemanticsTrackingTool implements AgentTool {
         TaskSemanticsRegistry.TaskKind taskKind = "agent_spawn".equals(getName())
                 ? TaskSemanticsRegistry.TaskKind.SPAWN
                 : TaskSemanticsRegistry.TaskKind.SEND;
+        ToolCallParam asynchronousParam = forceBackgroundExecution(param);
         String agentId = resolveAgentId(param);
         if (agentId == null) {
-            return delegate.callAsync(param).doOnNext(result -> recordCreatedTask(
-                    result, taskKind, param, null
+            return delegate.callAsync(asynchronousParam).doOnNext(result -> recordCreatedTask(
+                    result, taskKind, asynchronousParam, null
             ));
         }
         if (taskKind == TaskSemanticsRegistry.TaskKind.SPAWN) {
@@ -128,13 +134,32 @@ final class TaskSemanticsTrackingTool implements AgentTool {
         if (!decision.acquired()) {
             return Mono.just(deduplicatedResult(param, agentId, decision.activeTaskId()));
         }
-        return delegate.callAsync(param)
-                .doOnNext(result -> recordCreatedTask(result, taskKind, param, agentId))
+        return delegate.callAsync(asynchronousParam)
+                .doOnNext(result -> recordCreatedTask(result, taskKind, asynchronousParam, agentId))
                 .doFinally(signal -> {
                     if (signal != SignalType.CANCEL) {
                         registry.release(param.getRuntimeContext(), agentId);
                     }
                 });
+    }
+
+    /**
+     * 强制 spawn/send 从一开始返回后台 task，避免模型传入长 timeout 后撞上核心五分钟工具上限。
+     *
+     * @param param 原始工具调用参数
+     * @return 仅把 timeout_seconds 归一化为零的新参数
+     */
+    private static ToolCallParam forceBackgroundExecution(ToolCallParam param) {
+        Map<String, Object> input = new LinkedHashMap<>(param.getInput());
+        input.put("timeout_seconds", BACKGROUND_TIMEOUT_SECONDS);
+        ToolUseBlock original = param.getToolUseBlock();
+        ToolUseBlock normalized = new ToolUseBlock(
+                original.getId(), original.getName(), input, original.getMetadata()
+        );
+        return ToolCallParam.builder(param)
+                .toolUseBlock(normalized)
+                .input(Map.copyOf(input))
+                .build();
     }
 
     /**

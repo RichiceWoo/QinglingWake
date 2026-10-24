@@ -204,6 +204,7 @@
 | Task 8 父 dispatch、assignment 与测试收集加固（2026-10-19） | 代码与非 E2E 验证完成；等待用户确认 | `AgentScopeAgentGateway.java`、`FileMailboxRepository.java`、`MailboxLeaseWatchdog.java`、`RealTeamE2EDriver.java`、`McpProjectTestRunner.java`、`RuntimeLifecycle.java`、`QinglingTeamProperties.java`、角色模板及对应测试 | 父回复只有在最新逻辑子任务全部终态后才能结束 dispatch，FAILED/CANCELLED 直接类型化失败；父角色 session JSONL 提供独立真实进度，成功子任务后父调用静默 5 分钟进入 `PARENT_STALLED` 并复用 incident 恢复/BLOCKED 链。开放 `task_assign` 以 project/stage/from/to 原子复用，恢复指令刷新原邮件；`clarification_answer` 不再生成第二个 task assignment；watchdog 同时要求 dispatch 与真实父 Agent 均空闲。Driver 直接报告父停滞和重复开放 assignment；shutdown 使用独立 30 秒 drain。Test Runner 先以 30 秒 collect-only 验证导入，再以 240 秒执行正式覆盖率测试；RD 模板要求测试只引用真实实现符号。定向 76 项及仓储边界 12 项通过，`mvn verify` 263 项通过，零模型真实 Docker 1 IT 在 15.39 秒通过；未运行 E2E |
 | Task 8 P0/P1 修复后单次 E2E（2026-10-20） | 未完成；恢复竞态产生重复 continuation，Driver 再次退化为 QA 文件超时 | `target/e2e-evidence/happy-path/{summary.json,failure-summary.json,model-selection.json}`、`target/e2e-workspace/.qingling-test-runs/*`、`target/e2e-workspace/rd/team:rd/agents/{rd,code_impl}`、本需求四份文档 | 仅运行一次干净的显式 `qwen3.8-flash happy-path`，未重试或启动后三个场景。workflow 完成 checkpoint、PM、RD 技术设计并进入 `CODE_IMPLEMENTATION/RD`；初始 `code_impl` 为 COMPLETED/delivered，唯一入口为 `code/main.py`。6 个 Docker Test Runner execution 均真实 `FINISHED/exit_code=1`，最好达到 27 collected、24 passed、coverage 97%，工具结果正确返回 `TEST_FAILED/PYTEST_FAILURE`。但查询在 `RUNNING` 进程已退出、原子 `exit_code` 尚未可见的短窗口把同一 execution 先报为 `RESULT_UNAVAILABLE`，留下 3 条 attempt=1 RECOVERING incident；恢复后的业务终态没有撤销临时 incident，且按 execution ID 计数使同类故障始终无法进入 BLOCKED。两个延迟完成的后台 `agent_spawn` 又绕过同 session 单飞，形成两个并发 continuation；Driver 既未识别重复非终态子任务，也未把 RECOVERING incident 视为终止条件，最终仍报告等待 `qa/test_plan.md` 30 分钟超时。Failsafe 1 failure、0 errors、0 skipped，场景约 45 分 54 秒，Maven 46 分 04 秒；关闭后遗留任务持久化为 CANCELLED/FAILED，宿主与容器无 pytest/pip/tmux/Maven/Java 残留 |
 | Task 8 终态竞态与 late-arrival continuation 修复（2026-10-21） | 代码与全部非 E2E 门禁完成；按用户要求暂停 E2E | `AgentExecutionException.java`、`McpProjectTestRunner.java`、`ProjectTestAgentTool.java`、`TaskSemanticsRegistry.java`、`TaskSemanticsTrackingTool.java`、`AgentScopeAgentGateway.java`、`DeterministicWorkflowTools.java`、`RealTeamE2EDriver.java` 及对应测试 | Test Runner 在 runner 退出但退出码尚未原子落盘时进入最长 5 秒 FINALIZING 宽限，仅宽限耗尽才判 ORPHANED；同一 execution 恢复到 SUCCESS/TEST_FAILED 时不再写入临时 RECOVERING。恢复预算按 project/stage/Owner/tool/稳定失败指纹跨 execution 共享，第二次同类基础设施失败进入 BLOCKED。外层取消的 spawn/send 保留 6 分钟有界单飞占位，直到延迟任务可由 TaskRepository 识别；Gateway 对同 agent 的多个未终态任务抛出 `DUPLICATE_CHILD_TASK` 并结束父 dispatch。Driver 直接报告重复 continuation 或多个 RECOVERING execution，不再退化为下游文件超时。扩展定向 92 项、`mvn verify` 270 项和零模型真实 Docker 1 IT 全部通过；未加载 E2E profile、未调用百炼 |
+| Task 8 阶段进度租约与后台任务语义修复（2026-10-25） | 代码与全部非 E2E 门禁完成；等待真实 E2E 复核 | `TaskSemanticsTrackingTool.java`、`TaskSemanticsTrackingToolTest.java`、`RealTeamE2EDriver.java`、`RealTeamE2EDriverTest.java`、本需求四份文档 | spawn/send 的模型长等待参数在 Java 边界统一归零并同步 ToolUse content，从调用起即后台执行，消除固定 PT5M 外层超时。Driver 使用 90 分钟硬总预算和约 12 分钟真实无进展租约；进展指纹包含事件、开放 mailbox、dispatch 和 AgentScope 活动，不包含 Cron/MCP 周期噪声。mailbox 悬挂阈值由 watchdog 默认租约、扫描间隔及恢复宽限派生，恢复链未获得机会前不得误报。定向 38 项、默认 311 项与零模型真实 Docker 1 IT 均通过；本轮未运行真实 E2E，Task 8、Task 9 和父 Task 18 保持未完成 |
 
 ### 11.1 跨语言迁移根因评估（2026-10-10）
 
@@ -271,6 +272,16 @@ RUNNING 与父回合真实进度租约从 5 分钟收紧到 4 分 30 秒，确�
 RD/QA 完成门禁把 Python 唯一入口收紧为 `code/main.py`：拒绝任何 `code/app/main.py`，并扫描 `code/tests/**/*.py` 与 `qa/contract_tests/**/*.py`，拒绝 `from app ...` / `import app ...`。RD 模板同步要求 pytest 以 `code/` 为根，使用 `from main import app` 或直接导入顶层模块。
 
 定向测试通过 71 项；完整 `mvn verify` 通过 307 项（domain 44、app 38、infra 142、adapter 13、starter 70），耗时 17.928 秒；零模型真实 Docker `RealSandboxToolContractIT` 通过 1 IT（17.50 秒，Maven 33.324 秒）。`git diff --check` 通过。本轮没有调用百炼或启动 E2E，Task 8、Task 9 与父需求 Task 18 继续保持未完成。
+
+### 12.6 2026-10-24 修复后单次真实 E2E 结论
+
+按用户要求只执行一次干净 `happy-path`，显式固定 DashScope `qwen3.8-flash`，未自动重试或启动后三个场景。流程完成 checkpoint、PM 产品设计、RD 技术设计并进入代码实现；唯一入口为 `code/main.py`，没有生成 `code/app/main.py`。Test Runner 从早期 `exit_code=5`、连续 6 次 `exit_code=1` 最终修复到 `FINISHED/exit_code=0`。期间一次 `agent_send` 达到 AgentScope 固定 `PT5M`，但 assignment 被释放且后续执行继续，未形成 MCP incident；四路 circuit 始终 `CLOSED/0 failures`。
+
+RD 首次完成回报因 `content` 不是结构化 JSON 被确定性门禁拒绝，随后成功重发并触发 PM/QA 双评审。QA 在终止前 29 秒提交 `changes_requested`，指出列表排序实现与测试共同偏离设计契约；PM review 当时仍为 `in_progress`，持续约 10 分钟，所有 dispatch 已空闲且 AgentScope 无活动回合。
+
+本次直接失败是 Driver 的绝对阶段预算：等待 `QA_TEST_DESIGN` 的 `PT30M` 在代码修复、完成证据重发和评审仍持续产生真实进度时没有刷新，最终在 event 12 刚落盘后仍按 deadline 终止。因此新的待修复点是“阶段总预算与真实无进展租约未分离”，以及 Driver 对仍有近期事件/评审进展的流程没有延期；不能通过简单扩大 30 分钟掩盖。
+
+Failsafe 为 1 test、1 failure、0 errors、0 skipped，E2E 2584 秒，Maven 总耗时 43 分 19 秒。finally 保存 `summary.json`/`failure-summary.json`，关闭后 dispatch pending=0、AgentScope active=0、AIO shell session=0，容器内无 pytest/pip/tmux，宿主无 E2E Maven/Java 残留。Task 8、Task 9 与父 Task 18 继续保持未完成。
 
 ## 13. 确认记录（HARD-GATE）
 

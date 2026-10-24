@@ -3,6 +3,7 @@ package cn.org.chris.wake.starter.e2e;
 import cn.org.chris.wake.adapter.api.TestApiController;
 import cn.org.chris.wake.adapter.api.dto.TestRequest;
 import cn.org.chris.wake.adapter.api.dto.TestResponse;
+import cn.org.chris.wake.app.mailbox.MailboxLeaseWatchdog;
 import cn.org.chris.wake.domain.gateway.CronJobRepository;
 import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.domain.model.CronJob;
@@ -28,6 +29,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -49,8 +51,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 final class RealTeamE2EDriver implements AutoCloseable {
 
-    /** 单个流水线阶段允许的最长真实执行时间。 */
-    private static final Duration STAGE_TIMEOUT = Duration.ofMinutes(30);
+    /** 单个流水线阶段的硬总预算，防止健康但较慢的真实模型被固定半小时误杀。 */
+    private static final Duration STAGE_TIMEOUT = Duration.ofMinutes(90);
 
     /** 等待文件和事件时的轮询间隔。 */
     private static final Duration POLL_INTERVAL = Duration.ofSeconds(2);
@@ -60,6 +62,14 @@ final class RealTeamE2EDriver implements AutoCloseable {
 
     /** Driver 在 Gateway 停滞租约之后额外留给 incident 恢复链启动的固定宽限。 */
     private static final Duration GATEWAY_RECOVERY_START_GRACE = Duration.ofSeconds(60);
+
+    /** mailbox 租约到期后留给下一次 watchdog 扫描和恢复唤醒落盘的宽限。 */
+    private static final Duration MAILBOX_RECOVERY_GRACE = MailboxLeaseWatchdog.DEFAULT_LEASE_TIMEOUT
+            .plus(MailboxLeaseWatchdog.DEFAULT_SCAN_INTERVAL)
+            .plus(GATEWAY_RECOVERY_START_GRACE);
+
+    /** 阶段等待期间允许的最长真实无进展时间，必须晚于 mailbox 自动恢复窗口。 */
+    private static final Duration STAGE_NO_PROGRESS_TIMEOUT = MAILBOX_RECOVERY_GRACE.plusSeconds(30);
 
     /** Cron dispatch 已失败且没有恢复动作时允许状态持久化收敛的短暂窗口。 */
     private static final Duration IDLE_CRON_FAILURE_GRACE = Duration.ofSeconds(20);
@@ -128,6 +138,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
 
     /** 最近一次轮询采集的脱敏运行时诊断。 */
     private Map<String, Object> lastRuntimeSnapshot = Map.of();
+
+    /** 最近一次轮询提取的真实进展指纹，不包含周期 Cron 心跳和缓存噪声。 */
+    private String lastRuntimeProgressFingerprint = "";
 
     /**
      * 保存已启动的真实运行时依赖；调用方应使用 {@link #start(String)}。
@@ -263,7 +276,11 @@ final class RealTeamE2EDriver implements AutoCloseable {
         while (!fileExists("design/product_spec.md") && approvals < 3) {
             approvals++;
             say("同意当前需求版本，请继续严格按 SOP 推进产品设计、研发、测试和交付。");
-            if (waitUpTo(() -> fileExists("design/product_spec.md"), Duration.ofMinutes(8))) {
+            if (waitUpTo(
+                    () -> fileExists("design/product_spec.md"),
+                    Duration.ofMinutes(8),
+                    "product spec approval attempt"
+            )) {
                 break;
             }
         }
@@ -795,6 +812,14 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     now,
                     IDLE_CRON_FAILURE_GRACE
             );
+            String orphanedMailbox = orphanedMailboxReason(
+                    mailSnapshot,
+                    dispatchStates,
+                    agentDiagnostics,
+                    cronSnapshot,
+                    now,
+                    MAILBOX_RECOVERY_GRACE
+            );
             Map<String, Long> mailboxStatuses = new LinkedHashMap<>();
             for (String status : List.of("unread", "in_progress", "done")) {
                 mailboxStatuses.put(status, mailSnapshot.stream()
@@ -818,9 +843,12 @@ final class RealTeamE2EDriver implements AutoCloseable {
             snapshot.put("cron_failure", cronFailure == null ? "" : sanitizeEvidenceText(cronFailure));
             snapshot.put("mailbox_conflict", mailboxConflict == null
                     ? "" : sanitizeEvidenceText(mailboxConflict));
+            snapshot.put("orphaned_mailbox", orphanedMailbox == null
+                    ? "" : sanitizeEvidenceText(orphanedMailbox));
             snapshot.put("hanging_dispatch", hangingDispatch == null
                     ? "" : sanitizeEvidenceText(hangingDispatch));
             lastRuntimeSnapshot = Map.copyOf(snapshot);
+            lastRuntimeProgressFingerprint = runtimeProgressFingerprint(lastRuntimeSnapshot);
             if (incident != null) {
                 throw new AssertionError("不可恢复工具基础设施故障：" + incident);
             }
@@ -835,6 +863,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
             }
             if (mailboxConflict != null) {
                 throw new AssertionError("不可恢复 mailbox 重复任务分派：" + mailboxConflict);
+            }
+            if (orphanedMailbox != null) {
+                throw new AssertionError("不可恢复 mailbox 租约悬挂：" + orphanedMailbox);
             }
             if (hangingDispatch != null) {
                 throw new AssertionError("不可恢复 AgentScope dispatch 悬挂：" + hangingDispatch);
@@ -1203,6 +1234,68 @@ final class RealTeamE2EDriver implements AutoCloseable {
                 && job.schedule().kind() == CronJob.ScheduleKind.AT
                 && route.equals(job.payload().routingKey())
                 && (job.schedule().atMs() != null || job.state().nextRunAtMs() != null));
+    }
+
+    /**
+     * 检测已超过 watchdog 恢复窗口、却既无执行者也无恢复唤醒的在途 mailbox 租约。
+     *
+     * @param mailSnapshot 当前项目邮箱快照
+     * @param dispatchStates 各角色 dispatch 快照
+     * @param agentDiagnostics 当前活跃 AgentScope 回合
+     * @param cronSnapshot 当前 Cron 快照
+     * @param now 当前时间
+     * @param recoveryWindow watchdog 应完成回收与调度的最大窗口
+     * @return 直接故障原因；租约仍可恢复或正在执行时为 null
+     */
+    static String orphanedMailboxReason(
+            List<JsonNode> mailSnapshot,
+            Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates,
+            List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics,
+            List<CronJob> cronSnapshot,
+            Instant now,
+            Duration recoveryWindow
+    ) {
+        for (JsonNode message : mailSnapshot) {
+            if (!"in_progress".equals(message.path("status").asText())) {
+                continue;
+            }
+            String owner = message.path("to").asText("");
+            String projectId = message.path("project_id").asText("");
+            String processingSince = message.path("processing_since").asText("");
+            if (owner.isBlank() || projectId.isBlank() || processingSince.isBlank()) {
+                continue;
+            }
+            Instant claimedAt;
+            try {
+                claimedAt = OffsetDateTime.parse(processingSince).toInstant();
+            } catch (RuntimeException malformedTimestamp) {
+                continue;
+            }
+            Duration age = Duration.between(claimedAt, now);
+            if (age.compareTo(recoveryWindow) <= 0) {
+                continue;
+            }
+            String route = "team:" + owner;
+            SerialDispatchRegistry.DispatchSnapshot dispatch = dispatchStates.get(route);
+            if (dispatch != null && (dispatch.active() || dispatch.pendingCount() > 0)) {
+                continue;
+            }
+            boolean activeAgent = agentDiagnostics.stream().anyMatch(diagnostic ->
+                    route.equals(diagnostic.routingKey())
+                            && projectId.equals(diagnostic.projectId())
+            );
+            if (activeAgent || hasScheduledRecoveryWake(cronSnapshot, route)) {
+                continue;
+            }
+            return "message_id=" + message.path("id").asText("unknown")
+                    + ", project_id=" + projectId
+                    + ", owner=" + owner
+                    + ", type=" + message.path("type").asText("unknown")
+                    + ", processing_since=" + processingSince
+                    + ", lease_age_seconds=" + age.toSeconds()
+                    + ", active_dispatch=false, active_agent=false, recovery_wake=false";
+        }
+        return null;
     }
 
     /**
@@ -1610,6 +1703,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
                 "terminal_incident",
                 "mcp_failure",
                 "cron_failure",
+                "orphaned_mailbox",
                 "hanging_dispatch"
         )) {
             if (snapshot.containsKey(key)) {
@@ -1619,15 +1713,68 @@ final class RealTeamE2EDriver implements AutoCloseable {
         return sanitizeEvidenceText(summary.toString());
     }
 
-    /** 在给定上限内轮询条件；超时返回 false 供有限重试使用。 */
-    private boolean waitUpTo(BooleanSupplier condition, Duration timeout) throws InterruptedException {
-        long deadline = System.nanoTime() + timeout.toNanos();
-        while (System.nanoTime() < deadline) {
+    /**
+     * 提取只随真实业务进度变化的稳定指纹，排除 Cron 心跳和 MCP 健康轮询噪声。
+     *
+     * @param snapshot 完整运行时快照
+     * @return 可用于刷新无进展租约的稳定指纹
+     */
+    static String runtimeProgressFingerprint(Map<String, Object> snapshot) {
+        Map<String, Object> progress = new LinkedHashMap<>();
+        for (String key : List.of(
+                "event_count",
+                "mailbox_statuses",
+                "mailbox_open",
+                "dispatch_states",
+                "agentscope_active",
+                "terminal_incident",
+                "recovering_incident_conflict",
+                "mailbox_conflict",
+                "orphaned_mailbox",
+                "hanging_dispatch"
+        )) {
+            if (snapshot.containsKey(key)) {
+                progress.put(key, snapshot.get(key));
+            }
+        }
+        return progress.toString();
+    }
+
+    /**
+     * 在硬总预算内轮询条件，并在真实业务长期无变化时给出直接诊断。
+     *
+     * @param condition 完成条件
+     * @param timeout 硬总预算
+     * @param label 当前等待的业务阶段标签
+     * @return 条件在硬总预算内满足时为 true
+     * @throws InterruptedException 轮询线程被中断
+     */
+    private boolean waitUpTo(BooleanSupplier condition, Duration timeout, String label)
+            throws InterruptedException {
+        Instant started = Instant.now();
+        assertRuntimeHealthy();
+        WaitProgressTracker tracker = new WaitProgressTracker(
+                started,
+                timeout,
+                STAGE_NO_PROGRESS_TIMEOUT,
+                lastRuntimeProgressFingerprint
+        );
+        if (condition.getAsBoolean()) {
+            return true;
+        }
+        while (!tracker.totalExpired(Instant.now())) {
+            TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL.toMillis());
             assertRuntimeHealthy();
+            Instant observedAt = Instant.now();
+            tracker.observe(lastRuntimeProgressFingerprint, observedAt);
             if (condition.getAsBoolean()) {
                 return true;
             }
-            TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL.toMillis());
+            if (tracker.noProgressExpired(observedAt)) {
+                throw new AssertionError("等待真实 E2E 无进展超时: " + label
+                        + "，no_progress_timeout=" + STAGE_NO_PROGRESS_TIMEOUT
+                        + "，runtime=" + runtimeTimeoutSummary(lastRuntimeSnapshot));
+            }
         }
         assertRuntimeHealthy();
         return condition.getAsBoolean();
@@ -1635,10 +1782,73 @@ final class RealTeamE2EDriver implements AutoCloseable {
 
     /** 在给定上限内等待条件，超时必须失败并标出业务阶段。 */
     private void waitUntil(BooleanSupplier condition, Duration timeout, String label) throws Exception {
-        if (!waitUpTo(condition, timeout)) {
+        if (!waitUpTo(condition, timeout, label)) {
             throw new AssertionError("等待真实 E2E 阶段超时: " + label
                     + "，timeout=" + timeout
                     + "，runtime=" + runtimeTimeoutSummary(lastRuntimeSnapshot));
+        }
+    }
+
+    /** 跟踪单次等待的硬截止时间与可由真实进度续租的无进展截止时间。 */
+    static final class WaitProgressTracker {
+
+        /** 本次等待开始时间。 */
+        private final Instant startedAt;
+
+        /** 不可由进度延长的硬总预算。 */
+        private final Duration totalTimeout;
+
+        /** 可由真实进度刷新的空闲预算。 */
+        private final Duration noProgressTimeout;
+
+        /** 最近一次真实进展时间。 */
+        private Instant lastProgressAt;
+
+        /** 最近一次真实进展指纹。 */
+        private String fingerprint;
+
+        /**
+         * 创建等待进度跟踪器。
+         *
+         * @param startedAt 等待开始时间
+         * @param totalTimeout 硬总预算
+         * @param noProgressTimeout 无进展预算
+         * @param initialFingerprint 初始进展指纹
+         */
+        WaitProgressTracker(
+                Instant startedAt,
+                Duration totalTimeout,
+                Duration noProgressTimeout,
+                String initialFingerprint
+        ) {
+            this.startedAt = startedAt;
+            this.totalTimeout = totalTimeout;
+            this.noProgressTimeout = noProgressTimeout;
+            this.lastProgressAt = startedAt;
+            this.fingerprint = initialFingerprint;
+        }
+
+        /**
+         * 观察新指纹；只有真实变化才刷新空闲租约。
+         *
+         * @param observedFingerprint 本轮进展指纹
+         * @param observedAt 本轮观察时间
+         */
+        void observe(String observedFingerprint, Instant observedAt) {
+            if (!java.util.Objects.equals(fingerprint, observedFingerprint)) {
+                fingerprint = observedFingerprint;
+                lastProgressAt = observedAt;
+            }
+        }
+
+        /** 判断硬总预算是否到期。 */
+        boolean totalExpired(Instant now) {
+            return Duration.between(startedAt, now).compareTo(totalTimeout) >= 0;
+        }
+
+        /** 判断真实无进展预算是否到期。 */
+        boolean noProgressExpired(Instant now) {
+            return Duration.between(lastProgressAt, now).compareTo(noProgressTimeout) >= 0;
         }
     }
 

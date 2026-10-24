@@ -127,6 +127,48 @@ class TaskSemanticsTrackingToolTest {
         assertThat(sendCalls).hasValue(0);
     }
 
+    /** spawn 与 send 的长同步等待参数必须在 Java 边界归零，避免后台调用撞上 PT5M。 */
+    @Test
+    void shouldForceSpawnAndSendIntoImmediateBackgroundExecution() {
+        FakeTaskRepository repository = new FakeTaskRepository();
+        TaskSemanticsRegistry registry = TaskSemanticsRegistry.forRepository(repository);
+        RuntimeContext context = RuntimeContext.builder()
+                .userId("team-rd")
+                .sessionId("session-background")
+                .build();
+        List<ToolCallParam> delegated = new ArrayList<>();
+        TaskSemanticsTrackingTool spawn = new TaskSemanticsTrackingTool(
+                new FakeAgentTool("agent_spawn", param -> {
+                    delegated.add(param);
+                    return ToolResultBlock.text("status: accepted\ntask_id: task-spawn");
+                }),
+                registry
+        );
+        TaskSemanticsTrackingTool send = new TaskSemanticsTrackingTool(
+                new FakeAgentTool("agent_send", param -> {
+                    delegated.add(param);
+                    return ToolResultBlock.text("status: accepted\ntask_id: task-send");
+                }),
+                registry
+        );
+
+        spawn.callAsync(toolParam(
+                context, "call-spawn-background", "agent_spawn",
+                Map.of("agent_id", "code_impl", "task", "实现", "timeout_seconds", 600)
+        )).block();
+        repository.tasks.clear();
+        send.callAsync(toolParam(
+                context, "call-send-background", "agent_send",
+                Map.of("agent_key", "agent:code:1", "message", "继续", "timeout_seconds", 600)
+        )).block();
+
+        assertThat(delegated).hasSize(2);
+        assertThat(delegated).allSatisfy(param -> {
+            assertThat(param.getInput()).containsEntry("timeout_seconds", 0);
+            assertThat(param.getToolUseBlock().getInput()).containsEntry("timeout_seconds", 0);
+        });
+    }
+
     /** 外层取消 spawn 后必须保留有界单飞占位，并在真实任务延迟出现后返回其 taskId。 */
     @Test
     void shouldKeepReservationUntilCancelledSpawnAppearsInRepository() {

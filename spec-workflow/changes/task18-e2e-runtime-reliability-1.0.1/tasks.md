@@ -200,6 +200,10 @@ project_id -> execution_id + status + exit_code + pytest_collected
 
 - **E2E 后续缺口修复（2026-10-24）**：Heartbeat 可从可信元数据、`new_mail` 或唯一 workflow Owner 安全恢复 project ID，并把它传播到 RuntimeContext、团队提示和 incident；Gateway 父进度快照统一记录 session/model/effective 时间及来源，Driver 对超时且缺少 Gateway 活动诊断的 orphan `team:*` dispatch 快速失败；AgentScope 状态存储为声明式子代理补齐 pending tool 的确定性错误结果且不重放工具；完成门禁与 RD 模板拒绝 `code/app/main.py` 和测试中的 `app` 包导入，只允许 `code/main.py` 唯一入口。定向 71 项、`mvn verify` 307 项及零模型真实 Docker 1 IT 均通过，`git diff --check` 通过。按用户要求未运行真实 E2E，因此 Task 8 继续保持未完成。
 
+- **修复后单次 E2E（2026-10-24）**：仅执行一次干净 `qwen3.8-flash happy-path`。流程完成 checkpoint、产品设计和技术设计；代码唯一入口正确，Test Runner 从 1 次 `exit_code=5`、6 次 `exit_code=1` 最终修复到 `exit_code=0`。一次 `agent_send PT5M` 后恢复链继续运行，四路 MCP 始终 CLOSED。RD 首次非结构化完成回报被门禁拒绝后成功重发，随后进入双评审；QA 在终止前 29 秒刚提交 changes_requested，PM review 仍 in_progress。Driver 的 `QA_TEST_DESIGN/PT30M` 绝对阶段预算没有随真实事件、测试和评审进度刷新，最终在 43 分 19 秒失败。未重试，关闭后无 session、dispatch 或孤儿进程；Task 8 保持未完成。
+
+- **阶段进度租约与后台任务语义修复（2026-10-25）**：`TaskSemanticsTrackingTool` 在 Java 工具边界将 `agent_spawn`、`agent_send` 的 `timeout_seconds` 强制归一为 0，并同步重建实际 `ToolUseBlock`，使模型请求从调用开始即进入 TaskRepository 后台执行，不再撞上 AgentScope 固定 `PT5M` 工具超时。`RealTeamE2EDriver` 将阶段等待拆分为 90 分钟硬总预算和由真实事件、mailbox、dispatch、AgentScope 进度刷新的 12 分钟无进展租约；Cron 心跳和 MCP 健康轮询不能伪造进展。Driver 从正式 watchdog 的 10 分钟租约、30 秒扫描间隔和 60 秒恢复宽限推导 mailbox 诊断窗口，只有超窗且无 dispatch、无活跃 Agent、无恢复 wake 时才直接报告租约悬挂。定向 38 项、`mvn verify` 311 项以及零模型真实 Docker 1 IT 全部通过；按用户要求未运行真实 E2E，Task 8 继续保持未完成。
+
 - [ ] 完成
 
 ## Task 9: 最终回归、质量审计与父需求回写

@@ -172,3 +172,20 @@
 - **唯一产物契约**：`TaskCompletionEvidenceGate` 对 RD、QA 同时拒绝 `code/app/main.py`，并扫描 `code/tests`、`qa/contract_tests` 拒绝 `from app` / `import app`。RD `AGENTS.md` 和 `code_impl` skill 明确 pytest 根目录、`from main import app` 与顶层模块导入规则。
 - **验证**：编译门禁通过；定向 71 项通过（5.907 秒）；完整 `mvn verify` 通过 307 项（17.928 秒）；零模型真实 Docker `RealSandboxToolContractIT` 通过 1 IT（17.50 秒，Maven 33.324 秒）；`git diff --check` 通过。
 - **范围**：按用户要求没有 source E2E 凭据、没有调用百炼、没有启动真实 E2E；未 commit、未 push，`../tmp.txt` 保持未触碰。Task 8、Task 9 与父需求 Task 18 均保持未完成。
+
+## 2026-10-24 项目上下文与 pending tool 修复后单次真实 E2E
+
+- **执行约束**：只运行一次干净 `happy-path`，DashScope 主/子 Agent 均为 `qwen3.8-flash`，未自动重试、未启动后三个场景，也未放宽断言。
+- **正常路径**：checkpoint、PM 产品设计、RD 技术设计均完成；代码只生成 `code/main.py`。真实 Test Runner 共 8 次：一次早期 `exit_code=5`、六次 `exit_code=1`、最后一次 `exit_code=0`，证明 RD 能持续依据业务失败修复。
+- **运行时表现**：一次 continuation 的 `agent_send` 达到 AgentScope 固定 `PT5M`，但 assignment 释放后流程继续，没有产生 MCP incident 或永久悬挂；四个 Owner circuit 全程 `CLOSED/0 failures`。
+- **完成与评审**：RD 首次 `task_done` 因 content 不是结构化 JSON 被门禁拒绝，第二次重发后进入 PM/QA 双评审。QA 在 09:47:08Z 提交 changes_requested，确认排序实现及对应测试一起违背 id DESC 契约；终止时 PM review 从 09:37:51Z 起仍为 in_progress，但所有 dispatch inactive、AgentScope active 为空。
+- **直接失败**：Driver 从更早的阶段等待开始累计 `QA_TEST_DESIGN/PT30M` 绝对预算，代码修复、完成证据重发、双评审和终止前 29 秒的新事件都没有刷新 deadline，最终报“等待真实 E2E 阶段超时”。因此应将“允许整个阶段完成的总预算”与“无真实进展租约”分离，以事件/session/mailbox 的真实推进刷新无进展判断；不得仅扩大超时。
+- **结果与清理**：Failsafe 1 failure、0 errors、0 skipped，E2E 2584 秒，Maven 43 分 19 秒。证据位于 `target/e2e-evidence/happy-path`；finally 后 dispatch pending=0、AgentScope active=0、AIO shell session=0，容器无 pytest/pip/tmux，宿主无 E2E Maven/Java 残留。Task 8、Task 9 和父 Task 18 保持未完成。
+
+## 2026-10-25 阶段进度租约与后台任务语义修复（未运行 E2E）
+
+- **父子任务固定超时**：`TaskSemanticsTrackingTool` 对 `agent_spawn`、`agent_send` 强制使用 `timeout_seconds=0`，并同时重建委托参数和 `ToolUseBlock` 输入。模型即使请求 600 秒同步等待，也会从调用开始返回后台 task；Java 仍通过 TaskRepository、单飞注册表和非阻塞 task snapshot 协调后续状态，不再等待到 AgentScope 固定 `PT5M`。
+- **阶段等待语义**：`RealTeamE2EDriver` 不再用单一 30 分钟绝对 deadline 判断长阶段。现在保留 90 分钟不可续期硬总预算，并使用晚于 mailbox 正式恢复窗口的约 12 分钟真实无进展租约；事件数、开放邮件状态、dispatch 和 AgentScope 父子进度会刷新租约，Cron heartbeat 与 MCP 健康轮询不会刷新。
+- **mailbox 直接诊断**：诊断阈值直接由 `MailboxLeaseWatchdog.DEFAULT_LEASE_TIMEOUT`、`DEFAULT_SCAN_INTERVAL` 和恢复宽限组成。`in_progress` 邮件只有在超出完整窗口且不存在活跃 dispatch、对应项目/Owner Agent 回合或一次性恢复 wake 时，才以 `mailbox 租约悬挂` 直接失败；正常 watchdog 恢复不会再被 Driver 抢跑。
+- **验证**：定向 `TaskSemanticsTrackingToolTest,RealTeamE2EDriverTest,MailboxLeaseWatchdogTest` 通过 38 项（3.077 秒）；完整 `mvn verify` 通过 311 项（18.978 秒）；零模型真实 Docker `RealSandboxToolContractIT` 通过 1 IT（17.48 秒，Maven 32.525 秒）；`git diff --check` 通过。
+- **范围**：按用户要求没有启动真实 E2E、没有调用百炼、没有 commit 或 push。Task 8、Task 9 与父需求 Task 18 均保持未完成；工作区既有 `CompletableFutureDemo.java` 和 `../tmp.txt` 未触碰。

@@ -15,15 +15,19 @@ import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.tools.McpServerConfig;
 import io.agentscope.harness.agent.tools.McpServerRegistrationResult;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Flux;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -441,6 +445,192 @@ class AgentScopeAgentGatewayTest {
         assertThat(registrations).hasValue(2);
         assertThat(sandbox.hasUnavailableConnection("rd")).isFalse();
         assertThat(cancellations).hasValue(1);
+    }
+
+    /** 流式模型活动持续刷新时，唯一 RD 父回合不得被静态 session 日志误判为停滞。 */
+    @Test
+    void shouldKeepSingleParentAliveWhileModelActivityContinues() {
+        ModelActivityRegistry registry = new ModelActivityRegistry();
+        ActivityRuntime runtime = new ActivityRuntime(ignored -> Flux.interval(Duration.ofMillis(5))
+                .doOnNext(sequence -> registry.recordActivity("rd"))
+                .then(Mono.never()));
+        AgentScopeAgentGateway gateway = activityAwareGateway(Map.of("rd", runtime), registry);
+
+        CompletableFuture<AgentReply> future = gateway.execute(request("rd", "session-streaming"));
+
+        assertThatThrownBy(() -> future.get(150, TimeUnit.MILLISECONDS))
+                .isInstanceOf(TimeoutException.class);
+        assertThat(gateway.activeExecutionDiagnostics()).singleElement().satisfies(diagnostic -> {
+            assertThat(diagnostic.parentProgressSource()).isEqualTo("MODEL_STREAM");
+            assertThat(diagnostic.parentModelActivityAt()).isNotNull();
+            assertThat(diagnostic.parentLastProgressAt())
+                    .isEqualTo(diagnostic.parentModelActivityAt())
+                    .isAfterOrEqualTo(diagnostic.parentSessionProgressAt());
+        });
+        assertThat(future.cancel(true)).isTrue();
+        assertThat(runtime.cancellations).hasValue(1);
+    }
+
+    /** 模型活动停止刷新后，静态父回合仍必须按 PARENT_STALLED 类型终止。 */
+    @Test
+    void shouldFailParentAfterModelActivityStops() {
+        ModelActivityRegistry registry = new ModelActivityRegistry();
+        ActivityRuntime runtime = new ActivityRuntime(ignored -> Flux.interval(Duration.ofMillis(5))
+                .take(3)
+                .doOnNext(sequence -> registry.recordActivity("rd"))
+                .then(Mono.never()));
+        AgentScopeAgentGateway gateway = activityAwareGateway(Map.of("rd", runtime), registry);
+
+        CompletableFuture<AgentReply> future = gateway.execute(request("rd", "session-stopped"));
+
+        assertFailureType(future, AgentExecutionException.FailureType.PARENT_STALLED);
+    }
+
+    /** QA 的模型分片只能续租 QA，不能替没有活动的 RD 父回合续租。 */
+    @Test
+    void shouldAttributeModelActivityToOwningRoleOnly() {
+        ModelActivityRegistry registry = new ModelActivityRegistry();
+        ActivityRuntime rdRuntime = new ActivityRuntime(ignored -> Mono.never());
+        ActivityRuntime qaRuntime = new ActivityRuntime(ignored -> Flux.interval(Duration.ofMillis(5))
+                .doOnNext(sequence -> registry.recordActivity("qa"))
+                .then(Mono.never()));
+        AgentScopeAgentGateway gateway = activityAwareGateway(
+                Map.of("rd", rdRuntime, "qa", qaRuntime), registry
+        );
+
+        CompletableFuture<AgentReply> rdFuture = gateway.execute(request("rd", "session-rd-static"));
+        CompletableFuture<AgentReply> qaFuture = gateway.execute(request("qa", "session-qa-streaming"));
+
+        assertFailureType(rdFuture, AgentExecutionException.FailureType.PARENT_STALLED);
+        assertThatThrownBy(() -> qaFuture.get(100, TimeUnit.MILLISECONDS))
+                .isInstanceOf(TimeoutException.class);
+        assertThat(qaFuture.cancel(true)).isTrue();
+    }
+
+    /** 同角色并发父回合不得采信角色级活动，以免一个 session 给另一个 session 续租。 */
+    @Test
+    void shouldIgnoreRoleActivityWhenTwoParentSessionsAreActive() {
+        ModelActivityRegistry registry = new ModelActivityRegistry();
+        ActivityRuntime runtime = new ActivityRuntime(ignored -> Mono.never());
+        AgentScopeAgentGateway gateway = activityAwareGateway(Map.of("rd", runtime), registry);
+        CompletableFuture<AgentReply> first = gateway.execute(request("rd", "session-first"));
+        CompletableFuture<AgentReply> second = gateway.execute(request("rd", "session-second"));
+        registry.recordActivity("rd");
+        Instant modelActivityAt = registry.lastActivity("rd").orElseThrow();
+
+        assertThat(gateway.activeExecutionDiagnostics())
+                .allSatisfy(diagnostic -> assertThat(diagnostic.parentLastProgressAt())
+                        .isBefore(modelActivityAt));
+        assertFailureType(first, AgentExecutionException.FailureType.PARENT_STALLED);
+        assertFailureType(second, AgentExecutionException.FailureType.PARENT_STALLED);
+    }
+
+    /** 宽限复查时故障自行消失应继续父回合，不得由 Reactor null mapper 触发 NPE。 */
+    @Test
+    void shouldKeepParentAliveWhenFailureDisappearsDuringGrace() {
+        AtomicInteger diagnosticReads = new AtomicInteger();
+        ActivityRuntime runtime = new ActivityRuntime(ignored -> Mono.never()) {
+            /** 首次返回取消终态，后续复查返回健康空列表。 */
+            @Override
+            public List<AgentScopeAgentGateway.ChildTaskDiagnostic> taskDiagnostics(RuntimeContext context) {
+                if (diagnosticReads.incrementAndGet() == 1) {
+                    Instant now = Instant.now();
+                    return List.of(new AgentScopeAgentGateway.ChildTaskDiagnostic(
+                            "transient", "code_impl", "CANCELLED", true, now,
+                            "SEND", "MODEL_REQUESTED", now
+                    ));
+                }
+                return List.of();
+            }
+
+            /** 持续提供父日志活动，避免测试被真正的父停滞条件干扰。 */
+            @Override
+            public Instant parentProgressAt(RuntimeContext context) {
+                return Instant.now();
+            }
+        };
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime), AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                McpSandboxConfiguration.disabled(), Duration.ofMillis(5), Duration.ofMillis(20),
+                Duration.ofSeconds(1), new ModelActivityRegistry()
+        );
+
+        CompletableFuture<AgentReply> future = gateway.execute(request("rd", "session-transient"));
+
+        assertThatThrownBy(() -> future.get(100, TimeUnit.MILLISECONDS))
+                .isInstanceOf(TimeoutException.class);
+        assertThat(future.cancel(true)).isTrue();
+    }
+
+    /** 使用短时序和共享活动注册表创建零模型 Gateway。 */
+    private static AgentScopeAgentGateway activityAwareGateway(
+            Map<String, AgentScopeAgentGateway.AgentRuntime> runtimes,
+            ModelActivityRegistry registry
+    ) {
+        return new AgentScopeAgentGateway(
+                runtimes, AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                McpSandboxConfiguration.disabled(), Duration.ofMillis(5), Duration.ofMillis(5),
+                Duration.ofMillis(40), registry
+        );
+    }
+
+    /** 创建只包含角色和稳定路由属性的父请求。 */
+    private static AgentRequest request(String role, String sessionId) {
+        return new AgentRequest(
+                role, "team-" + role, sessionId, "执行任务", List.of(),
+                Map.of("routingKey", "team:" + role, "projectId", "todo-mvp")
+        );
+    }
+
+    /** 断言 Future 以指定 Agent 执行故障类型结束。 */
+    private static void assertFailureType(
+            CompletableFuture<AgentReply> future,
+            AgentExecutionException.FailureType expected
+    ) {
+        assertThatThrownBy(() -> future.get(1, TimeUnit.SECONDS))
+                .hasRootCauseInstanceOf(AgentExecutionException.class)
+                .rootCause()
+                .extracting(failure -> ((AgentExecutionException) failure).failureType())
+                .isEqualTo(expected);
+    }
+
+    /** 返回自定义异步调用且不持久化会话的零模型测试运行时。 */
+    private static class ActivityRuntime implements AgentScopeAgentGateway.AgentRuntime {
+
+        /** 根据 RuntimeContext 创建当前父回合信号。 */
+        private final Function<RuntimeContext, Mono<Msg>> invocation;
+
+        /** 收到父子级联取消的次数。 */
+        private final AtomicInteger cancellations = new AtomicInteger();
+
+        /** 使用指定调用函数创建活动测试运行时。 */
+        private ActivityRuntime(Function<RuntimeContext, Mono<Msg>> invocation) {
+            this.invocation = invocation;
+        }
+
+        /** 执行测试预设的异步父回合。 */
+        @Override
+        public Mono<Msg> call(String content, RuntimeContext context) {
+            return invocation.apply(context);
+        }
+
+        /** 记录父失败或测试清理触发的取消。 */
+        @Override
+        public void cancel(RuntimeContext context, TaskSemanticsRegistry.CancelOrigin origin) {
+            cancellations.incrementAndGet();
+        }
+
+        /** 活动测试运行时没有需要清理的持久化会话。 */
+        @Override
+        public void clearContext(String userId, String sessionId) {
+        }
+
+        /** 活动测试运行时没有需要关闭的资源。 */
+        @Override
+        public void close() {
+        }
     }
 
     /** 每次调用都返回连接错误的 MCP 测试工具。 */

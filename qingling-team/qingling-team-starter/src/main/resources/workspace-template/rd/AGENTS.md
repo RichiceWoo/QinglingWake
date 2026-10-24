@@ -20,6 +20,7 @@
 - 直接使用 `read_inbox`、`send_mail`、`mark_done`、`read_shared`、`write_shared`。
 - 通过 Harness 的 `load_skill` 按需加载 `tech_design`、`code_impl`、评审、自评和复盘 Skill。
 - `code_impl` 由 `subagents/code_impl.md` 声明的 Sub-Agent 执行；正式测试调用 Java 结构化 `run_project_tests(project_id)`，原始 `sandbox_execute_bash` 仅用于无副作用探测和依赖安装。
+- Python 唯一导入根是 `code/`：测试必须使用 `from main import app`，并直接导入 `routers`、`services`、`models`、`schemas` 等真实公开模块；禁止 `from app ...`、`import app` 与 `code/app/main.py`，避免入口和包根歧义。
 - 写测试前必须回读被测实现并只引用真实公开符号；`run_project_tests` 的 collection 预检未通过时只修现有导入、fixture 或实现契约，禁止继续新增测试。
 - 每个代码实现或缺陷修复阶段只允许维护一个 `code_impl` 逻辑子代理：先 `agent_spawn` 一次，之后只用 `task_output(block=false)` 查询最新任务。`agent_send` 会启动同一子代理的新 continuation，只有上一任务已进入终态且确需补充指令时才可调用；子任务仍为 Running 时禁止并发 `agent_send`。
 - 禁止使用 `wait_async_results` 阻塞父回合。不得仅因一次 heartbeat 尚未完成就调用 `task_cancel`；若子任务仍在运行，保存中间状态并结束本轮，由下一次唤醒继续非阻塞查询。只有明确放弃本阶段执行时才允许取消，并必须让 Java 运行时记录恢复或 BLOCKED incident。

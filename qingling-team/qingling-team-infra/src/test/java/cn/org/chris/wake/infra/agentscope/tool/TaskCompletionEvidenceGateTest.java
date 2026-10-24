@@ -145,6 +145,32 @@ class TaskCompletionEvidenceGateTest {
                 .hasMessageContaining("code/app/main.py");
     }
 
+    /** 测试导入必须以 code 根为唯一模块根，禁止依赖歧义 app 包。 */
+    @Test
+    void shouldRejectTestsImportingAmbiguousAppPackage() {
+        ProjectTestExecution success = execution(
+                "rd-import-root",
+                ProjectTestExecution.Status.SUCCEEDED,
+                0,
+                2,
+                2,
+                88D,
+                ProjectTestExecution.FailureType.NONE,
+                false
+        );
+        registry.record("gate-project", "rd", WorkflowStage.CODE_IMPLEMENTATION, success);
+        workspace.write("gate-project", "rd", "code/main.py", "app = object()");
+        workspace.write(
+                "gate-project", "rd", "code/tests/test_main.py", "from app import main\n"
+        );
+
+        assertThatThrownBy(() -> gate.validate(
+                "gate-project", WorkflowStage.CODE_IMPLEMENTATION, "rd", evidence(success)
+        )).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("禁止依赖 app 包")
+                .hasMessageContaining("code/tests/test_main.py");
+    }
+
     /**
      * QA 必须同时生成非空测试报告和证据矩阵。
      */

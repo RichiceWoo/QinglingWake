@@ -38,6 +38,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
@@ -99,6 +101,9 @@ public final class McpSandboxConfiguration implements AutoCloseable {
 
     /** 每个父 Toolkit 中可重建连接的 MCP 工具包装器。 */
     private final List<CircuitBreakingMcpAgentTool> managedTools = new CopyOnWriteArrayList<>();
+
+    /** 跨角色串行化共享默认 shell 会话，防止并发写入破坏 OpenHands PS1 协议。 */
+    private final Semaphore shellCallPermit = new Semaphore(1, true);
 
     /** 关闭前固化的最后健康快照，供失败路径在 Spring shutdown 后保存直接原因。 */
     private volatile List<CircuitHealth> closedCircuitHealth = List.of();
@@ -838,6 +843,15 @@ public final class McpSandboxConfiguration implements AutoCloseable {
         /** 最近一次成功恢复时间；尚未恢复时为 null。 */
         private volatile Instant lastRecoveredAt;
 
+        /** 最近一次恢复尝试时间；从未尝试恢复时为 null。 */
+        private volatile Instant lastRecoveryAttemptAt;
+
+        /** 最近一次恢复失败的脱敏阶段与异常类型；成功或从未尝试时为空字符串。 */
+        private volatile String lastRecoveryFailure = "";
+
+        /** 最近一次恢复尝试耗时，使用毫秒便于诊断探针超时。 */
+        private volatile long lastRecoveryDurationMillis;
+
         /**
          * 创建单个可恢复 MCP 工具包装器。
          *
@@ -864,10 +878,15 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             return delegate.getName();
         }
 
-        /** 返回原始工具描述。 */
+        /** 返回工具描述，并引导长时间项目测试使用异步 Test Runner。 */
         @Override
         public String getDescription() {
-            return delegate.getDescription();
+            String description = delegate.getDescription();
+            if (!"sandbox_execute_bash".equals(getName())) {
+                return description;
+            }
+            return description + " Long-running dependency installation and project tests must use "
+                    + "run_project_tests instead of this synchronous shell tool.";
         }
 
         /** 返回原始参数 schema。 */
@@ -908,10 +927,8 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             } catch (IllegalArgumentException failure) {
                 return Mono.just(ToolResultBlock.error("AIO-Sandbox tool arguments invalid"));
             }
-            Mono<ToolResultBlock> delegated = delegate.callAsync(safeParam);
-            if ("sandbox_execute_bash".equals(getName())) {
-                delegated = delegated.timeout(shellTransportTimeout(safeParam));
-            }
+            AtomicBoolean transportStarted = new AtomicBoolean();
+            Mono<ToolResultBlock> delegated = invokeDelegate(safeParam, transportStarted);
             return delegated
                     .map(CircuitBreakingMcpAgentTool::normalizeResult)
                     .map(result -> {
@@ -922,15 +939,78 @@ public final class McpSandboxConfiguration implements AutoCloseable {
                         return result;
                     })
                     .onErrorResume(failure -> {
-                        openCircuit();
-                        return Mono.just(ToolResultBlock.error("AIO-Sandbox MCP connection unavailable"));
+                        if (transportStarted.get()) {
+                            openCircuit();
+                            return Mono.just(ToolResultBlock.error("AIO-Sandbox MCP connection unavailable"));
+                        }
+                        return Mono.just(ToolResultBlock.error("AIO-Sandbox shell call cancelled before execution"));
                     })
-                    // AgentScope 的外层 ToolExecutor 超时会取消 Mono；取消同样代表当前连接不可继续接收调用。
-                    .doOnCancel(this::openCircuit);
+                    // 只有已经进入 MCP 传输的调用被取消才污染连接；等待共享会话时取消不应熔断。
+                    .doOnCancel(() -> {
+                        if (transportStarted.get()) {
+                            openCircuit();
+                        }
+                    });
         }
 
         /**
-         * 强制通用 Bash 工具使用无状态调用，并把宿主 cwd 转换为容器挂载路径。
+         * 在跨角色单飞许可内订阅 Bash 调用；其他 MCP 工具直接委托。
+         *
+         * @param safeParam 已归一化工具参数
+         * @param transportStarted 是否已经进入真实 MCP 传输
+         * @return 受控委托结果
+         */
+        private Mono<ToolResultBlock> invokeDelegate(
+                ToolCallParam safeParam,
+                AtomicBoolean transportStarted
+        ) {
+            Mono<ToolResultBlock> invocation = Mono.defer(() -> {
+                transportStarted.set(true);
+                return delegate.callAsync(safeParam);
+            });
+            if (!"sandbox_execute_bash".equals(getName())) {
+                return invocation;
+            }
+            return Mono.usingWhen(
+                    Mono.fromCallable(this::acquireShellCallPermit)
+                            .subscribeOn(Schedulers.boundedElastic()),
+                    ignored -> invocation.timeout(shellTransportTimeout(safeParam)),
+                    ignored -> releaseShellCallPermit(),
+                    (ignored, failure) -> releaseShellCallPermit(),
+                    ignored -> releaseShellCallPermit()
+            );
+        }
+
+        /**
+         * 获取跨角色 shell 单飞许可；中断时保留线程中断标记并停止调用。
+         *
+         * @return 固定 true，作为 Reactor 资源句柄
+         */
+        private boolean acquireShellCallPermit() {
+            try {
+                shellCallPermit.acquire();
+                return true;
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("等待 AIO-Sandbox shell 单飞许可被中断", failure);
+            }
+        }
+
+        /**
+         * 释放跨角色 shell 单飞许可。
+         *
+         * @return 释放完成信号
+         */
+        private Mono<Void> releaseShellCallPermit() {
+            return Mono.fromRunnable(shellCallPermit::release);
+        }
+
+        /**
+         * 强制通用 Bash 工具使用由 Java 单飞保护的默认会话，并把宿主 cwd 转换为容器挂载路径。
+         *
+         * <p>AIO-Sandbox 的 {@code new_session=false} 使用进程级全局默认会话，跨角色并发会
+         * 破坏 OpenHands 的 PS1 元数据协议；逐次新建会话又会产生昂贵的 tmux 创建/淘汰抖动。
+         * 因此包装层覆盖模型输入并在真实 MCP 调用的完整生命周期内跨角色串行。</p>
          *
          * @param param 原始 AgentScope 工具调用
          * @return Bash 工具的受控参数副本；其他 MCP 工具保持原样
@@ -1017,7 +1097,7 @@ public final class McpSandboxConfiguration implements AutoCloseable {
         /**
          * 把实际受控参数写入 ToolUse content，避免观测记录与委托输入不一致。
          *
-         * @param input 已强制无状态的工具参数
+         * @param input 已强制进入单飞默认会话的工具参数
          * @return JSON 参数正文
          */
         private static String serializeToolInput(Map<String, Object> input) {
@@ -1054,17 +1134,33 @@ public final class McpSandboxConfiguration implements AutoCloseable {
          */
         private boolean recoverBlocking() {
             recoveryLock.lock();
+            long startedAtNanos = System.nanoTime();
+            String recoveryPhase = "STATE_CHECK";
+            boolean shellPermitAcquired = false;
             try {
                 if (state.get() == CircuitState.CLOSED) {
                     return true;
                 }
+                lastRecoveryAttemptAt = Instant.now();
+                lastRecoveryFailure = "";
                 state.set(CircuitState.HALF_OPEN);
+                if ("sandbox_execute_bash".equals(getName())) {
+                    recoveryPhase = "SHELL_SINGLE_FLIGHT";
+                    acquireShellCallPermit();
+                    shellPermitAcquired = true;
+                }
                 toolkit.removeToolIfSame(getName(), this);
+                recoveryPhase = "CLIENT_REBUILD";
                 toolkit.removeMcpClient(serverName).block(Duration.ofSeconds(10));
+                if (shellPermitAcquired) {
+                    recoveryPhase = "SHELL_SESSION_RESET";
+                    sessionCleaner.cleanup();
+                }
                 int statusStart = registrationStatuses.size();
                 toolRegistrar.register(toolkit, toolsConfig.getMcpServers(), registrationListener());
                 assertSuccessfulRegistration(statusStart, toolkit);
                 AgentTool candidate = toolkit.getTool(getName());
+                recoveryPhase = "FRESH_SESSION_PROBE";
                 if (candidate == null || candidate == this || !probe(candidate)) {
                     throw new IllegalStateException("MCP 重建探针失败");
                 }
@@ -1073,9 +1169,11 @@ public final class McpSandboxConfiguration implements AutoCloseable {
                 toolkit.registerAgentTool(this);
                 consecutiveFailures.set(0);
                 lastRecoveredAt = Instant.now();
+                lastRecoveryFailure = "";
                 state.set(CircuitState.CLOSED);
                 return true;
             } catch (RuntimeException failure) {
+                lastRecoveryFailure = recoveryPhase + ":" + rootCauseType(failure);
                 if (toolkit.getTool(getName()) != this) {
                     AgentTool candidate = toolkit.getTool(getName());
                     if (candidate != null) {
@@ -1086,6 +1184,12 @@ public final class McpSandboxConfiguration implements AutoCloseable {
                 state.set(CircuitState.OPEN);
                 return false;
             } finally {
+                lastRecoveryDurationMillis = Duration.ofNanos(
+                        System.nanoTime() - startedAtNanos
+                ).toMillis();
+                if (shellPermitAcquired) {
+                    shellCallPermit.release();
+                }
                 recoveryLock.unlock();
             }
         }
@@ -1100,8 +1204,8 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             ToolUseBlock use = new ToolUseBlock(
                     "mcp-recovery-probe",
                     getName(),
-                    Map.of("cmd", "printf qingling-mcp-recovery", "timeout", 5, "new_session", false),
-                    "{\"cmd\":\"printf qingling-mcp-recovery\",\"timeout\":5,\"new_session\":false}",
+                    Map.of("cmd", "printf qingling-mcp-recovery", "timeout", 5, "new_session", true),
+                    "{\"cmd\":\"printf qingling-mcp-recovery\",\"timeout\":5,\"new_session\":true}",
                     Map.of()
             );
             ToolResultBlock result = candidate.callAsync(ToolCallParam.builder()
@@ -1111,6 +1215,20 @@ public final class McpSandboxConfiguration implements AutoCloseable {
                     .map(CircuitBreakingMcpAgentTool::normalizeResult)
                     .block(Duration.ofSeconds(10));
             return result != null && result.getState() == ToolResultState.SUCCESS;
+        }
+
+        /**
+         * 提取最深层异常类型作为脱敏恢复诊断，不保留可能含 URL、Header 或命令的消息。
+         *
+         * @param failure 恢复链异常
+         * @return 最深层异常的简单类型名
+         */
+        private static String rootCauseType(RuntimeException failure) {
+            Throwable current = failure;
+            while (current.getCause() != null && current.getCause() != current) {
+                current = current.getCause();
+            }
+            return current.getClass().getSimpleName();
         }
 
         /** 将当前连接标记为 OPEN，并累计脱敏计数。 */
@@ -1160,7 +1278,10 @@ public final class McpSandboxConfiguration implements AutoCloseable {
                     state.get(),
                     consecutiveFailures.get(),
                     totalFailures.get(),
-                    lastRecoveredAt
+                    lastRecoveredAt,
+                    lastRecoveryAttemptAt,
+                    lastRecoveryFailure,
+                    lastRecoveryDurationMillis
             );
         }
 
@@ -1196,6 +1317,9 @@ public final class McpSandboxConfiguration implements AutoCloseable {
      * @param consecutiveFailures 当前连续失败次数
      * @param totalFailures 生命周期失败总数
      * @param lastRecoveredAt 最近成功恢复时间，可为空
+     * @param lastRecoveryAttemptAt 最近恢复尝试时间，可为空
+     * @param lastRecoveryFailure 最近恢复失败的脱敏阶段与异常类型，成功时为空
+     * @param lastRecoveryDurationMillis 最近恢复尝试耗时毫秒数
      */
     public record CircuitHealth(
             String serverName,
@@ -1204,7 +1328,10 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             CircuitState state,
             int consecutiveFailures,
             int totalFailures,
-            Instant lastRecoveredAt
+            Instant lastRecoveredAt,
+            Instant lastRecoveryAttemptAt,
+            String lastRecoveryFailure,
+            long lastRecoveryDurationMillis
     ) {
         /** 固化非空标识与状态，避免健康证据不完整。 */
         public CircuitHealth {
@@ -1212,6 +1339,10 @@ public final class McpSandboxConfiguration implements AutoCloseable {
             Objects.requireNonNull(toolName, "toolName 不能为空");
             Objects.requireNonNull(ownerRole, "ownerRole 不能为空");
             Objects.requireNonNull(state, "state 不能为空");
+            lastRecoveryFailure = lastRecoveryFailure == null ? "" : lastRecoveryFailure;
+            if (lastRecoveryDurationMillis < 0) {
+                throw new IllegalArgumentException("lastRecoveryDurationMillis 不得为负数");
+            }
         }
     }
 

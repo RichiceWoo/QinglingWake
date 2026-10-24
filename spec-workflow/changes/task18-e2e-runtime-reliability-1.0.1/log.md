@@ -136,3 +136,39 @@
 - 不得记录 API Key、鉴权 Header、完整环境文件或未经限制的 stdout/stderr。
 - 不得用无限重试、扩大超时或跳过测试掩盖不稳定。
 - 实现过程中保留工作区现有修改，不得执行破坏性 reset/checkout。
+
+## 2026-10-24 缺陷 1～3 修复记录
+
+- **缺陷 1**：公开 Gateway 的 4 分 30 秒父子进度租约，Driver 阈值统一派生为租约加 60 秒；只有当前 workflow execution ID 和预期故障指纹均匹配的 `agentscope_dispatch` incident 仍为 attempt 1、retryable、`RECOVERING` 时才不报告终态悬挂，旧阶段/不同指纹 incident 不得续期，`BLOCKED` 或预算耗尽后恢复快速失败。
+- **缺陷 2**：新增只保存固定角色活动时间戳的 `ModelActivityRegistry` 与每角色 `ActivityTrackingModel`。角色 Agent 内部包装底层模型，在订阅和每个流式分片刷新时间并委托全部模型元数据；Gateway 与 Factory 共享注册表，停滞判定和诊断共用同一父进度方法，并以“该角色只有一个活跃父回合”为归因守卫。同角色并发结束时封存不可归因活动截止时间，避免旧分片给剩余 session 续租。Spring `Model` Bean 未被包装。
+- **缺陷 3**：停滞宽限复查由 nullable `map` 改为 `flatMap` + `Mono.justOrEmpty`，故障自行消失时继续执行；MCP 连接故障保持独立路径。搜索 Gateway 与 Runner 未发现其他同型 nullable Reactor 映射。
+- **验证**：定向套件先连续两次各通过 61 项，精确 incident 匹配补强后通过 62 项；最终 `mvn verify` 通过 299 项（15.036 秒）；零模型真实 Docker `RealSandboxToolContractIT` 通过 1 IT（15.52 秒，Maven 34.208 秒），NoCallModel 未调用百炼，连续工具与孤儿进程断言保持通过；最终 `git diff --check` 通过。
+- **范围**：按用户要求未运行真实 E2E；当时尚未处理后续确认的跨角色 Bash 会话争用与恢复探针缺陷；Task 8、Task 9 和父需求 Task 18 均保持未完成。
+
+## 2026-10-24 缺陷 4～5 修复记录
+
+- **服务端语义审计**：直接读取真实 AIO-Sandbox 1.11.0 容器源码，确认 `app/mcp/shell.py` 的 `_default_session_id` 为模块级全局状态，`new_session=false` 会让所有 MCP client/Owner 复用同一个 shell；服务端最多允许 10 个会话。当前 Java 运行路径不存在此前假设的按 Owner 空闲保活，该假设及其修法正式废弃。
+- **缺陷 4**：在 `McpSandboxConfiguration` 配置实例内增加所有角色共享的公平单许可量，普通 `sandbox_execute_bash` 与 Test Runner 控制命令从取得许可到 MCP 返回期间全局单飞，继续使用 `new_session=false` 而不并发写入默认 PS1 会话。等待许可时取消不计连接失败；传输已经开始后的取消/连接错误继续熔断。工具说明明确把长时间安装与测试导向异步 `run_project_tests`。
+- **缺陷 5**：恢复链在同一 shell 单飞许可内移除旧 client、调用既有 `DELETE /v1/shell/sessions` 清理真实服务端会话、注册新 client，并用 `new_session=true` 执行无副作用 `printf` 探针；探针成功后才切换 delegate 与关闭 circuit，未知结果的原始命令仍不重放。恢复失败记录最近尝试时间、耗时和脱敏的“阶段:异常类型”，Driver 证据同步输出，不保存消息、命令或凭据。
+- **否决方案**：曾把所有 Bash 改为 `new_session=true`，真实 Docker 契约约 65 秒后因 10 会话上限、淘汰抖动和 tmux/PS1 失步失败；该实现已完全撤销。最终采用共享默认会话的跨角色单飞，仅在恢复探针创建新会话。
+- **验证**：定向 `McpSandboxConfigurationTest,McpProjectTestRunnerTest` 通过 21 项；最终 `mvn verify` 通过 301 项（14.910 秒）；最终零模型真实 Docker `RealSandboxToolContractIT` 通过 1 IT（17.58 秒，Maven 34.403 秒），NoCallModel 未调用百炼，连续 10 次 Shell、5 次 Test Runner、受控恢复与 pending/orphan 断言全部通过。
+- **范围**：按用户要求未运行真实 E2E；Task 8、Task 9 和父需求 Task 18 均保持未完成。
+
+## 2026-10-24 缺陷 1～5 修复后单次真实 E2E
+
+- **执行约束**：只执行一次干净 `happy-path`，显式模型 `qwen3.8-flash`，真实 DashScope、AgentScope 与 Docker AIO-Sandbox；未自动重试、未启动 checkpoint-revise、qa-defect-rd-fix 或 code-fail-recovery。
+- **业务进展**：需求 checkpoint、PM 产品设计、技术设计抽样评审、RD 第 2 轮修订全部完成，状态机进入 `CODE_IMPLEMENTATION/RD`。技术设计长生成跨越旧 4 分 30 秒文件租约后仍健康完成，流式活动信号避免了误杀。
+- **测试执行**：前三个 execution 均为 `FINISHED/exit_code=1`，31 collected、21 passed、10 failed、coverage 95%，保持 pytest 业务失败；第四个为 `FINISHED/exit_code=2`，24 collected 后 `test_acceptance_trace.py`、`test_services.py` 导入不存在的 `app` 包导致 2 个收集错误。一次 continuation 因 pending tool 无结果而终态失败，后续 continuation 仍保持单飞。
+- **运行时恢复**：RD 在代码阶段产生 attempt 1、retryable、`RECOVERING` 的 `PARENT_STALLED` incident，workflow stage/Owner 未改变，RD assignment 回到 unread。此后 QA 为补交测试设计启动的父 dispatch 丢失 project ID，无法生成项目级 incident；该回合最后进度为 19:30:32Z、无子任务，Driver 到 20:32:52Z 才报告 `team:qa/project_id=""` 悬挂，约 62 分钟延迟，暴露项目无关 dispatch 未进入统一恢复/快速诊断时序。
+- **伴随证据**：终止前出现模型 SSE/NDJSON 流被远端关闭、AgentScope 自动重试 2/2 耗尽及 ConversationCompactor 压缩失败；需区分远端模型传输错误与 Java 项目上下文传播/停滞裁决缺口。
+- **缺陷 4/5 结果**：四个 Owner 的 MCP circuit 全程 `CLOSED/0 failures`，无恢复尝试；没有 PS1 会话失步、集体 Shell timeout 或永久 OPEN。退出后 AIO-Sandbox healthy、shell session=0，宿主与容器无 pytest/pip/tmux/Maven/Java 残留。
+- **终态**：Failsafe 1 test、1 failure、0 errors、0 skipped，测试耗时 7064 秒，Maven 总耗时 1 小时 58 分；证据位于 `target/e2e-evidence/happy-path`。Task 8、Task 9 与父 Task 18 保持未完成。
+
+## 2026-10-24 E2E 后续缺口修复记录（未运行 E2E）
+
+- **项目上下文传播**：`RuntimeIncidentGateway` 提供安全的角色项目解析扩展点，`RoleToolkitFactory` 仅在唯一未 BLOCKED 项目的当前 workflow Owner 与角色匹配时返回 project ID。`Runner` 统一按可信元数据、`new_mail`、唯一 workflow Owner 解析并传播 project ID，团队 heartbeat 与 incident 使用相同结果；归属不唯一时不猜测。
+- **停滞诊断**：`AgentScopeAgentGateway` 的判定和证据共用同一父进度快照，分别记录 session 进度、模型活动、有效进度及来源。`RealTeamE2EDriver` 在派生阈值后检测“SerialDispatchRegistry 仍活跃但 Gateway 无对应活动诊断”的 orphan `team:*` dispatch，并直接报告 `active_gateway_diagnostic=none`。
+- **pending tool 恢复**：确认 AgentScope 2.0.3 的声明式子代理工厂不继承父 Agent 的 pending-tool recovery 开关。新增 `PendingToolRecoveringStateStore`，读取子代理状态时只为缺失结果的 tool call 追加确定性错误 ToolResult，让后续回合可继续；不重放原工具，不保存敏感正文。
+- **唯一产物契约**：`TaskCompletionEvidenceGate` 对 RD、QA 同时拒绝 `code/app/main.py`，并扫描 `code/tests`、`qa/contract_tests` 拒绝 `from app` / `import app`。RD `AGENTS.md` 和 `code_impl` skill 明确 pytest 根目录、`from main import app` 与顶层模块导入规则。
+- **验证**：编译门禁通过；定向 71 项通过（5.907 秒）；完整 `mvn verify` 通过 307 项（17.928 秒）；零模型真实 Docker `RealSandboxToolContractIT` 通过 1 IT（17.50 秒，Maven 33.324 秒）；`git diff --check` 通过。
+- **范围**：按用户要求没有 source E2E 凭据、没有调用百炼、没有启动真实 E2E；未 commit、未 push，`../tmp.txt` 保持未触碰。Task 8、Task 9 与父需求 Task 18 均保持未完成。

@@ -106,6 +106,10 @@ class TeamAgentFactoryTest {
         Map<String, HarnessAgent> agents = factory.createAll();
         try {
             assertThat(agents).containsOnlyKeys("manager", "pm", "rd", "qa");
+            assertThat(agents.values())
+                    .extracting(HarnessAgent::getModel)
+                    .allSatisfy(model -> assertThat(model).isInstanceOf(ActivityTrackingModel.class))
+                    .doesNotHaveDuplicates();
             for (String role : TeamAgentFactory.TEAM_ROLES) {
                 HarnessAgent agent = agents.get(role);
                 assertThat(agent.getName()).isEqualTo(role);

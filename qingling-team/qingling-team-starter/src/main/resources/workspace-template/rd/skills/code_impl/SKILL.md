@@ -27,6 +27,7 @@ type: task
 10. **失败时先守住文档契约**：测试断言来自 `needs/requirements.md`、`design/product_spec.md` 和 `tech/tech_design.md`。实现返回值与断言不一致时，必须先回读这三份文档并修复业务代码；禁止仅因为当前实现返回 `422`、`500` 或其他结果，就把文档要求的 `400` 等期望值改成实际值来制造全绿。
 11. **依赖清单是测试前置门禁**：运行 pytest 前必须执行 `test -s requirements.txt`，并通过 `pip install -r requirements.txt` 安装依赖。文件缺失、为空或未列全 import 依赖时不得交付，也不得改成逐个 `pip install` 后声称硬约束通过。
 12. **应用入口唯一**：唯一入口必须是 `code/main.py`，并在其中创建或导出最终 ASGI `app`、挂载全部 router。允许把业务模块放入 `code/app/`，但禁止创建 `code/app/main.py` 或任何第二个 main.py；若技术方案写了替代入口，先按本条修正方案再实现。
+    **导入根唯一**：pytest 固定从 `code/` 运行，测试必须 `from main import app`，业务模块必须按根目录真实路径直接导入（例如 `from services.todo_service import ...`）。禁止 `from app ...` 或 `import app`；即使存在 `code/app/` 业务目录，也不得把它作为测试导入根。
 13. **测试必须引用真实公开符号**：创建或修改测试前先用 `read_shared` 回读被测实现，确认模块路径、类名、常量名和函数签名真实存在。禁止凭空引入 `TEXT_MAX_LEN`、`metadata`、`TodoService` 等未在实现中声明的符号。
 14. **收集失败优先收敛**：`run_project_tests` 会先执行受控 `pytest --collect-only`。若返回 `exit_code=2` 或 stdout/stderr 显示 collection/import error，本轮只修复已有导入、fixture 和公开契约，不得继续新增测试文件或扩大用例数量；收集通过后才处理业务断言失败。
 

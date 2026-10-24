@@ -43,8 +43,8 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     /** 子任务异常终态保持该时长后才终止父回合，给正常父回复保留短暂收尾窗口。 */
     private static final Duration DEFAULT_CHILD_TASK_FAILURE_GRACE = Duration.ofSeconds(2);
 
-    /** RUNNING 子任务真实事件与会话日志均无变化时允许保持的最长租约。 */
-    private static final Duration DEFAULT_CHILD_TASK_STALL_TIMEOUT = Duration.ofMinutes(4).plusSeconds(30);
+    /** 父回合或 RUNNING 子任务缺少真实进度时允许保持的默认最长租约。 */
+    public static final Duration DEFAULT_CHILD_TASK_STALL_TIMEOUT = Duration.ofMinutes(4).plusSeconds(30);
 
     /** RuntimeContext 中保存目标角色的键。 */
     public static final String ROLE_ATTRIBUTE = "role";
@@ -67,6 +67,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     /** 提供按角色 MCP 熔断状态和一次受控连接重建，不重放原 Shell 命令。 */
     private final McpSandboxConfiguration sandboxConfiguration;
 
+    /** 与角色模型装饰器共享且仅保存活动时间戳的注册表。 */
+    private final ModelActivityRegistry modelActivityRegistry;
+
     /** 检查当前父 session 子任务状态的轮询间隔。 */
     private final Duration childTaskPollInterval;
 
@@ -78,6 +81,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
 
     /** 当前仍在执行的父 Agent 回合，用于取消级联和悬挂 dispatch 快速诊断。 */
     private final ConcurrentHashMap<InvocationKey, ActiveInvocation> activeInvocations = new ConcurrentHashMap<>();
+
+    /** 同角色并发结束前最后一次不可归因模型活动时间，防止并发结束后跨 session 续租。 */
+    private final ConcurrentHashMap<String, Instant> ambiguousModelActivityThrough = new ConcurrentHashMap<>();
 
     /**
      * 以实际 HarnessAgent 映射创建领域 Gateway。
@@ -134,6 +140,32 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 DEFAULT_CHILD_TASK_POLL_INTERVAL,
                 DEFAULT_CHILD_TASK_FAILURE_GRACE,
                 DEFAULT_CHILD_TASK_STALL_TIMEOUT
+        );
+    }
+
+    /**
+     * 以共享模型活动注册表创建生产 Gateway，使流式生成能够续租唯一活跃父回合。
+     *
+     * @param agents 四角色 HarnessAgent
+     * @param memoryIndexer 非阻塞记忆索引入口
+     * @param sandboxConfiguration AIO-Sandbox 熔断与连接恢复边界
+     * @param modelActivityRegistry 与角色模型装饰器共享的活动注册表
+     */
+    public AgentScopeAgentGateway(
+            Map<String, HarnessAgent> agents,
+            TurnMemoryIndexer memoryIndexer,
+            McpSandboxConfiguration sandboxConfiguration,
+            ModelActivityRegistry modelActivityRegistry
+    ) {
+        this(
+                adaptAgents(agents),
+                RuntimeMode.PRODUCTION,
+                memoryIndexer,
+                sandboxConfiguration,
+                DEFAULT_CHILD_TASK_POLL_INTERVAL,
+                DEFAULT_CHILD_TASK_FAILURE_GRACE,
+                DEFAULT_CHILD_TASK_STALL_TIMEOUT,
+                modelActivityRegistry
         );
     }
 
@@ -230,7 +262,8 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 McpSandboxConfiguration.disabled(),
                 childTaskPollInterval,
                 childTaskFailureGrace,
-                childTaskStallTimeout
+                childTaskStallTimeout,
+                new ModelActivityRegistry()
         );
     }
 
@@ -254,6 +287,40 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
             Duration childTaskFailureGrace,
             Duration childTaskStallTimeout
     ) {
+        this(
+                runtimes,
+                ignored,
+                memoryIndexer,
+                sandboxConfiguration,
+                childTaskPollInterval,
+                childTaskFailureGrace,
+                childTaskStallTimeout,
+                new ModelActivityRegistry()
+        );
+    }
+
+    /**
+     * 使用共享模型活动注册表与完整可调时序创建测试适配器。
+     *
+     * @param runtimes 测试运行时
+     * @param ignored 区分生产构造器的内部标记
+     * @param memoryIndexer 非阻塞记忆索引入口
+     * @param sandboxConfiguration MCP 熔断与恢复边界
+     * @param childTaskPollInterval 子任务状态轮询间隔
+     * @param childTaskFailureGrace 异常终态宽限时间
+     * @param childTaskStallTimeout 父子任务真实进度租约
+     * @param modelActivityRegistry 角色模型活动注册表
+     */
+    AgentScopeAgentGateway(
+            Map<String, AgentRuntime> runtimes,
+            RuntimeMode ignored,
+            TurnMemoryIndexer memoryIndexer,
+            McpSandboxConfiguration sandboxConfiguration,
+            Duration childTaskPollInterval,
+            Duration childTaskFailureGrace,
+            Duration childTaskStallTimeout,
+            ModelActivityRegistry modelActivityRegistry
+    ) {
         Objects.requireNonNull(ignored, "runtimeMode 不能为空");
         if (runtimes == null || runtimes.isEmpty()) {
             throw new IllegalArgumentException("Agent 运行时不能为空");
@@ -262,6 +329,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         this.memoryIndexer = Objects.requireNonNull(memoryIndexer, "memoryIndexer 不能为空");
         this.sandboxConfiguration = Objects.requireNonNull(
                 sandboxConfiguration, "sandboxConfiguration 不能为空"
+        );
+        this.modelActivityRegistry = Objects.requireNonNull(
+                modelActivityRegistry, "modelActivityRegistry 不能为空"
         );
         this.childTaskPollInterval = requirePositiveDuration(
                 childTaskPollInterval, "childTaskPollInterval"
@@ -318,10 +388,32 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                         cancellationPropagated,
                         TaskSemanticsRegistry.CancelOrigin.RUNTIME_PARENT_FAILURE
                 ))
-                .doOnSuccess(ignored -> activeInvocations.remove(invocationKey, invocation))
-                .doOnError(ignored -> activeInvocations.remove(invocationKey, invocation))
-                .doOnCancel(() -> activeInvocations.remove(invocationKey, invocation))
+                .doOnSuccess(ignored -> removeActiveInvocation(invocationKey, invocation))
+                .doOnError(ignored -> removeActiveInvocation(invocationKey, invocation))
+                .doOnCancel(() -> removeActiveInvocation(invocationKey, invocation))
                 .toFuture();
+    }
+
+    /**
+     * 幂等移除父回合，并在同角色仍有其他回合时封存当前角色不可归因的模型活动截止时间。
+     *
+     * @param invocationKey 待移除回合键
+     * @param invocation 待移除回合实例
+     */
+    private void removeActiveInvocation(InvocationKey invocationKey, ActiveInvocation invocation) {
+        if (!activeInvocations.remove(invocationKey, invocation)) {
+            return;
+        }
+        if (activeInvocationCount(invocationKey.role()) == 0) {
+            ambiguousModelActivityThrough.remove(invocationKey.role());
+            return;
+        }
+        modelActivityRegistry.lastActivity(invocationKey.role()).ifPresent(activityAt ->
+                ambiguousModelActivityThrough.merge(
+                        invocationKey.role(), activityAt,
+                        (existing, candidate) -> existing.isAfter(candidate) ? existing : candidate
+                )
+        );
     }
 
     /**
@@ -414,7 +506,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                         == AgentExecutionException.FailureType.MCP_CONNECTION_UNAVAILABLE
                         ? Mono.just(failure)
                         : Mono.delay(childTaskFailureGrace)
-                                .map(ignoredDelay -> executionFailure(invocation, Instant.now()))
+                                .flatMap(ignoredDelay -> Mono.justOrEmpty(
+                                        executionFailure(invocation, Instant.now())
+                                ))
                                 .filter(rechecked -> sameFailure(failure, rechecked)))
                 .next()
                 .flatMap(failure -> Mono.error(failure));
@@ -511,7 +605,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 .filter(task -> "FAILED".equals(task.status()) || "CANCELLED".equals(task.status()))
                 .toList();
         if (failedTasks.isEmpty()) {
-            Instant parentLastProgressAt = safeParentProgressAt(invocation);
+            Instant parentLastProgressAt = parentProgress(invocation).effectiveProgressAt();
             Instant lastProgressAt = latestTasks.stream()
                     .map(ChildTaskDiagnostic::lastProgressAt)
                     .filter(progressAt -> progressAt.isAfter(parentLastProgressAt))
@@ -671,18 +765,21 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
      * @param invocation 活跃回合
      * @return 脱敏诊断
      */
-    private static ActiveExecutionDiagnostic diagnostic(InvocationKey key, ActiveInvocation invocation) {
+    private ActiveExecutionDiagnostic diagnostic(InvocationKey key, ActiveInvocation invocation) {
         RuntimeContext context = invocation.context();
         String routingKey = Objects.toString(context.get(ROUTING_KEY_ATTRIBUTE), "");
         String projectId = Objects.toString(context.get(PROJECT_ID_ATTRIBUTE), "");
-        Instant parentLastProgressAt = safeParentProgressAt(invocation);
+        ParentProgressSnapshot parentProgress = parentProgress(invocation);
         return new ActiveExecutionDiagnostic(
                 key.role(),
                 key.sessionId(),
                 routingKey,
                 projectId,
                 invocation.startedAt(),
-                parentLastProgressAt,
+                parentProgress.effectiveProgressAt(),
+                parentProgress.sessionProgressAt(),
+                parentProgress.modelActivityAt(),
+                parentProgress.source(),
                 safeTaskDiagnostics(invocation)
         );
     }
@@ -693,16 +790,55 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
      * @param invocation 当前父回合
      * @return 不早于回合开始时间的最后父进度
      */
-    private static Instant safeParentProgressAt(ActiveInvocation invocation) {
+    private ParentProgressSnapshot parentProgress(ActiveInvocation invocation) {
+        Instant sessionProgressAt = invocation.startedAt();
+        String source = "INVOCATION_START";
         try {
             Instant progressAt = invocation.runtime().parentProgressAt(invocation.context());
-            if (progressAt != null && progressAt.isAfter(invocation.startedAt())) {
-                return progressAt;
+            if (progressAt != null && progressAt.isAfter(sessionProgressAt)) {
+                sessionProgressAt = progressAt;
+                source = "SESSION_STATE";
             }
         } catch (RuntimeException ignored) {
             // 诊断旁路失败不得改变正在执行的父回合。
         }
-        return invocation.startedAt();
+        String role = Objects.toString(invocation.context().get(ROLE_ATTRIBUTE), "");
+        Instant modelActivityAt = null;
+        Instant effectiveProgressAt = sessionProgressAt;
+        if (activeInvocationCount(role) == 1) {
+            Instant candidateActivityAt = modelActivityRegistry.lastActivity(role).orElse(Instant.EPOCH);
+            Instant ambiguousThrough = ambiguousModelActivityThrough.getOrDefault(role, Instant.EPOCH);
+            if (candidateActivityAt.isAfter(ambiguousThrough)
+                    && candidateActivityAt.isAfter(invocation.startedAt())) {
+                modelActivityAt = candidateActivityAt;
+                if (candidateActivityAt.isAfter(effectiveProgressAt)) {
+                    effectiveProgressAt = candidateActivityAt;
+                    source = "MODEL_STREAM";
+                }
+            }
+        }
+        return new ParentProgressSnapshot(sessionProgressAt, modelActivityAt, effectiveProgressAt, source);
+    }
+
+    /**
+     * 统计指定角色当前活跃父回合数量，只有唯一回合才能安全归因角色级模型活动。
+     *
+     * @param role 团队角色
+     * @return 当前活跃父回合数量
+     */
+    private long activeInvocationCount(String role) {
+        return activeInvocations.keySet().stream()
+                .filter(key -> key.role().equals(role))
+                .count();
+    }
+
+    /**
+     * 返回父子任务停滞判定使用的真实进度租约，供 E2E Driver 派生更宽诊断阈值。
+     *
+     * @return 正值停滞租约
+     */
+    public Duration childTaskStallTimeout() {
+        return childTaskStallTimeout;
     }
 
     /**
@@ -1284,7 +1420,10 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
      * @param routingKey 对应 dispatch 路由
      * @param projectId 继承到 Sub-Agent 的项目标识
      * @param startedAt 父回合开始时间
-     * @param parentLastProgressAt 父 Agent 自身会话日志最后真实变化时间
+     * @param parentLastProgressAt 父回合判定租约使用的有效进度时间
+     * @param parentSessionProgressAt 父 Agent 会话状态最后真实变化时间
+     * @param parentModelActivityAt 可安全归因到该回合的模型流式活动时间
+     * @param parentProgressSource 有效进度来自回合开始、会话状态或模型流
      * @param childTasks 当前 session 的子任务状态
      */
     public record ActiveExecutionDiagnostic(
@@ -1293,15 +1432,62 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
             /** 对应 dispatch 路由。 */ String routingKey,
             /** 继承到 Sub-Agent 的项目标识。 */ String projectId,
             /** 父回合开始时间。 */ Instant startedAt,
-            /** 父 Agent 自身最后真实进度时间。 */ Instant parentLastProgressAt,
+            /** 父回合租约使用的最后有效进度时间。 */ Instant parentLastProgressAt,
+            /** 父 Agent 会话状态最后真实变化时间。 */ Instant parentSessionProgressAt,
+            /** 唯一活跃回合可归因的模型流式活动时间。 */ Instant parentModelActivityAt,
+            /** 最后有效进度来源。 */ String parentProgressSource,
             /** 当前 session 的子任务状态。 */ List<ChildTaskDiagnostic> childTasks
     ) {
+        /**
+         * 兼容只提供单一父进度时间的测试诊断构造方式。
+         */
+        public ActiveExecutionDiagnostic(
+                String role,
+                String sessionId,
+                String routingKey,
+                String projectId,
+                Instant startedAt,
+                Instant parentLastProgressAt,
+                List<ChildTaskDiagnostic> childTasks
+        ) {
+            this(
+                    role,
+                    sessionId,
+                    routingKey,
+                    projectId,
+                    startedAt,
+                    parentLastProgressAt,
+                    parentLastProgressAt,
+                    null,
+                    "SESSION_STATE",
+                    childTasks
+            );
+        }
+
         /** 校验进度时间并对子任务列表执行不可变复制。 */
         public ActiveExecutionDiagnostic {
             Objects.requireNonNull(startedAt, "startedAt 不能为空");
             Objects.requireNonNull(parentLastProgressAt, "parentLastProgressAt 不能为空");
+            Objects.requireNonNull(parentSessionProgressAt, "parentSessionProgressAt 不能为空");
+            Objects.requireNonNull(parentProgressSource, "parentProgressSource 不能为空");
             childTasks = List.copyOf(childTasks);
         }
+    }
+
+    /**
+     * 汇总父回合各类进度证据，保证租约判定与对外诊断使用同一份结果。
+     *
+     * @param sessionProgressAt 会话状态进度
+     * @param modelActivityAt 可空模型流活动
+     * @param effectiveProgressAt 租约采用的较晚时间
+     * @param source 有效进度来源
+     */
+    private record ParentProgressSnapshot(
+            /** 会话状态最后变化时间。 */ Instant sessionProgressAt,
+            /** 可安全归因的模型活动时间。 */ Instant modelActivityAt,
+            /** 判定租约使用的有效时间。 */ Instant effectiveProgressAt,
+            /** 有效时间来源。 */ String source
+    ) {
     }
 
     /**

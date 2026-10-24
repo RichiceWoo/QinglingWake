@@ -195,6 +195,23 @@ class RunnerTest {
         assertThat(senderGateway.events).isEmpty();
     }
 
+    /** heartbeat 应从 Java 当前 Owner 唯一候选补齐项目上下文和收件箱指令。 */
+    @Test
+    void shouldResolveUniqueWorkflowProjectForHeartbeat() {
+        runtimeIncidentGateway.resolvedProjectId = Optional.of("todo-mvp");
+
+        runner.dispatch(message(
+                "team:qa", "__wake__:heartbeat", true, null, Map.of("wake_reason", "heartbeat")
+        )).join();
+
+        assertThat(agentGateway.requests).singleElement().satisfies(request -> {
+            assertThat(request.attributes()).containsEntry("projectId", "todo-mvp");
+            assertThat(request.content())
+                    .contains("当前 Java 工作流唯一 project_id 是 `todo-mvp`")
+                    .contains("read_inbox(project_id=\"todo-mvp\")");
+        });
+    }
+
     /**
      * 单条 Agent 失败应记录指标并返回异常，但同 key 下一条消息仍能成功处理。
      */
@@ -526,6 +543,9 @@ class RunnerTest {
         /** 非空时让下一次上报同步失败，用于验证原始异常优先级。 */
         private RuntimeException failure;
 
+        /** heartbeat 可解析的唯一项目，默认不存在。 */
+        private Optional<String> resolvedProjectId = Optional.empty();
+
         /**
          * 捕获类型化 Agent 执行故障，或按测试配置抛出同步异常。
          *
@@ -558,6 +578,12 @@ class RunnerTest {
                 throw failure;
             }
             reports.add("unscoped:" + role + ":" + occurrenceId + ":" + failureType.name());
+        }
+
+        /** 返回测试配置的唯一工作流项目。 */
+        @Override
+        public Optional<String> resolveProjectId(String role) {
+            return resolvedProjectId;
         }
 
         /** 测试 Runner 不读取阻断状态。 */

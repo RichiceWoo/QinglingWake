@@ -4,6 +4,7 @@ import cn.org.chris.wake.adapter.api.TestApiController;
 import cn.org.chris.wake.adapter.api.dto.TestRequest;
 import cn.org.chris.wake.adapter.api.dto.TestResponse;
 import cn.org.chris.wake.domain.gateway.CronJobRepository;
+import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.domain.model.CronJob;
 import cn.org.chris.wake.infra.agentscope.McpSandboxConfiguration;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
@@ -57,8 +58,8 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 失败或取消子任务全部终态后允许父 Agent 收尾的短暂窗口。 */
     private static final Duration TERMINAL_CHILD_DISPATCH_GRACE = Duration.ofSeconds(20);
 
-    /** RUNNING 子任务稳定事件和会话日志均无变化时允许的最长时间。 */
-    private static final Duration RUNNING_CHILD_PROGRESS_TIMEOUT = Duration.ofMinutes(4).plusSeconds(30);
+    /** Driver 在 Gateway 停滞租约之后额外留给 incident 恢复链启动的固定宽限。 */
+    private static final Duration GATEWAY_RECOVERY_START_GRACE = Duration.ofSeconds(60);
 
     /** Cron dispatch 已失败且没有恢复动作时允许状态持久化收敛的短暂窗口。 */
     private static final Duration IDLE_CRON_FAILURE_GRACE = Duration.ofSeconds(20);
@@ -753,20 +754,28 @@ final class RealTeamE2EDriver implements AutoCloseable {
             String hangingDispatch = hangingDispatchReason(
                     dispatchStates,
                     agentDiagnostics,
+                    eventSnapshot,
                     terminalChildFailureSince,
                     now,
                     TERMINAL_CHILD_DISPATCH_GRACE,
-                    RUNNING_CHILD_PROGRESS_TIMEOUT
+                    runningDispatchProgressTimeout(agentGateway.childTaskStallTimeout())
             );
             String mcpFailure = null;
             for (McpSandboxConfiguration.CircuitHealth health : sandboxConfiguration.circuitHealth()) {
                 String key = health.serverName() + ":" + health.toolName() + ":" + mcpHealth.size();
-                mcpHealth.add(Map.of(
-                        "server", health.serverName(),
-                        "tool", health.toolName(),
-                        "state", health.state().name(),
-                        "failures", health.totalFailures()
-                ));
+                Map<String, Object> healthSnapshot = new LinkedHashMap<>();
+                healthSnapshot.put("server", health.serverName());
+                healthSnapshot.put("tool", health.toolName());
+                healthSnapshot.put("state", health.state().name());
+                healthSnapshot.put("failures", health.totalFailures());
+                if (health.lastRecoveryAttemptAt() != null) {
+                    healthSnapshot.put("last_recovery_attempt_at", health.lastRecoveryAttemptAt().toString());
+                    healthSnapshot.put("last_recovery_duration_ms", health.lastRecoveryDurationMillis());
+                }
+                if (!health.lastRecoveryFailure().isBlank()) {
+                    healthSnapshot.put("last_recovery_failure", health.lastRecoveryFailure());
+                }
+                mcpHealth.add(Map.copyOf(healthSnapshot));
                 if (health.state() == McpSandboxConfiguration.CircuitState.OPEN) {
                     Instant openedAt = circuitOpenSince.computeIfAbsent(key, ignored -> now);
                     if (mcpFailure == null
@@ -851,6 +860,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
      *
      * @param dispatchStates dispatch 活跃快照
      * @param agentDiagnostics AgentScope 父子任务快照
+     * @param eventSnapshot 当前项目事件快照
      * @param firstObservedAt 各路由首次观察到异常终态的时间
      * @param now 当前时间
      * @param grace 父 Agent 收尾宽限
@@ -860,14 +870,17 @@ final class RealTeamE2EDriver implements AutoCloseable {
     static String hangingDispatchReason(
             Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates,
             List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics,
+            List<JsonNode> eventSnapshot,
             Map<String, Instant> firstObservedAt,
             Instant now,
             Duration grace,
             Duration runningProgressTimeout
     ) {
         Set<String> unhealthyRoutes = new LinkedHashSet<>();
+        Set<String> diagnosedRoutes = new LinkedHashSet<>();
         for (AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic : agentDiagnostics) {
             String route = diagnostic.routingKey();
+            diagnosedRoutes.add(route);
             SerialDispatchRegistry.DispatchSnapshot dispatch = dispatchStates.get(route);
             if (dispatch == null || !dispatch.active()) {
                 continue;
@@ -906,6 +919,12 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     .findFirst()
                     .orElse(null);
             if (stalledTask != null) {
+                if (hasRecoverableAgentIncident(
+                        eventSnapshot, diagnostic.projectId(), diagnostic.role(),
+                        AgentExecutionException.FailureType.CHILD_STALLED.name()
+                )) {
+                    continue;
+                }
                 return "route=" + route
                         + ", role=" + diagnostic.role()
                         + ", project_id=" + diagnostic.projectId()
@@ -920,6 +939,14 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     .map(AgentScopeAgentGateway.ChildTaskDiagnostic::status)
                     .anyMatch(status -> "FAILED".equals(status) || "CANCELLED".equals(status));
             if (allTerminal && hasFailedOrCancelled) {
+                String failureFingerprint = tasks.stream().anyMatch(task -> "FAILED".equals(task.status()))
+                        ? AgentExecutionException.FailureType.CHILD_FAILED.name()
+                        : AgentExecutionException.FailureType.CHILD_CANCELLED.name();
+                if (hasRecoverableAgentIncident(
+                        eventSnapshot, diagnostic.projectId(), diagnostic.role(), failureFingerprint
+                )) {
+                    continue;
+                }
                 unhealthyRoutes.add(route);
                 Instant observedAt = firstObservedAt.computeIfAbsent(route, ignored -> now);
                 if (Duration.between(observedAt, now).compareTo(grace) < 0) {
@@ -940,15 +967,125 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     .max(Comparator.naturalOrder())
                     .orElse(diagnostic.parentLastProgressAt());
             if (Duration.between(lastProgressAt, now).compareTo(runningProgressTimeout) >= 0) {
+                if (hasRecoverableAgentIncident(
+                        eventSnapshot, diagnostic.projectId(), diagnostic.role(),
+                        AgentExecutionException.FailureType.PARENT_STALLED.name()
+                )) {
+                    continue;
+                }
                 return "route=" + route
                         + ", role=" + diagnostic.role()
                         + ", project_id=" + diagnostic.projectId()
                         + ", dispatch_active_since=" + dispatch.activeSince()
                         + ", parent_last_progress_at=" + diagnostic.parentLastProgressAt()
+                        + ", parent_session_progress_at=" + diagnostic.parentSessionProgressAt()
+                        + ", parent_model_activity_at=" + diagnostic.parentModelActivityAt()
+                        + ", parent_progress_source=" + diagnostic.parentProgressSource()
                         + ", terminal_child_tasks=" + childTaskStates(tasks);
             }
         }
+        for (Map.Entry<String, SerialDispatchRegistry.DispatchSnapshot> entry : dispatchStates.entrySet()) {
+            String route = entry.getKey();
+            SerialDispatchRegistry.DispatchSnapshot dispatch = entry.getValue();
+            if (!route.startsWith("team:")
+                    || diagnosedRoutes.contains(route)
+                    || !dispatch.active()
+                    || dispatch.activeSince() == null
+                    || Duration.between(dispatch.activeSince(), now).compareTo(runningProgressTimeout) < 0) {
+                continue;
+            }
+            return "route=" + route
+                    + ", dispatch_active_since=" + dispatch.activeSince()
+                    + ", active_gateway_diagnostic=none";
+        }
         firstObservedAt.keySet().removeIf(route -> !unhealthyRoutes.contains(route));
+        return null;
+    }
+
+    /**
+     * 从 Gateway 租约派生 Driver 阈值，保证运行时 incident 链至少有一分钟启动窗口。
+     *
+     * @param gatewayStallTimeout Gateway 使用的父子任务真实进度租约
+     * @return 严格大于 Gateway 租约的 Driver 悬挂阈值
+     */
+    static Duration runningDispatchProgressTimeout(Duration gatewayStallTimeout) {
+        if (gatewayStallTimeout == null || gatewayStallTimeout.isZero() || gatewayStallTimeout.isNegative()) {
+            throw new IllegalArgumentException("gatewayStallTimeout 必须大于零");
+        }
+        return gatewayStallTimeout.plus(GATEWAY_RECOVERY_START_GRACE);
+    }
+
+    /**
+     * 判断当前 workflow execution 的同故障指纹 incident 是否仍处于首次可恢复状态。
+     *
+     * @param eventSnapshot 当前项目事件快照
+     * @param projectId 项目标识
+     * @param role 当前 workflow Owner
+     * @param failureFingerprint 当前悬挂诊断预期的稳定故障指纹
+     * @return 最近 incident 仍为 attempt=1、retryable RECOVERING 时为 true
+     */
+    private static boolean hasRecoverableAgentIncident(
+            List<JsonNode> eventSnapshot,
+            String projectId,
+            String role,
+            String failureFingerprint
+    ) {
+        String expectedExecutionId = currentAgentExecutionId(eventSnapshot, projectId, role);
+        if (expectedExecutionId == null) {
+            return false;
+        }
+        for (int index = eventSnapshot.size() - 1; index >= 0; index--) {
+            JsonNode event = eventSnapshot.get(index);
+            if (!"tool_execution_failed".equals(event.path("action").asText())) {
+                continue;
+            }
+            JsonNode payload = event.path("payload");
+            if (!"agentscope_dispatch".equals(payload.path("tool").asText())
+                    || !role.equals(payload.path("owner").asText())
+                    || !expectedExecutionId.equals(payload.path("execution_id").asText())
+                    || !failureFingerprint.equals(payload.path("failure_fingerprint")
+                            .asText(payload.path("failure_type").asText()))) {
+                continue;
+            }
+            return payload.path("attempt").asInt(Integer.MAX_VALUE) == 1
+                    && payload.path("retryable").asBoolean(false)
+                    && "RECOVERING".equals(payload.path("runtime_status").asText());
+        }
+        return false;
+    }
+
+    /**
+     * 由最新 workflow 迁移序号、阶段和 Owner 还原运行时使用的稳定 Agent execution ID。
+     *
+     * @param eventSnapshot 当前项目事件快照
+     * @param projectId 项目标识
+     * @param role 当前 workflow Owner
+     * @return 当前 execution ID；缺少合法阶段事件时为 null
+     */
+    private static String currentAgentExecutionId(
+            List<JsonNode> eventSnapshot,
+            String projectId,
+            String role
+    ) {
+        for (int index = eventSnapshot.size() - 1; index >= 0; index--) {
+            JsonNode event = eventSnapshot.get(index);
+            if (!"workflow_transitioned".equals(event.path("action").asText())) {
+                continue;
+            }
+            long sequence = event.path("seq").asLong(0L);
+            String stage = event.path("payload").path("to_stage").asText("");
+            if (sequence > 0L && !stage.isBlank()) {
+                return "agentscope:%s:%d:%s:%s".formatted(projectId, sequence, stage, role);
+            }
+        }
+        for (int index = eventSnapshot.size() - 1; index >= 0; index--) {
+            JsonNode event = eventSnapshot.get(index);
+            if ("project_created".equals(event.path("action").asText())) {
+                return "agentscope:%s:%d:REQUIREMENTS_CHECKPOINT:%s".formatted(
+                        projectId, Math.max(event.path("seq").asLong(0L), 0L), role
+                );
+            }
+        }
         return null;
     }
 
@@ -1103,23 +1240,31 @@ final class RealTeamE2EDriver implements AutoCloseable {
     private static List<Map<String, Object>> agentDiagnosticEvidence(
             List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> diagnostics
     ) {
-        return diagnostics.stream().map(diagnostic -> Map.<String, Object>of(
-                "role", diagnostic.role(),
-                "session_id", diagnostic.sessionId(),
-                "routing_key", diagnostic.routingKey(),
-                "project_id", diagnostic.projectId(),
-                "started_at", diagnostic.startedAt().toString(),
-                "parent_last_progress_at", diagnostic.parentLastProgressAt().toString(),
-                "child_tasks", diagnostic.childTasks().stream().map(task -> Map.of(
-                        "task_id", task.taskId(),
-                        "agent_id", task.agentId(),
-                        "status", task.status(),
-                        "terminal", task.terminal(),
-                        "task_kind", task.taskKind(),
-                        "cancel_origin", task.cancelOrigin(),
-                        "last_progress_at", task.lastProgressAt().toString()
-                )).toList()
-        )).toList();
+        return diagnostics.stream().map(diagnostic -> {
+            Map<String, Object> values = new LinkedHashMap<>();
+            values.put("role", diagnostic.role());
+            values.put("session_id", diagnostic.sessionId());
+            values.put("routing_key", diagnostic.routingKey());
+            values.put("project_id", diagnostic.projectId());
+            values.put("started_at", diagnostic.startedAt().toString());
+            values.put("parent_last_progress_at", diagnostic.parentLastProgressAt().toString());
+            values.put("parent_session_progress_at", diagnostic.parentSessionProgressAt().toString());
+            values.put(
+                    "parent_model_activity_at",
+                    diagnostic.parentModelActivityAt() == null ? "" : diagnostic.parentModelActivityAt().toString()
+            );
+            values.put("parent_progress_source", diagnostic.parentProgressSource());
+            values.put("child_tasks", diagnostic.childTasks().stream().map(task -> Map.of(
+                    "task_id", task.taskId(),
+                    "agent_id", task.agentId(),
+                    "status", task.status(),
+                    "terminal", task.terminal(),
+                    "task_kind", task.taskKind(),
+                    "cancel_origin", task.cancelOrigin(),
+                    "last_progress_at", task.lastProgressAt().toString()
+            )).toList());
+            return Map.copyOf(values);
+        }).toList();
     }
 
     /**

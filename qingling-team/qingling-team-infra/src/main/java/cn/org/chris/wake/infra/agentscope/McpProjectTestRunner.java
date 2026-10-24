@@ -252,6 +252,9 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
     /**
      * 调用原始 MCP Bash，并把 AgentScope 的错误状态恢复为响应式异常。
      *
+     * <p>执行状态通过受控目录文件协调，不依赖 tmux 会话状态；生产包装层会把这些短命令与
+     * 其他角色的 Bash 调用统一纳入跨角色单飞，避免共享 OpenHands PS1 协议被并发写入。</p>
+     *
      * @param callId 不包含凭据的调用标识
      * @param command 仅由本类生成的固定命令
      * @param timeoutSeconds MCP 等待秒数

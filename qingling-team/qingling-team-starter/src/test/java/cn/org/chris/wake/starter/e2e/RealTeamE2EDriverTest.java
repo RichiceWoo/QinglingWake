@@ -231,11 +231,11 @@ class RealTeamE2EDriverTest {
         );
 
         assertThat(RealTeamE2EDriver.hangingDispatchReason(
-                dispatch, List.of(diagnostic), observed, activeSince.plusSeconds(1),
+                dispatch, List.of(diagnostic), List.of(), observed, activeSince.plusSeconds(1),
                 Duration.ofSeconds(20), Duration.ofMinutes(5)
         )).isNull();
         String reason = RealTeamE2EDriver.hangingDispatchReason(
-                dispatch, List.of(diagnostic), observed, activeSince.plusSeconds(22),
+                dispatch, List.of(diagnostic), List.of(), observed, activeSince.plusSeconds(22),
                 Duration.ofSeconds(20), Duration.ofMinutes(5)
         );
 
@@ -267,6 +267,7 @@ class RealTeamE2EDriverTest {
         String reason = RealTeamE2EDriver.hangingDispatchReason(
                 Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)),
                 List.of(diagnostic),
+                List.of(),
                 new java.util.LinkedHashMap<>(),
                 activeSince.plusSeconds(60),
                 Duration.ofSeconds(20),
@@ -298,6 +299,7 @@ class RealTeamE2EDriverTest {
         String reason = RealTeamE2EDriver.hangingDispatchReason(
                 Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)),
                 List.of(diagnostic),
+                List.of(),
                 new java.util.LinkedHashMap<>(),
                 activeSince.plusSeconds(12),
                 Duration.ofSeconds(20),
@@ -326,6 +328,7 @@ class RealTeamE2EDriverTest {
         String reason = RealTeamE2EDriver.hangingDispatchReason(
                 Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)),
                 List.of(diagnostic),
+                List.of(),
                 new java.util.LinkedHashMap<>(),
                 activeSince.plusSeconds(331),
                 Duration.ofSeconds(20),
@@ -355,6 +358,7 @@ class RealTeamE2EDriverTest {
         String reason = RealTeamE2EDriver.hangingDispatchReason(
                 Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)),
                 List.of(diagnostic),
+                List.of(),
                 new java.util.LinkedHashMap<>(),
                 childProgressAt.plusSeconds(301),
                 Duration.ofSeconds(20),
@@ -364,6 +368,160 @@ class RealTeamE2EDriverTest {
         assertThat(reason)
                 .contains("team:rd", "parent_last_progress_at", "task-complete=COMPLETED")
                 .doesNotContain("qa/test_plan.md");
+    }
+
+    /** Driver 悬挂阈值必须从 Gateway 租约派生并严格多出一分钟恢复启动宽限。 */
+    @Test
+    void shouldDeriveDriverProgressTimeoutFromGatewayLease() {
+        Duration gatewayLease = AgentScopeAgentGateway.DEFAULT_CHILD_TASK_STALL_TIMEOUT;
+
+        Duration driverTimeout = RealTeamE2EDriver.runningDispatchProgressTimeout(gatewayLease);
+
+        assertThat(driverTimeout).isEqualTo(gatewayLease.plusSeconds(60)).isGreaterThan(gatewayLease);
+    }
+
+    /** Gateway 租约刚到期时 Driver 不得抢跑，只有超过派生阈值才报告父 dispatch 悬挂。 */
+    @Test
+    void shouldWaitBeyondGatewayLeaseBeforeReportingParentStall() {
+        Instant activeSince = Instant.parse("2026-10-24T00:00:00Z");
+        Duration gatewayLease = AgentScopeAgentGateway.DEFAULT_CHILD_TASK_STALL_TIMEOUT;
+        Duration driverTimeout = RealTeamE2EDriver.runningDispatchProgressTimeout(gatewayLease);
+        AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic =
+                new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
+                        "rd", "session-rd", "team:rd", "todo-mvp",
+                        activeSince, activeSince, List.of()
+                );
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatch = Map.of(
+                "team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)
+        );
+
+        String duringRecoveryStartGrace = RealTeamE2EDriver.hangingDispatchReason(
+                dispatch, List.of(diagnostic), List.of(), new java.util.LinkedHashMap<>(),
+                activeSince.plus(gatewayLease).plusSeconds(1), Duration.ofSeconds(20), driverTimeout
+        );
+        String afterDriverThreshold = RealTeamE2EDriver.hangingDispatchReason(
+                dispatch, List.of(diagnostic), List.of(), new java.util.LinkedHashMap<>(),
+                activeSince.plus(driverTimeout).plusSeconds(1), Duration.ofSeconds(20), driverTimeout
+        );
+
+        assertThat(duringRecoveryStartGrace).isNull();
+        assertThat(afterDriverThreshold)
+                .contains(
+                        "team:rd",
+                        "parent_last_progress_at",
+                        "parent_session_progress_at",
+                        "parent_progress_source=SESSION_STATE",
+                        "terminal_child_tasks=none"
+                );
+    }
+
+    /** 活跃 team dispatch 丢失 Gateway 回合诊断时也必须在派生阈值后直接报告。 */
+    @Test
+    void shouldReportActiveTeamDispatchWithoutGatewayDiagnostic() {
+        Instant activeSince = Instant.parse("2026-10-24T00:00:00Z");
+        Duration timeout = Duration.ofMinutes(5).plusSeconds(30);
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatch = Map.of(
+                "team:qa", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)
+        );
+
+        String reason = RealTeamE2EDriver.hangingDispatchReason(
+                dispatch,
+                List.of(),
+                List.of(),
+                new java.util.LinkedHashMap<>(),
+                activeSince.plus(timeout).plusSeconds(1),
+                Duration.ofSeconds(20),
+                timeout
+        );
+
+        assertThat(reason).contains("team:qa", "active_gateway_diagnostic=none");
+    }
+
+    /** 首次可恢复 AgentScope incident 存在时继续等待，预算耗尽为 BLOCKED 后才允许直接失败。 */
+    @Test
+    void shouldAllowRecoveringIncidentBeforeReportingHangingDispatch() throws Exception {
+        Instant activeSince = Instant.parse("2026-10-24T00:00:00Z");
+        AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic =
+                new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
+                        "rd", "session-rd", "team:rd", "todo-mvp",
+                        activeSince, activeSince, List.of()
+                );
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatch = Map.of(
+                "team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)
+        );
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode transition = mapper.readTree("""
+                {"seq":3,"action":"workflow_transitioned",
+                "payload":{"to_stage":"TECH_DESIGN","assignee":"rd"}}
+                """);
+        JsonNode recovering = mapper.readTree("""
+                {"action":"tool_execution_failed","payload":{"tool":"agentscope_dispatch",
+                "execution_id":"agentscope:todo-mvp:3:TECH_DESIGN:rd","owner":"rd",
+                "failure_type":"PARENT_STALLED","failure_fingerprint":"PARENT_STALLED",
+                "attempt":1,"retryable":true,"runtime_status":"RECOVERING"}}
+                """);
+        JsonNode blocked = mapper.readTree("""
+                {"action":"tool_execution_failed","payload":{"tool":"agentscope_dispatch",
+                "execution_id":"agentscope:todo-mvp:3:TECH_DESIGN:rd","owner":"rd",
+                "failure_type":"PARENT_STALLED","failure_fingerprint":"PARENT_STALLED",
+                "attempt":2,"retryable":false,"runtime_status":"BLOCKED"}}
+                """);
+
+        String whileRecovering = RealTeamE2EDriver.hangingDispatchReason(
+                dispatch, List.of(diagnostic), List.of(transition, recovering),
+                new java.util.LinkedHashMap<>(),
+                activeSince.plusSeconds(600), Duration.ofSeconds(20), Duration.ofSeconds(300)
+        );
+        String afterBudgetExhausted = RealTeamE2EDriver.hangingDispatchReason(
+                dispatch, List.of(diagnostic), List.of(transition, recovering, blocked),
+                new java.util.LinkedHashMap<>(), activeSince.plusSeconds(600),
+                Duration.ofSeconds(20), Duration.ofSeconds(300)
+        );
+
+        assertThat(whileRecovering).isNull();
+        assertThat(afterBudgetExhausted)
+                .contains("team:rd", "parent_last_progress_at", "terminal_child_tasks=none");
+    }
+
+    /** 旧阶段或不同故障指纹的 RECOVERING incident 不得给当前父停滞无限续期。 */
+    @Test
+    void shouldIgnoreRecoveringIncidentFromDifferentExecutionOrFingerprint() throws Exception {
+        Instant activeSince = Instant.parse("2026-10-24T00:00:00Z");
+        AgentScopeAgentGateway.ActiveExecutionDiagnostic diagnostic =
+                new AgentScopeAgentGateway.ActiveExecutionDiagnostic(
+                        "rd", "session-rd", "team:rd", "todo-mvp",
+                        activeSince, activeSince, List.of()
+                );
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatch = Map.of(
+                "team:rd", new SerialDispatchRegistry.DispatchSnapshot(1, activeSince)
+        );
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode oldRecovering = mapper.readTree("""
+                {"action":"tool_execution_failed","payload":{"tool":"agentscope_dispatch",
+                "execution_id":"agentscope:todo-mvp:2:PRODUCT_DESIGN:rd","owner":"rd",
+                "failure_type":"PARENT_STALLED","failure_fingerprint":"PARENT_STALLED",
+                "attempt":1,"retryable":true,"runtime_status":"RECOVERING"}}
+                """);
+        JsonNode currentTransition = mapper.readTree("""
+                {"seq":3,"action":"workflow_transitioned",
+                "payload":{"to_stage":"TECH_DESIGN","assignee":"rd"}}
+                """);
+        JsonNode wrongFingerprint = mapper.readTree("""
+                {"action":"tool_execution_failed","payload":{"tool":"agentscope_dispatch",
+                "execution_id":"agentscope:todo-mvp:3:TECH_DESIGN:rd","owner":"rd",
+                "failure_type":"CHILD_STALLED","failure_fingerprint":"CHILD_STALLED",
+                "attempt":1,"retryable":true,"runtime_status":"RECOVERING"}}
+                """);
+
+        String reason = RealTeamE2EDriver.hangingDispatchReason(
+                dispatch, List.of(diagnostic),
+                List.of(oldRecovering, currentTransition, wrongFingerprint),
+                new java.util.LinkedHashMap<>(), activeSince.plusSeconds(600),
+                Duration.ofSeconds(20), Duration.ofSeconds(300)
+        );
+
+        assertThat(reason)
+                .contains("team:rd", "parent_last_progress_at", "terminal_child_tasks=none");
     }
 
     /** 同阶段同 Owner 的多个开放 task_assign 应立即暴露其脱敏标识和状态。 */

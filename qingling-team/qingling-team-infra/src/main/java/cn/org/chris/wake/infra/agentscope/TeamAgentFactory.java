@@ -33,6 +33,9 @@ public final class TeamAgentFactory {
     /** 四角色共享的模型实例。 */
     private final Model model;
 
+    /** 与 Gateway 共享且仅保存角色时间戳的模型活动注册表。 */
+    private final ModelActivityRegistry modelActivityRegistry;
+
     /** 按角色提供最小权限团队工具的工厂。 */
     private final RoleToolkitFactory toolkitFactory;
 
@@ -68,7 +71,8 @@ public final class TeamAgentFactory {
             RoleSubagentFactory subagentFactory,
             McpSandboxConfiguration sandboxConfiguration
     ) {
-        this(model, toolkitFactory, subagentFactory, sandboxConfiguration, Map.of(), 30, 30_000, Duration.ofSeconds(30));
+        this(model, toolkitFactory, subagentFactory, sandboxConfiguration, Map.of(), 30, 30_000,
+                Duration.ofSeconds(30), new ModelActivityRegistry());
     }
 
     /**
@@ -88,11 +92,20 @@ public final class TeamAgentFactory {
             Map<String, Set<String>> activeSkillsByRole
     ) {
         this(model, toolkitFactory, subagentFactory, sandboxConfiguration, activeSkillsByRole,
-                30, 30_000, Duration.ofSeconds(30));
+                30, 30_000, Duration.ofSeconds(30), new ModelActivityRegistry());
     }
 
     /**
      * 创建由配置控制迭代、上下文和异步工具超时的团队 Agent 工厂。
+     *
+     * @param model AgentScope 原始模型
+     * @param toolkitFactory 角色 Toolkit 工厂
+     * @param subagentFactory 角色 Sub-Agent 工厂
+     * @param sandboxConfiguration AIO-Sandbox MCP 配置
+     * @param activeSkillsByRole 按角色启用的辅助 Skill
+     * @param maxIterations 单回合最大 ReAct 迭代数
+     * @param maxContextTokens workspace 上下文最大 token 数
+     * @param asyncToolOffloadTimeout 长工具转后台前的等待时间
      */
     public TeamAgentFactory(
             Model model,
@@ -104,7 +117,47 @@ public final class TeamAgentFactory {
             int maxContextTokens,
             Duration asyncToolOffloadTimeout
     ) {
+        this(
+                model,
+                toolkitFactory,
+                subagentFactory,
+                sandboxConfiguration,
+                activeSkillsByRole,
+                maxIterations,
+                maxContextTokens,
+                asyncToolOffloadTimeout,
+                new ModelActivityRegistry()
+        );
+    }
+
+    /**
+     * 创建由配置控制且与 Gateway 共享模型活动记录器的团队 Agent 工厂。
+     *
+     * @param model AgentScope 原始模型 Bean
+     * @param toolkitFactory 角色 Toolkit 工厂
+     * @param subagentFactory 角色 Sub-Agent 工厂
+     * @param sandboxConfiguration AIO-Sandbox MCP 配置
+     * @param activeSkillsByRole 按角色启用的辅助 Skill
+     * @param maxIterations 单回合最大 ReAct 迭代数
+     * @param maxContextTokens workspace 上下文最大 token 数
+     * @param asyncToolOffloadTimeout 长工具转后台前的等待时间
+     * @param modelActivityRegistry 与 Gateway 共享的角色模型活动注册表
+     */
+    public TeamAgentFactory(
+            Model model,
+            RoleToolkitFactory toolkitFactory,
+            RoleSubagentFactory subagentFactory,
+            McpSandboxConfiguration sandboxConfiguration,
+            Map<String, Set<String>> activeSkillsByRole,
+            int maxIterations,
+            int maxContextTokens,
+            Duration asyncToolOffloadTimeout,
+            ModelActivityRegistry modelActivityRegistry
+    ) {
         this.model = Objects.requireNonNull(model, "model 不能为空");
+        this.modelActivityRegistry = Objects.requireNonNull(
+                modelActivityRegistry, "modelActivityRegistry 不能为空"
+        );
         this.toolkitFactory = Objects.requireNonNull(toolkitFactory, "toolkitFactory 不能为空");
         this.subagentFactory = Objects.requireNonNull(subagentFactory, "subagentFactory 不能为空");
         this.sandboxConfiguration = Objects.requireNonNull(
@@ -133,10 +186,12 @@ public final class TeamAgentFactory {
                 .name(role)
                 .description(roleDescription(role))
                 .sysPrompt("遵循当前角色 workspace 中的 AGENTS.md、Skill 与团队协作约束完成任务。")
-                .model(model)
+                .model(new ActivityTrackingModel(model, modelActivityRegistry, role))
                 .toolkit(toolkit)
                 .workspace(roleWorkspace)
-                .stateStore(new JsonFileAgentStateStore(roleWorkspace.resolve(".agentscope/state")))
+                .stateStore(new PendingToolRecoveringStateStore(
+                        new JsonFileAgentStateStore(roleWorkspace.resolve(".agentscope/state"))
+                ))
                 .subagents(subagents)
                 .maxIters(maxIterations)
                 .maxContextTokens(maxContextTokens)

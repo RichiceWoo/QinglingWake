@@ -192,6 +192,14 @@ project_id -> execution_id + status + exit_code + pytest_collected
 
 - **RUNNING/Shell/MCP/Driver 协调修复（2026-10-23）**：通用 `sandbox_execute_bash` 在模型省略或请求过大 timeout 时统一使用 60 秒，Java 传输边界再保留 5 秒固定宽限；参数错误继续不熔断。每个 MCP 工具绑定父角色，Gateway 首次观察 OPEN 时只重建 client 并执行无副作用探针，不重放原 Shell；无论恢复成功与否都将原调用判为未知并抛出 `MCP_CONNECTION_UNAVAILABLE`，成功出口再用连接失败计数封住父回复抢先完成的竞态，交给 Runner 既有 incident 恢复/BLOCKED 链。RUNNING/父进度租约收紧为 4 分 30 秒。Driver 先等待真实 workflow 阶段迁移，再启动对应产物预算；失败路径先关闭运行时、终态化任务，再保存最后 MCP/dispatch/Agent 快照。定向测试、`mvn verify` 与零模型真实 Docker 契约全部通过；真实契约首个 RD/QA Shell 探针均省略 timeout，证明默认限时生效。按用户要求未运行 E2E，Task 8 保持未完成。
 
+- **停滞恢复与流式进度修复（2026-10-24）**：先完成缺陷 1～3，缺陷 4 暂不处理。Driver 的悬挂阈值改为从 Gateway 公开租约派生并固定增加 60 秒，只有当前 workflow execution ID 与故障指纹均匹配的首次可恢复 `agentscope_dispatch` incident 才继续等待，`BLOCKED`/预算耗尽后失败；新增只保存角色时间戳的有界模型活动注册表和每角色纯透传 Model 装饰器，订阅及每个流式分片刷新活动，Gateway 仅在角色只有一个活跃父回合时将其并入统一的父进度判定/诊断；宽限复查改用 `flatMap` + `Mono.justOrEmpty`，故障自行消失不再触发 NPE。定向套件最终 62 项通过，`mvn verify` 299 项通过，零模型真实 Docker 1 IT 通过；未运行真实 E2E。
+
+- **Bash 会话争用与恢复探针修复（2026-10-24）**：审计 AIO-Sandbox 1.11.0 源码确认 `new_session=false` 跨 MCP client/Owner 共享模块级默认 shell，会话上限为 10，当前代码不存在按 Owner 空闲保活。通用 Bash 和 Test Runner 控制命令保留默认会话，但在所有角色间使用同一个公平单飞许可覆盖完整 MCP 调用；恢复链在同一许可内移除旧 client、清理全部服务端 shell session、注册新 client，并以 `new_session=true` 执行无副作用探针，原调用仍不重放。健康快照补充脱敏恢复阶段、尝试时间和耗时。真实契约否决了“每次调用都新建会话”的中间方案：其会耗尽 10 个会话并引发 tmux/PS1 失步，现已撤销。最终定向 21 项、`mvn verify` 301 项和零模型真实 Docker 1 IT 均通过；未运行真实 E2E，Task 8 保持未完成。
+
+- **缺陷 1～5 修复后单次 E2E（2026-10-24）**：严格只运行一次干净 `qwen3.8-flash happy-path`，无重试和后续场景。流程完成 checkpoint、产品设计、技术设计评审/修订并进入 `CODE_IMPLEMENTATION/RD`。4 个 Test Runner execution 中前三个为 31 collected、21 passed、10 failed、95% coverage 的业务失败，第四个为 24 collected 后 2 个 `app` 导入收集错误；MCP 四路始终 CLOSED/0 failures，缺陷 4、5 未复现。RD 首次 `PARENT_STALLED` 正确进入 RECOVERING；随后 QA 补交测试设计的父 dispatch 丢失 project ID，session 无进展且无子任务，未产生可归属 incident，Driver 约 62 分钟后才报告 `team:qa/project_id=""` 悬挂，远超 5 分 30 秒目标。Failsafe 1 failure，测试 7064 秒，Maven 1 小时 58 分；finally 后无 dispatch/Agent/shell session 或孤儿进程。Task 8 保持未完成。
+
+- **E2E 后续缺口修复（2026-10-24）**：Heartbeat 可从可信元数据、`new_mail` 或唯一 workflow Owner 安全恢复 project ID，并把它传播到 RuntimeContext、团队提示和 incident；Gateway 父进度快照统一记录 session/model/effective 时间及来源，Driver 对超时且缺少 Gateway 活动诊断的 orphan `team:*` dispatch 快速失败；AgentScope 状态存储为声明式子代理补齐 pending tool 的确定性错误结果且不重放工具；完成门禁与 RD 模板拒绝 `code/app/main.py` 和测试中的 `app` 包导入，只允许 `code/main.py` 唯一入口。定向 71 项、`mvn verify` 307 项及零模型真实 Docker 1 IT 均通过，`git diff --check` 通过。按用户要求未运行真实 E2E，因此 Task 8 继续保持未完成。
+
 - [ ] 完成
 
 ## Task 9: 最终回归、质量审计与父需求回写

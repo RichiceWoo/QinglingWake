@@ -2,6 +2,8 @@ package cn.org.chris.wake.domain.gateway;
 
 import cn.org.chris.wake.domain.model.AgentExecutionException;
 
+import java.util.Optional;
+
 /**
  * 隔离 Runner 与运行时 incident 持久化、恢复调度和阻断查询的领域端口。
  */
@@ -70,6 +72,16 @@ public interface RuntimeIncidentGateway {
             String occurrenceId,
             AgentExecutionException.FailureType failureType
     );
+
+    /**
+     * 在内部 heartbeat 没有显式项目标识时解析该角色唯一的当前工作流项目。
+     *
+     * @param role 团队角色
+     * @return 唯一候选项目；不存在或候选不唯一时为空
+     */
+    default Optional<String> resolveProjectId(String role) {
+        return Optional.empty();
+    }
 
     /**
      * 判断项目是否已经因运行时恢复耗尽进入 BLOCKED。

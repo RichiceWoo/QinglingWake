@@ -7,13 +7,20 @@ import cn.org.chris.wake.infra.agentscope.ProjectTestExecution;
 import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
 
 import java.util.Locale;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
  * 在 Java 侧校验 RD 与 QA 成功回报的不可绕过证据。
  */
 public final class TaskCompletionEvidenceGate {
+
+    /** 测试不得依赖不存在或歧义的顶层 app 包，统一从 code 根目录公开模块导入。 */
+    private static final Pattern FORBIDDEN_APP_IMPORT = Pattern.compile(
+            "(?m)^\\s*(?:from\\s+app(?:\\.|\\s)|import\\s+app(?:\\.|\\s|$))"
+    );
 
     /** 共享项目文件读取端口。 */
     private final WorkspaceRepository workspaceRepository;
@@ -110,6 +117,7 @@ public final class TaskCompletionEvidenceGate {
         if (readableNonBlank(projectId, "code/app/main.py")) {
             throw new IllegalStateException("RD task_done 被拒绝：禁止同时存在替代入口 code/app/main.py");
         }
+        validatePythonArtifactContract(projectId);
     }
 
     /**
@@ -126,6 +134,7 @@ public final class TaskCompletionEvidenceGate {
         if (execution.pytestCollected() <= 0) {
             throw new IllegalStateException("QA task_done 被拒绝：真实执行未收集到 pytest 用例");
         }
+        validatePythonArtifactContract(projectId);
         String report = readRequired(projectId, "qa/test_report.md", "QA task_done 被拒绝：缺少 qa/test_report.md");
         boolean inlineMatrix = report.contains("证据矩阵")
                 || report.toLowerCase(Locale.ROOT).contains("evidence matrix");
@@ -322,6 +331,30 @@ public final class TaskCompletionEvidenceGate {
             return !workspaceRepository.read(projectId, "qa", path).isBlank();
         } catch (RuntimeException ignored) {
             return false;
+        }
+    }
+
+    /**
+     * 强制 Python 产物只有 code/main.py 入口，且测试从 code 根公开模块导入。
+     *
+     * @param projectId 当前项目标识
+     */
+    private void validatePythonArtifactContract(String projectId) {
+        List<String> paths = workspaceRepository.list(projectId, "qa");
+        if (paths.contains("code/app/main.py")) {
+            throw new IllegalStateException("task_done 被拒绝：禁止存在替代入口 code/app/main.py");
+        }
+        for (String path : paths) {
+            if (!path.endsWith(".py")
+                    || !(path.startsWith("code/tests/") || path.startsWith("qa/contract_tests/"))) {
+                continue;
+            }
+            String content = workspaceRepository.read(projectId, "qa", path);
+            if (FORBIDDEN_APP_IMPORT.matcher(content).find()) {
+                throw new IllegalStateException(
+                        "task_done 被拒绝：测试必须从 code 根公开模块导入，禁止依赖 app 包: " + path
+                );
+            }
         }
     }
 }

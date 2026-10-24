@@ -25,6 +25,7 @@ import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.CleanupPolicy;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
 import cn.org.chris.wake.infra.agentscope.McpSandboxConfiguration;
+import cn.org.chris.wake.infra.agentscope.ModelActivityRegistry;
 import cn.org.chris.wake.infra.agentscope.RoleSubagentFactory;
 import cn.org.chris.wake.infra.agentscope.TeamAgentFactory;
 import cn.org.chris.wake.infra.agentscope.tool.ImageAndSearchTools;
@@ -428,6 +429,7 @@ public class RuntimeConfiguration {
             McpSandboxConfiguration sandboxConfiguration,
             PgVectorMemoryIndexer memoryIndexer
     ) {
+        ModelActivityRegistry modelActivityRegistry = new ModelActivityRegistry();
         TeamAgentFactory factory = new TeamAgentFactory(
                 agentModel,
                 toolkitFactory,
@@ -436,9 +438,12 @@ public class RuntimeConfiguration {
                 Map.of(),
                 settings.properties().agent().maxIterations(),
                 settings.properties().agent().maxInputTokens(),
-                settings.properties().agent().asyncToolOffloadTimeout()
+                settings.properties().agent().asyncToolOffloadTimeout(),
+                modelActivityRegistry
         );
-        return new AgentScopeAgentGateway(factory.createAll(), memoryIndexer, sandboxConfiguration);
+        return new AgentScopeAgentGateway(
+                factory.createAll(), memoryIndexer, sandboxConfiguration, modelActivityRegistry
+        );
     }
 
     /** 创建 Session 路由与只写审计服务。 */

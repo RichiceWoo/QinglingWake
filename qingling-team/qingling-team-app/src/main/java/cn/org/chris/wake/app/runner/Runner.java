@@ -190,9 +190,9 @@ public final class Runner implements CronDispatchGateway {
         if (!(cause instanceof AgentExecutionException agentFailure)) {
             return;
         }
-        String projectId = wakeProjectId(inbound);
         try {
             String role = routingKeyResolver.resolve(inbound).role();
+            String projectId = resolvedProjectId(inbound, role);
             if (projectId == null) {
                 runtimeIncidentGateway.reportUnscopedAgentExecutionFailure(
                         role, inbound.msgId(), agentFailure.failureType()
@@ -258,13 +258,14 @@ public final class Runner implements CronDispatchGateway {
                 ? CompletableFuture.completedFuture(null)
                 : sendThinkingOrContinue(inbound);
         return thinking.thenCompose(cardMessageId -> {
+            Map<String, Object> attributes = requestAttributes(inbound, session, target);
             AgentRequest request = new AgentRequest(
                     target.role(),
                     target.userId(),
                     session.activeSessionId(),
-                    agentContent(inbound, target, prepared.content()),
+                    agentContent(inbound, target, prepared.content(), attributes),
                     prepared.attachmentPaths(),
-                    requestAttributes(inbound, session)
+                    attributes
             );
             return agentGateway.execute(request)
                     .thenCompose(reply -> persistAndReply(
@@ -350,15 +351,20 @@ public final class Runner implements CronDispatchGateway {
      *
      * @param inbound 入站消息
      * @param session 当前会话
+     * @param target 已解析的角色目标
      * @return 不可变执行属性
      */
-    private static Map<String, Object> requestAttributes(InboundMessage inbound, SessionRoute session) {
+    private Map<String, Object> requestAttributes(
+            InboundMessage inbound,
+            SessionRoute session,
+            RoutingKeyResolver.RoutingTarget target
+    ) {
         Map<String, Object> attributes = new LinkedHashMap<>(inbound.meta());
         attributes.put("routingKey", inbound.routingKey());
         attributes.put("rootId", inbound.rootId());
         attributes.put("verbose", session.verbose());
         attributes.put("cron", inbound.cron());
-        String projectId = wakeProjectId(inbound);
+        String projectId = target.teamRoute() ? resolvedProjectId(inbound, target.role()) : null;
         if (projectId != null) {
             attributes.put("projectId", projectId);
         }
@@ -366,17 +372,40 @@ public final class Runner implements CronDispatchGateway {
     }
 
     /**
-     * 从内部 new_mail 唤醒中提取稳定项目标识，使父 Agent、Sub-Agent 和工具共享同一执行上下文。
+     * 按元数据、new_mail 协议和唯一工作流 Owner 顺序解析稳定项目标识。
      *
      * @param inbound 原始入站消息
-     * @return 项目标识；非项目邮件唤醒时返回 null
+     * @param role 当前团队角色
+     * @return 项目标识；无法唯一解析时返回 null
      */
-    private static String wakeProjectId(InboundMessage inbound) {
-        if (!inbound.cron() || !inbound.content().startsWith(NEW_MAIL_WAKE_PREFIX)) {
-            return null;
+    private String resolvedProjectId(InboundMessage inbound, String role) {
+        String metadataProjectId = metadataProjectId(inbound.meta());
+        if (metadataProjectId != null) {
+            return metadataProjectId;
         }
-        String projectId = inbound.content().substring(NEW_MAIL_WAKE_PREFIX.length()).trim();
-        return projectId.isEmpty() ? null : projectId;
+        if (inbound.cron() && inbound.content().startsWith(NEW_MAIL_WAKE_PREFIX)) {
+            String projectId = inbound.content().substring(NEW_MAIL_WAKE_PREFIX.length()).trim();
+            if (!projectId.isEmpty()) {
+                return projectId;
+            }
+        }
+        return runtimeIncidentGateway.resolveProjectId(role).orElse(null);
+    }
+
+    /**
+     * 从受信任适配器元数据读取项目标识，同时兼容 Java 与工具协议字段名。
+     *
+     * @param metadata 入站扩展元数据
+     * @return 非空项目标识；未提供时为 null
+     */
+    private static String metadataProjectId(Map<String, Object> metadata) {
+        for (String key : java.util.List.of("projectId", "project_id")) {
+            Object value = metadata.get(key);
+            if (value instanceof String text && !text.isBlank()) {
+                return text.trim();
+            }
+        }
+        return null;
     }
 
     /**
@@ -385,19 +414,28 @@ public final class Runner implements CronDispatchGateway {
      * @param inbound 原始入站消息
      * @param target 已解析的角色目标
      * @param preparedContent 附件处理后的正文
-     * @return 传给 Agent 的显式操作提示；非邮件唤醒保持原文
+     * @param attributes 已解析的执行上下文属性
+     * @return 传给 Agent 的显式项目操作提示
      */
     private static String agentContent(
             InboundMessage inbound,
             RoutingKeyResolver.RoutingTarget target,
-            String preparedContent
+            String preparedContent,
+            Map<String, Object> attributes
     ) {
-        if (!target.teamRoute() || !inbound.cron() || !preparedContent.startsWith(NEW_MAIL_WAKE_PREFIX)) {
+        if (!target.teamRoute()) {
             return preparedContent;
         }
-        String projectId = preparedContent.substring(NEW_MAIL_WAKE_PREFIX.length()).trim();
+        String projectId = Objects.toString(attributes.get("projectId"), "").trim();
         if (projectId.isEmpty()) {
             return preparedContent;
+        }
+        if (!inbound.cron() || !preparedContent.startsWith(NEW_MAIL_WAKE_PREFIX)) {
+            return """
+                    系统团队唤醒。当前 Java 工作流唯一 project_id 是 `%s`。
+                    本轮第一步必须调用 read_inbox(project_id="%s")，所有项目工具必须继续使用同一 project_id。
+                    原始唤醒：%s
+                    """.formatted(projectId, projectId, preparedContent).strip();
         }
         return """
                 系统 new_mail 唤醒。真实 project_id 是 `%s`。

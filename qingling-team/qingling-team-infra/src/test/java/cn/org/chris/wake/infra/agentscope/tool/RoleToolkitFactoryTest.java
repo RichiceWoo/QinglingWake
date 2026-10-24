@@ -92,6 +92,25 @@ class RoleToolkitFactoryTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    /** heartbeat 项目解析只在角色拥有唯一当前工作流项目时返回候选。 */
+    @Test
+    void shouldResolveOnlyUniqueProjectOwnedByRole() {
+        workspaceRepository.initializeProject("qa-project-one");
+        eventService.appendWorkflowTransition(
+                "qa-project-one", Map.of("to_stage", "QA_TEST_EXECUTION")
+        );
+
+        assertThat(factory.resolveProjectId("qa")).contains("qa-project-one");
+        assertThat(factory.resolveProjectId("rd")).isEmpty();
+
+        workspaceRepository.initializeProject("qa-project-two");
+        eventService.appendWorkflowTransition(
+                "qa-project-two", Map.of("to_stage", "QA_TEST_DESIGN")
+        );
+
+        assertThat(factory.resolveProjectId("qa")).isEmpty();
+    }
+
     /**
      * 图片和网页搜索只能由对应 Skill 显式开启，未开启时不得进入模型 schema。
      */

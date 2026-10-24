@@ -18,6 +18,8 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -231,6 +233,8 @@ class McpSandboxConfigurationTest {
     void shouldOpenCircuitRebuildConnectionAndCloseAfterProbe() {
         AtomicInteger registrations = new AtomicInteger();
         AtomicInteger failedDelegateCalls = new AtomicInteger();
+        AtomicInteger recoveredCalls = new AtomicInteger();
+        AtomicInteger sessionResets = new AtomicInteger();
         McpServerConfig server = new McpServerConfig();
         server.setTransport(McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT);
         server.setEnableTools(List.of("sandbox_execute_bash"));
@@ -240,12 +244,13 @@ class McpSandboxConfigurationTest {
                 (toolkit, servers, listener) -> {
                     AgentTool tool = registrations.incrementAndGet() == 1
                             ? new FailingSandboxTool(failedDelegateCalls)
-                            : new RunningSandboxTool();
+                            : new RecoverySessionSandboxTool(recoveredCalls);
                     toolkit.registerAgentTool(tool);
                     listener.onCompleted(McpServerRegistrationResult.success(
                             "aio-sandbox", McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT
                     ));
-                }
+                },
+                sessionResets::incrementAndGet
         );
         Toolkit toolkit = new Toolkit();
         configuration.applyTo(HarnessAgent.builder(), toolkit);
@@ -274,6 +279,8 @@ class McpSandboxConfigurationTest {
 
         assertThat(recovered).isTrue();
         assertThat(registrations).hasValue(2);
+        assertThat(sessionResets).hasValue(1);
+        assertThat(recoveredCalls).hasValue(2);
         assertThat(afterRecovery).isNotNull();
         assertThat(afterRecovery.getState()).isEqualTo(ToolResultState.SUCCESS);
         assertThat(configuration.circuitHealth()).singleElement().satisfies(health -> {
@@ -281,14 +288,65 @@ class McpSandboxConfigurationTest {
             assertThat(health.consecutiveFailures()).isZero();
             assertThat(health.totalFailures()).isEqualTo(1);
             assertThat(health.lastRecoveredAt()).isNotNull();
+            assertThat(health.lastRecoveryAttemptAt()).isNotNull();
+            assertThat(health.lastRecoveryFailure()).isEmpty();
+            assertThat(health.lastRecoveryDurationMillis()).isNotNegative();
         });
     }
 
     /**
-     * 通用 Bash 调用必须覆盖模型传入的 new_session，且 ToolUse content 与实际参数保持一致。
+     * 新连接的恢复探针失败时必须保持 OPEN，并暴露不含底层错误正文的阶段与耗时。
      */
     @Test
-    void shouldForceStatelessBashInput() {
+    void shouldExposeRedactedRecoveryProbeFailure() {
+        AtomicInteger registrations = new AtomicInteger();
+        AtomicInteger failedDelegateCalls = new AtomicInteger();
+        McpServerConfig server = new McpServerConfig();
+        server.setTransport(McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT);
+        server.setEnableTools(List.of("sandbox_execute_bash"));
+        McpSandboxConfiguration configuration = new McpSandboxConfiguration(
+                "aio-sandbox",
+                server,
+                (toolkit, servers, listener) -> {
+                    AgentTool tool = registrations.incrementAndGet() == 1
+                            ? new FailingSandboxTool(failedDelegateCalls)
+                            : new WedgedSandboxTool();
+                    toolkit.registerAgentTool(tool);
+                    listener.onCompleted(McpServerRegistrationResult.success(
+                            "aio-sandbox", McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT
+                    ));
+                }
+        );
+        Toolkit toolkit = new Toolkit();
+        configuration.applyTo(HarnessAgent.builder(), toolkit);
+        AgentTool managed = toolkit.getTool("sandbox_execute_bash");
+        ToolUseBlock use = new ToolUseBlock(
+                "call-failure", "sandbox_execute_bash", Map.of("cmd", "pwd")
+        );
+        ToolCallParam param = ToolCallParam.builder().toolUseBlock(use).input(use.getInput()).build();
+
+        managed.callAsync(param).block();
+        boolean recovered = ((McpProjectTestRunner.RecoverableMcpTool) managed)
+                .recoverConnection().block();
+
+        assertThat(recovered).isFalse();
+        assertThat(registrations).hasValue(2);
+        assertThat(configuration.circuitHealth()).singleElement().satisfies(health -> {
+            assertThat(health.state()).isEqualTo(McpSandboxConfiguration.CircuitState.OPEN);
+            assertThat(health.lastRecoveredAt()).isNull();
+            assertThat(health.lastRecoveryAttemptAt()).isNotNull();
+            assertThat(health.lastRecoveryFailure())
+                    .isEqualTo("FRESH_SESSION_PROBE:IllegalStateException")
+                    .doesNotContain("top-secret");
+            assertThat(health.lastRecoveryDurationMillis()).isNotNegative();
+        });
+    }
+
+    /**
+     * 通用 Bash 调用必须覆盖模型传入的新会话参数，且 ToolUse content 与实际参数保持一致。
+     */
+    @Test
+    void shouldForceSingleFlightBashInput() {
         AtomicReference<ToolCallParam> captured = new AtomicReference<>();
         McpServerConfig server = new McpServerConfig();
         server.setTransport(McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT);
@@ -341,6 +399,61 @@ class McpSandboxConfigurationTest {
 
         assertThat(captured.get().getInput())
                 .containsEntry("timeout", McpSandboxConfiguration.MAX_SHELL_TIMEOUT_SECONDS);
+    }
+
+    /**
+     * 不同角色同时发起 Bash 调用时必须在 Java 侧单飞，禁止并发写入全局默认会话。
+     */
+    @Test
+    void shouldSerializeConcurrentBashCallsAcrossOwners() {
+        AtomicInteger registrations = new AtomicInteger();
+        AtomicReference<ToolCallParam> managerCall = new AtomicReference<>();
+        AtomicReference<ToolCallParam> qaCall = new AtomicReference<>();
+        AtomicInteger activeCalls = new AtomicInteger();
+        AtomicInteger maxActiveCalls = new AtomicInteger();
+        McpServerConfig server = new McpServerConfig();
+        server.setTransport(McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT);
+        server.setEnableTools(List.of("sandbox_execute_bash"));
+        McpSandboxConfiguration configuration = new McpSandboxConfiguration(
+                "aio-sandbox",
+                server,
+                (toolkit, servers, listener) -> {
+                    AtomicReference<ToolCallParam> target = registrations.incrementAndGet() == 1
+                            ? managerCall
+                            : qaCall;
+                    toolkit.registerAgentTool(new ConcurrentCapturingSandboxTool(
+                            target, activeCalls, maxActiveCalls
+                    ));
+                    listener.onCompleted(McpServerRegistrationResult.success(
+                            "aio-sandbox", McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT
+                    ));
+                }
+        );
+        Toolkit managerToolkit = new Toolkit();
+        Toolkit qaToolkit = new Toolkit();
+        configuration.applyTo(HarnessAgent.builder(), managerToolkit, "manager");
+        configuration.applyTo(HarnessAgent.builder(), qaToolkit, "qa");
+        ToolUseBlock managerUse = new ToolUseBlock(
+                "call-manager", "sandbox_execute_bash", Map.of("cmd", "pwd", "new_session", false)
+        );
+        ToolUseBlock qaUse = new ToolUseBlock(
+                "call-qa", "sandbox_execute_bash", Map.of("cmd", "pwd", "new_session", false)
+        );
+
+        reactor.core.publisher.Mono.zip(
+                managerToolkit.getTool("sandbox_execute_bash").callAsync(ToolCallParam.builder()
+                        .toolUseBlock(managerUse)
+                        .input(managerUse.getInput())
+                        .build()),
+                qaToolkit.getTool("sandbox_execute_bash").callAsync(ToolCallParam.builder()
+                        .toolUseBlock(qaUse)
+                        .input(qaUse.getInput())
+                        .build())
+        ).block();
+
+        assertThat(managerCall.get().getInput()).containsEntry("new_session", false);
+        assertThat(qaCall.get().getInput()).containsEntry("new_session", false);
+        assertThat(maxActiveCalls).hasValue(1);
     }
 
     /**
@@ -449,7 +562,8 @@ class McpSandboxConfigurationTest {
      * AgentScope 外层超时取消 MCP Mono 时也必须打开熔断，供 E2E 快速报告直接原因。
      */
     @Test
-    void shouldOpenCircuitWhenOuterExecutorCancelsCall() {
+    void shouldOpenCircuitWhenOuterExecutorCancelsCall() throws InterruptedException {
+        CountDownLatch transportStarted = new CountDownLatch(1);
         McpServerConfig server = new McpServerConfig();
         server.setTransport(McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT);
         server.setEnableTools(List.of("sandbox_execute_bash"));
@@ -457,7 +571,7 @@ class McpSandboxConfigurationTest {
                 "aio-sandbox",
                 server,
                 (toolkit, servers, listener) -> {
-                    toolkit.registerAgentTool(new NeverCompletingSandboxTool());
+                    toolkit.registerAgentTool(new NeverCompletingSandboxTool(transportStarted));
                     listener.onCompleted(McpServerRegistrationResult.success(
                             "aio-sandbox", McpSandboxConfiguration.STREAMABLE_HTTP_TRANSPORT
                     ));
@@ -470,6 +584,7 @@ class McpSandboxConfigurationTest {
         reactor.core.Disposable subscription = toolkit.getTool("sandbox_execute_bash")
                 .callAsync(ToolCallParam.builder().toolUseBlock(use).input(use.getInput()).build())
                 .subscribe();
+        assertThat(transportStarted.await(1, TimeUnit.SECONDS)).isTrue();
         subscription.dispose();
 
         assertThat(configuration.circuitHealth()).singleElement().satisfies(health -> {
@@ -548,6 +663,148 @@ class McpSandboxConfigurationTest {
         @Override
         public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
             calls.incrementAndGet();
+            return reactor.core.publisher.Mono.just(ToolResultBlock.error("Bearer top-secret"));
+        }
+    }
+
+    /** 验证恢复探针使用新会话、后续业务调用回到已重置默认会话的工具替身。 */
+    private static final class RecoverySessionSandboxTool implements AgentTool {
+
+        /** 恢复探针与后续业务调用的成功次数。 */
+        private final AtomicInteger recoveredCalls;
+
+        /** 是否已经观察到全新会话恢复探针。 */
+        private volatile boolean freshProbeObserved;
+
+        /**
+         * 创建恢复会话工具替身。
+         *
+         * @param recoveredCalls 恢复后调用计数器
+         */
+        private RecoverySessionSandboxTool(AtomicInteger recoveredCalls) {
+            this.recoveredCalls = recoveredCalls;
+        }
+
+        /** 返回真实 MCP 工具名。 */
+        @Override
+        public String getName() {
+            return "sandbox_execute_bash";
+        }
+
+        /** 返回恢复会话约束说明。 */
+        @Override
+        public String getDescription() {
+            return "要求探针新建会话并重置默认会话";
+        }
+
+        /** 返回最小参数 schema。 */
+        @Override
+        public Map<String, Object> getParameters() {
+            return Map.of("type", "object");
+        }
+
+        /** 探针必须新建会话，后续业务调用必须回到单飞保护的默认会话。 */
+        @Override
+        public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            boolean recoveryProbe = "mcp-recovery-probe".equals(param.getToolUseBlock().getId());
+            boolean newSession = Boolean.TRUE.equals(param.getInput().get("new_session"));
+            if (recoveryProbe) {
+                freshProbeObserved = newSession;
+            } else if (!freshProbeObserved || newSession) {
+                return reactor.core.publisher.Mono.just(ToolResultBlock.error("session recovery invalid"));
+            }
+            recoveredCalls.incrementAndGet();
+            return reactor.core.publisher.Mono.just(ToolResultBlock.text("ok"));
+        }
+    }
+
+    /** 延迟完成并记录并发数的 Bash 工具替身。 */
+    private static final class ConcurrentCapturingSandboxTool implements AgentTool {
+
+        /** 当前工具收到的受控调用参数。 */
+        private final AtomicReference<ToolCallParam> captured;
+
+        /** 当前正在执行的委托数量。 */
+        private final AtomicInteger activeCalls;
+
+        /** 观测到的最大并发委托数量。 */
+        private final AtomicInteger maxActiveCalls;
+
+        /**
+         * 创建并发观测工具替身。
+         *
+         * @param captured 调用参数接收器
+         * @param activeCalls 当前执行计数器
+         * @param maxActiveCalls 最大并发计数器
+         */
+        private ConcurrentCapturingSandboxTool(
+                AtomicReference<ToolCallParam> captured,
+                AtomicInteger activeCalls,
+                AtomicInteger maxActiveCalls
+        ) {
+            this.captured = captured;
+            this.activeCalls = activeCalls;
+            this.maxActiveCalls = maxActiveCalls;
+        }
+
+        /** 返回真实 MCP 工具名。 */
+        @Override
+        public String getName() {
+            return "sandbox_execute_bash";
+        }
+
+        /** 返回并发观测说明。 */
+        @Override
+        public String getDescription() {
+            return "观测跨角色 Bash 并发";
+        }
+
+        /** 返回最小参数 schema。 */
+        @Override
+        public Map<String, Object> getParameters() {
+            return Map.of("type", "object");
+        }
+
+        /** 延迟完成调用，使未串行化实现稳定暴露并发数大于一。 */
+        @Override
+        public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            return reactor.core.publisher.Mono.defer(() -> {
+                captured.set(param);
+                int active = activeCalls.incrementAndGet();
+                maxActiveCalls.accumulateAndGet(active, Math::max);
+                return reactor.core.publisher.Mono.delay(Duration.ofMillis(50))
+                        .map(ignored -> {
+                            activeCalls.decrementAndGet();
+                            return ToolResultBlock.text("ok");
+                        });
+            });
+        }
+    }
+
+    /** 始终返回失败的恢复候选工具，用于验证恢复失败诊断。 */
+    private static final class WedgedSandboxTool implements AgentTool {
+
+        /** 返回真实 MCP 工具名。 */
+        @Override
+        public String getName() {
+            return "sandbox_execute_bash";
+        }
+
+        /** 返回 wedged 会话说明。 */
+        @Override
+        public String getDescription() {
+            return "模拟无法恢复的 shell 会话";
+        }
+
+        /** 返回最小参数 schema。 */
+        @Override
+        public Map<String, Object> getParameters() {
+            return Map.of("type", "object");
+        }
+
+        /** 返回包含敏感占位文本的失败结果，验证健康快照不会透传正文。 */
+        @Override
+        public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
             return reactor.core.publisher.Mono.just(ToolResultBlock.error("Bearer top-secret"));
         }
     }
@@ -669,6 +926,18 @@ class McpSandboxConfigurationTest {
     /** 模拟只能由外层 ToolExecutor 超时取消的永久 pending MCP 调用。 */
     private static final class NeverCompletingSandboxTool implements AgentTool {
 
+        /** 真实委托开始订阅的同步信号。 */
+        private final CountDownLatch transportStarted;
+
+        /**
+         * 创建永久 pending 工具替身。
+         *
+         * @param transportStarted 委托开始订阅的同步信号
+         */
+        private NeverCompletingSandboxTool(CountDownLatch transportStarted) {
+            this.transportStarted = transportStarted;
+        }
+
         /** 返回真实 MCP 工具名。 */
         @Override
         public String getName() {
@@ -690,7 +959,10 @@ class McpSandboxConfigurationTest {
         /** 返回不会自行终止的 Mono。 */
         @Override
         public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
-            return reactor.core.publisher.Mono.never();
+            return reactor.core.publisher.Mono.defer(() -> {
+                transportStarted.countDown();
+                return reactor.core.publisher.Mono.never();
+            });
         }
     }
 }

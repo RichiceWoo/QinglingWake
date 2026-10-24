@@ -230,6 +230,48 @@ RUNNING 与父回合真实进度租约从 5 分钟收紧到 4 分 30 秒，确�
 
 定向 45 项、完整 `mvn verify` 287 项和零模型真实 Docker `RealSandboxToolContractIT` 1 IT 全部通过。真实契约首个 RD/QA Shell 探针均故意省略 timeout，确认生产包装层会真实注入 60 秒；IT 耗时 15.64 秒、Maven 总耗时 31.216 秒，NoCallModel 未调用百炼，结束后无 pytest/pip/tmux 孤儿进程。本轮未启动真实 E2E，Task 8、Task 9 与父需求 Task 18 仍保持未完成。
 
+### 12.2 2026-10-24 停滞恢复与流式进度修复结论
+
+已先修复本轮缺陷 1、2、3，缺陷 4 的 QA 空闲 MCP 会话假设不在本轮范围内。`AgentScopeAgentGateway.DEFAULT_CHILD_TASK_STALL_TIMEOUT` 现在是唯一公开租约来源，E2E Driver 从该租约派生“租约 + 60 秒”的悬挂阈值；同 execution/Owner 最新 incident 仍为首次、可重试、`RECOVERING` 时，Driver 不再抢跑运行时恢复链，预算耗尽为 `BLOCKED` 后才允许报告不可恢复悬挂。
+
+新增有界 `ModelActivityRegistry` 与按角色独占的纯透传 `ActivityTrackingModel`。装饰器只在订阅边界和每个流式分片记录角色活动时间，不记录提示词、模型输出或凭据，并完整委托模型名称、结构化输出能力和上下文窗口。装饰只发生在 `TeamAgentFactory` 创建的角色 Agent 内部，Spring `Model` Bean 的具体类型保持不变。Factory 与 Gateway 共享同一注册表；父停滞判定与诊断统一取 session 证据和模型活动的较晚时间。只有该角色唯一活跃父回合时才采信角色级活动，同角色并发回合的不可归因活动会被封存，避免一个 session 给另一个 session 续租。
+
+停滞宽限复查已由不允许 null 的 Reactor `map` 改为 `flatMap` + `Mono.justOrEmpty`；故障在宽限内自行消失时继续父回合，MCP 连接故障仍走原有独立分支。对 Gateway 与 Runner 的同类 nullable Reactor 映射进行了搜索，未发现其他同型调用。
+
+定向套件先连续两次各通过 61 项，补充当前 execution ID 与故障指纹精确匹配后通过 62 项；最终完整 `mvn verify` 通过 299 项（domain 44、app 37、infra 136、adapter 13、starter 69），耗时 15.036 秒；零模型真实 Docker `RealSandboxToolContractIT` 1 IT 在 15.52 秒通过，Maven 总耗时 34.208 秒。本轮未运行真实 E2E，Task 8、Task 9 与父需求 Task 18 继续保持未完成。
+
+### 12.3 2026-10-24 Bash 会话争用与恢复探针修复结论
+
+已在真实 AIO-Sandbox 1.11.0 容器内审计服务端实现：`app/mcp/shell.py` 的 `_default_session_id` 是模块级全局值，所有 MCP client/Owner 的 `new_session=false` 调用会复用同一个默认 shell 会话；服务端允许最多 10 个 shell 会话。当前 Java 代码不存在此前假设的按 Owner 空闲保活任务，因此无需保留或关闭该错误方向。
+
+普通 `sandbox_execute_bash` 与 Test Runner 的短控制命令继续使用默认会话，但由 `McpSandboxConfiguration` 共享的公平单许可量在完整 MCP 调用期间执行跨角色单飞，杜绝并发写入同一 OpenHands PS1 会话。长时间依赖安装与项目测试不再建议经通用 Bash 静默执行，而应使用已有异步 `run_project_tests`。等待许可期间取消不会误开熔断；传输已经开始后发生取消或连接错误仍按既有规则进入 circuit。
+
+连接恢复覆盖真正故障的 shell 层：恢复持有同一单飞许可，移除旧 MCP client，调用 AIO-Sandbox 原生 `DELETE /v1/shell/sessions` 清理服务端会话，再注册新 client，并以 `new_session=true` 执行无副作用探针；探针成功才替换 delegate 并关闭 circuit，原始 Shell 永不重放。健康快照新增最近恢复尝试时间、脱敏失败阶段/异常类型和恢复耗时，E2E Driver 证据同步携带这些字段，不记录异常消息、命令或凭据。
+
+曾尝试让每条 Bash 都使用 `new_session=true`，但真实 Docker 契约在约 65 秒后暴露出 10 会话上限、持续淘汰和 tmux/PS1 失步，因此已撤销该实现；这证明“每次调用新建会话”不是可接受的隔离方案。最终定向 `McpSandboxConfigurationTest,McpProjectTestRunnerTest` 通过 21 项；完整 `mvn verify` 通过 301 项（domain 44、app 37、infra 138、adapter 13、starter 69），耗时 14.910 秒；零模型真实 Docker `RealSandboxToolContractIT` 通过 1 IT（17.58 秒，Maven 34.403 秒），连续 10 次 Shell、5 次 Test Runner、受控连接恢复及无 pending/orphan 断言均通过。本轮未运行真实 E2E，Task 8、Task 9 与父需求 Task 18 继续保持未完成。
+
+### 12.4 2026-10-24 单次真实 E2E 结论
+
+按用户要求只执行一次干净的显式 `qwen3.8-flash happy-path`，未重试或启动后三个场景。模型预检 available；流程完成需求 checkpoint、PM 产品设计、技术设计插入评审、RD 第 2 轮技术设计修订，并进入 `CODE_IMPLEMENTATION/RD`。技术设计长生成跨过旧文件租约窗口仍正常完成，证明流式活动租约没有误杀该回合。
+
+代码阶段共产生 4 个真实 Test Runner execution：前三个均为 `FINISHED/exit_code=1`，31 collected、21 passed、10 failed、coverage 95%，被正确分类为 pytest 业务失败；后续 continuation 修改实现并扩充测试，第四个为 `FINISHED/exit_code=2`，24 collected 后因 `tests/test_acceptance_trace.py` 与 `tests/test_services.py` 仍导入不存在的 `app` 包而出现 2 个收集错误。期间出现一次已终态、已 delivered 的 continuation 错误 `Pending tool calls exist without results`，后续 continuation 保持单飞，没有并发重复任务。RD 最终在 `CODE_IMPLEMENTATION` 产生 attempt 1、retryable、`RECOVERING` 的 `PARENT_STALLED` incident，stage/Owner 保持不变。
+
+最终直接失败不是 MCP：QA 在处理测试设计补交/澄清后形成 `route=team:qa`、`project_id=""` 的父 dispatch，session 在 19:30:32Z 后无进展、无子任务，但因为缺少项目归属没有生成可恢复 incident；Driver 最终于 20:32:52Z 报告不可恢复 dispatch 悬挂。最后进度到失败相隔约 62 分钟，明显超过 Gateway 4 分 30 秒租约与 Driver 额外 60 秒宽限，说明“项目上下文为空的角色 dispatch”仍未进入统一的停滞恢复/快速诊断时序。日志同时记录模型 SSE/NDJSON 流被远端关闭、AgentScope 两次自动重试耗尽及会话压缩失败，需作为该 QA 回合停滞的伴随证据继续定位。
+
+四个 Owner 的 MCP circuit 全程 `CLOSED/0 failures`，没有恢复尝试，证明本轮未复现共享 PS1 会话失步和 wedged 恢复探针问题。Failsafe 为 1 test、1 failure、0 errors、0 skipped，测试耗时 7064 秒，Maven 总耗时 1 小时 58 分。finally 后 dispatch pending=0、AgentScope active=0、AIO-Sandbox healthy、shell session=0，宿主与容器无 pytest/pip/tmux/Maven/Java 残留。Task 8、Task 9 与父需求 Task 18 继续保持未完成。
+
+### 12.5 2026-10-24 项目上下文、父进度诊断与产物契约修复结论
+
+本轮修复上一轮 E2E 暴露的四个缺口，但按用户要求未运行新的真实 E2E。Heartbeat 现在按“可信显式元数据、`new_mail` 邮件、唯一处于当前 Owner 阶段的 Java workflow”依次解析 project ID；解析结果同时进入 RuntimeContext、团队提示和 incident 上报，避免 QA/RD 父 dispatch 因 `project_id=""` 脱离项目级恢复链。多项目或归属不唯一时保持拒绝猜测，防止错误跨项目归因。
+
+父进度判定与诊断统一使用同一个快照，明确区分 session 状态、模型流式活动和调用起始时间，并记录最终采用的进度来源。Driver 对超过派生租约、仍存在于 SerialDispatchRegistry 但 Gateway 已无活动诊断的 `team:*` orphan dispatch 直接失败，不再继续等待产物总超时。
+
+新增 `PendingToolRecoveringStateStore` 装饰 AgentScope 状态存储。读取 `agent_state` 时为缺失结果的 pending tool call 注入确定性的错误 ToolResult，交由模型继续处理；不重放原工具，也不记录提示词、输出或凭据。该修复覆盖 AgentScope 2.0.3 声明式子代理未继承父 Agent pending-tool recovery 开关的实际缺口。
+
+RD/QA 完成门禁把 Python 唯一入口收紧为 `code/main.py`：拒绝任何 `code/app/main.py`，并扫描 `code/tests/**/*.py` 与 `qa/contract_tests/**/*.py`，拒绝 `from app ...` / `import app ...`。RD 模板同步要求 pytest 以 `code/` 为根，使用 `from main import app` 或直接导入顶层模块。
+
+定向测试通过 71 项；完整 `mvn verify` 通过 307 项（domain 44、app 38、infra 142、adapter 13、starter 70），耗时 17.928 秒；零模型真实 Docker `RealSandboxToolContractIT` 通过 1 IT（17.50 秒，Maven 33.324 秒）。`git diff --check` 通过。本轮没有调用百炼或启动 E2E，Task 8、Task 9 与父需求 Task 18 继续保持未完成。
+
 ## 13. 确认记录（HARD-GATE）
 
 - **确认时间**：2026-10-07

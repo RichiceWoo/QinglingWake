@@ -14,6 +14,7 @@ import io.agentscope.core.tool.Toolkit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -211,6 +212,53 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
                     candidates.get(0), role, occurrenceId, failureType
             );
         }
+    }
+
+    /**
+     * 按 Java 工作流当前阶段解析角色唯一负责的项目，使 heartbeat 不会丢失项目上下文。
+     *
+     * @param role 当前团队角色
+     * @return 唯一项目；无候选或多项目并发时为空
+     */
+    @Override
+    public Optional<String> resolveProjectId(String role) {
+        if (!MailboxService.TEAM_ROLES.contains(role)) {
+            return Optional.empty();
+        }
+        List<String> candidates = workspaceRepository.listProjectIds().stream()
+                .filter(projectId -> !workflowTools.isRuntimeBlocked(projectId))
+                .filter(projectId -> role.equals(currentOwner(projectId)))
+                .toList();
+        return candidates.size() == 1 ? Optional.of(candidates.get(0)) : Optional.empty();
+    }
+
+    /**
+     * 安全解析项目当前 Owner；未形成合法工作流事件的目录不参与候选。
+     *
+     * @param projectId 候选项目标识
+     * @return 当前 Owner 或空字符串
+     */
+    private String currentOwner(String projectId) {
+        try {
+            return stageOwner(workflowTools.currentStage(projectId));
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
+
+    /**
+     * 返回当前工作流阶段的固定 Owner；等待人类的阶段不归属后台角色。
+     *
+     * @param stage 当前工作流阶段
+     * @return manager、pm、rd、qa 或空字符串
+     */
+    private static String stageOwner(cn.org.chris.wake.domain.workflow.WorkflowStage stage) {
+        return switch (stage) {
+            case PRODUCT_DESIGN -> "pm";
+            case TECH_DESIGN, CODE_IMPLEMENTATION, DEFECT_FIX -> "rd";
+            case QA_TEST_DESIGN, QA_TEST_EXECUTION -> "qa";
+            case REQUIREMENTS_CHECKPOINT, DELIVERY_CHECKPOINT, COMPLETED, CANCELLED -> "";
+        };
     }
 
     /**

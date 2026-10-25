@@ -184,7 +184,8 @@ class WorkspaceTemplateContractTest {
         assertThat(rdSkill).contains("timeout=300", "禁止传字符串");
         assertThat(rdSkill)
                 .contains("\"execution_id\": \"<run_project_tests.execution_id>\"")
-                .contains("\"pytest_collected\": \"<run_project_tests.pytest_collected>\"")
+                .contains("不得复制 `status`、`exit_code`、`pytest_collected`")
+                .doesNotContain("\"pytest_collected\": \"<run_project_tests.pytest_collected>\"")
                 .contains("Java 会自动把对应 `task_assign` 标记为 `done`")
                 .doesNotContain("mark_done(pid, <task_assign_msg_id>)");
         assertThat(rdSubagent)
@@ -192,11 +193,74 @@ class WorkspaceTemplateContractTest {
                 .contains("原始 `sandbox_execute_bash` 只可用于首次无副作用");
         assertThat(qaSkill).contains("timeout=300", "禁止传字符串");
         assertThat(qaSkill)
-                .contains("\"execution_id\": \"<run_project_tests.execution_id>\"")
+                .contains("<run_project_tests.execution_id>")
+                .contains("复制 `status`、`exit_code`、`pytest_collected`")
                 .contains("Java 自动完成对应 `task_assign`");
         assertThat(qaSubagent)
                 .contains("run_project_tests(project_id)")
                 .contains("原始 `sandbox_execute_bash` 只可用于首次无副作用");
+    }
+
+    /**
+     * coordinated 模板必须使用最小完成协议、显式评审轮次，并声明 Manager 不参与正常行政推进。
+     *
+     * @throws Exception 模板资源读取失败
+     */
+    @Test
+    void shouldRequireMinimalCompletionAndExplicitReviewRoundProtocol() throws Exception {
+        Path templateRoot = templateRoot();
+        String managerAgents = Files.readString(templateRoot.resolve("manager/AGENTS.md"));
+        String featureSop = Files.readString(templateRoot.resolve("manager/skills/sop_feature_dev/SKILL.md"));
+        String productDesign = Files.readString(templateRoot.resolve("pm/skills/product_design/SKILL.md"));
+        String codeImplementation = Files.readString(templateRoot.resolve("rd/skills/code_impl/SKILL.md"));
+        String testRun = Files.readString(templateRoot.resolve("qa/skills/test_run/SKILL.md"));
+        List<Path> reviewSkills = List.of(
+                templateRoot.resolve("pm/skills/review_tech_design_from_pm/SKILL.md"),
+                templateRoot.resolve("rd/skills/review_product_design_from_rd/SKILL.md"),
+                templateRoot.resolve("rd/skills/review_test_design/SKILL.md"),
+                templateRoot.resolve("qa/skills/review_code/SKILL.md"),
+                templateRoot.resolve("qa/skills/review_product_design_from_qa/SKILL.md"),
+                templateRoot.resolve("qa/skills/review_tech_design_from_qa/SKILL.md")
+        );
+
+        assertThat(productDesign)
+                .contains("<task_assign.content.execution_id>")
+                .contains("\"artifacts\": [\"design/product_spec.md\"]")
+                .contains("\"decision\": \"ACCEPTED\"");
+        assertThat(codeImplementation).contains("<run_project_tests.execution_id>")
+                .contains("真实终态由 Java Test Runner 账本读取");
+        assertThat(testRun).contains("\"decision\":\"ACCEPTED\"")
+                .contains("`DEFECT_FOUND`")
+                .contains("Java 会从 Test Runner 账本补全真实终态");
+        assertThat(managerAgents).contains("正常 `task_done` 由发送方工具直接提交 Java 原子协调器")
+                .contains("Manager 不得等待或补做");
+        assertThat(featureSop).contains("Manager 不会收到这封行政邮件")
+                .contains("不得重复执行 `check_review_criteria`");
+        for (Path reviewSkill : reviewSkills) {
+            assertThat(Files.readString(reviewSkill))
+                    .as("评审模板 %s 必须显式引用当前轮次", templateRoot.relativize(reviewSkill))
+                    .contains("<review_request.content.review_round_id>")
+                    .contains("APPROVED", "CHANGES_REQUESTED");
+        }
+    }
+
+    /**
+     * QA 测试设计必须读取 Harness 固定验收契约、引用稳定需求标识且禁止改写验收目录。
+     *
+     * @throws Exception 模板资源读取失败
+     */
+    @Test
+    void shouldBindQaPlanToReadOnlyHarnessAcceptanceContract() throws Exception {
+        String testDesign = Files.readString(
+                templateRoot().resolve("qa/skills/test_design/SKILL.md")
+        );
+
+        assertThat(testDesign)
+                .contains("acceptance/contract.json")
+                .contains("mandatory requirement ID")
+                .contains("requirement_id → test_case_id")
+                .contains("不得写入、改名或删除 `acceptance/`")
+                .contains("TODO-API-001", "TODO-API-003", "TODO-API-006");
     }
 
     /**
@@ -229,7 +293,7 @@ class WorkspaceTemplateContractTest {
                 .contains("也不是批准")
                 .contains("禁止调用 `mark_done`")
                 .contains("随后只向 `advance_workflow` 提交结论")
-                .contains("Java 决定进入 PM 产品设计或终止项目")
+                .contains("Java 按冻结 profile 决定 SIMPLE 进入 RD、STANDARD/STRICT 进入 PM")
                 .contains("禁止把用户原句直接当成 `needs_content`");
         assertThat(requirementsGuide)
                 .contains("工具调用顺序不可交换")
@@ -315,20 +379,35 @@ class WorkspaceTemplateContractTest {
     }
 
     /**
-     * RD 父代理必须串行维护单个 code_impl continuation，避免并发纠偏消息制造伪多任务和级联取消。
+     * SIMPLE/STANDARD 必须由父角色直做，只有 STRICT 才保留单飞 code_impl continuation。
      *
      * @throws Exception 模板资源读取失败
      */
     @Test
-    void shouldRequireNonBlockingSingleCodeImplementationContinuation() throws Exception {
-        String rdAgents = Files.readString(templateRoot().resolve("rd/AGENTS.md"));
+    void shouldDescribeProfileBoundariesForCodeImplementation() throws Exception {
+        Path root = templateRoot();
+        String rdAgents = Files.readString(root.resolve("rd/AGENTS.md"));
+        String qaAgents = Files.readString(root.resolve("qa/AGENTS.md"));
+        String pmAgents = Files.readString(root.resolve("pm/AGENTS.md"));
+        String managerAgents = Files.readString(root.resolve("manager/AGENTS.md"));
 
         assertThat(rdAgents)
-                .contains("只允许维护一个 `code_impl` 逻辑子代理")
+                .contains("`SIMPLE`/`STANDARD` 的 `code_impl` 由当前 RD 父角色直接执行")
+                .contains("不得尝试 `agent_spawn`、`agent_send`、`task_output` 或 `task_cancel`")
+                .contains("`STRICT` 若启用 `code_impl` 子 Agent")
                 .contains("`task_output(block=false)`")
-                .contains("禁止并发 `agent_send`")
+                .contains("禁止并发 continuation")
                 .contains("禁止使用 `wait_async_results`")
-                .contains("不得仅因一次 heartbeat 尚未完成就调用 `task_cancel`");
+                .doesNotContain("`SIMPLE`/`STANDARD` 的 `code_impl` 由 `subagents/code_impl.md`");
+        assertThat(qaAgents)
+                .contains("`SIMPLE`/`STANDARD` 的 `test_run` 由当前 QA 父角色直接执行")
+                .contains("只有 `STRICT` 才允许使用 `subagents/test_run.md`");
+        assertThat(pmAgents)
+                .contains("`SIMPLE` 不创建或唤醒 PM")
+                .contains("只有 `STRICT` 档位才允许");
+        assertThat(managerAgents)
+                .contains("`SIMPLE`/`STANDARD` 档位直接由当前父角色执行 task Skill")
+                .contains("运行时不会暴露 `agent_spawn`、`agent_send` 或 `task_output`");
     }
 
     /**

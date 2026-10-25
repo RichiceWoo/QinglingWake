@@ -43,6 +43,9 @@ public final class DeterministicWorkflowTools {
     /** 工具 JSON 响应编解码器。 */
     private final ObjectMapper objectMapper;
 
+    /** runtime v2 项目 checkpoint 的窄协调端口。 */
+    private final WorkflowToolCoordinator workflowToolCoordinator;
+
     /**
      * 创建确定性工作流工具。
      *
@@ -59,6 +62,30 @@ public final class DeterministicWorkflowTools {
             TaskCompletionEvidenceGate completionEvidenceGate,
             ObjectMapper objectMapper
     ) {
+        this(
+                eventService, mailboxService, wakeScheduler, completionEvidenceGate,
+                objectMapper, WorkflowToolCoordinator.legacy()
+        );
+    }
+
+    /**
+     * 创建可把 runtime v2 checkpoint 转交原子协调器的确定性工作流工具。
+     *
+     * @param eventService legacy 项目事件服务
+     * @param mailboxService legacy 团队邮箱服务
+     * @param wakeScheduler legacy 下一任务唤醒调度器
+     * @param completionEvidenceGate legacy RD/QA 完成证据门禁
+     * @param objectMapper JSON 编解码器
+     * @param workflowToolCoordinator runtime v2 checkpoint 协调端口
+     */
+    public DeterministicWorkflowTools(
+            EventService eventService,
+            MailboxService mailboxService,
+            CommonTeamTools.MailWakeScheduler wakeScheduler,
+            TaskCompletionEvidenceGate completionEvidenceGate,
+            ObjectMapper objectMapper,
+            WorkflowToolCoordinator workflowToolCoordinator
+    ) {
         this.stateMachine = new WorkflowStateMachine();
         this.eventService = Objects.requireNonNull(eventService, "eventService 不能为空");
         this.mailboxService = Objects.requireNonNull(mailboxService, "mailboxService 不能为空");
@@ -67,6 +94,9 @@ public final class DeterministicWorkflowTools {
                 completionEvidenceGate, "completionEvidenceGate 不能为空"
         );
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
+        this.workflowToolCoordinator = Objects.requireNonNull(
+                workflowToolCoordinator, "workflowToolCoordinator 不能为空"
+        );
     }
 
     /**
@@ -95,6 +125,12 @@ public final class DeterministicWorkflowTools {
     ) {
         try {
             String checkedProjectId = AgentToolSupport.requireProjectId(projectId);
+            if (workflowToolCoordinator.coordinated(checkedProjectId)) {
+                return AgentToolSupport.success(
+                        objectMapper,
+                        workflowToolCoordinator.resolveCheckpoint(checkedProjectId, signal)
+                );
+            }
             assertNotBlocked(checkedProjectId);
             WorkflowStage current = currentStage(checkedProjectId);
             WorkflowSignal checkedSignal = parseSignal(signal);

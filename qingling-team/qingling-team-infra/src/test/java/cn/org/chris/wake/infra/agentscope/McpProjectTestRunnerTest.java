@@ -39,7 +39,8 @@ class McpProjectTestRunnerTest {
         assertThat(input.get().get("cmd").toString())
                 .contains("mkdir '/workspace/.qingling-test-runs/" + EXECUTION_ID + "'")
                 .contains("cd '/workspace/shared/projects/demo-project/code'")
-                .contains("test_targets='. ../qa/contract_tests/test_contract.py'")
+                .contains("test_targets='.'")
+                .doesNotContain("../acceptance/test_todo_contract.py")
                 .contains("timeout --signal=TERM --kill-after=5s 30s")
                 .contains("python -m pytest --collect-only -q --disable-warnings --import-mode=importlib")
                 .contains("timeout --signal=TERM --kill-after=5s 240s")
@@ -49,7 +50,7 @@ class McpProjectTestRunnerTest {
     }
 
     /**
-     * QA Runner 必须只执行独立契约文件，不能用 RD 自测结果冒充 QA 验收。
+     * QA Runner 必须始终执行 Harness 固定契约，可附加 QA 用例但不能用 RD 自测冒充验收。
      */
     @Test
     void shouldRestrictQaRunnerToIndependentContractSuite() {
@@ -61,8 +62,9 @@ class McpProjectTestRunnerTest {
         runner.start(EXECUTION_ID, "demo-project").block();
 
         assertThat(input.get().get("cmd").toString())
-                .contains("test_targets='../qa/contract_tests/test_contract.py'")
-                .doesNotContain("test_targets='. ../qa/contract_tests/test_contract.py'");
+                .contains("test_targets='../acceptance/test_todo_contract.py'")
+                .contains("test_targets=\\\"\\$test_targets ../qa/contract_tests/test_contract.py\\\"")
+                .doesNotContain("test_targets='.'");
     }
 
     /**

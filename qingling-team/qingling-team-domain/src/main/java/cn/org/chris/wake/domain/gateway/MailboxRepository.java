@@ -51,6 +51,17 @@ public interface MailboxRepository {
     List<MailMessage> findInProgressTaskAssignments(String projectId, String role);
 
     /**
+     * 查找角色当前全部处理中邮件；旧实现缺省至少返回流水线任务分派。
+     *
+     * @param projectId 所属项目标识
+     * @param role 邮箱角色
+     * @return 当前全部 in_progress 邮件
+     */
+    default List<MailMessage> findInProgressMessages(String projectId, String role) {
+        return findInProgressTaskAssignments(projectId, role);
+    }
+
+    /**
      * 原子释放指定角色当前全部处理中的流水线任务，使同阶段恢复可以重新领取原任务。
      *
      * @param projectId 所属项目标识

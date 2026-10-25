@@ -68,15 +68,17 @@ httpx
 
 ### Step 4 — self_score + task_done
 - 加载 `self_score` → 打分
-- `send_mail(to="manager", type="task_done", subject="技术方案完成", content={...}, project_id=...)`
+- `send_mail(to="manager", type="task_done", subject="技术方案完成", content={"execution_id":"<task_assign.content.execution_id>","artifacts":["tech/tech_design.md"],"decision":"ACCEPTED","rationale":"技术方案已完成并回读","self_score":0.xx}, project_id=...)`
 - `send_mail` 成功后 Java 自动完成对应 `task_assign`，无需再次调用 `mark_done`。
 
 ## 输出
 
 ```json
 {
-  "status": "success",
-  "artifacts": [{"path": "tech/tech_design.md", "kind": "doc"}],
+  "execution_id": "<task_assign.content.execution_id>",
+  "artifacts": ["tech/tech_design.md"],
+  "decision": "ACCEPTED",
+  "rationale": "技术方案已完成并回读",
   "self_score": 0.85,
   "breakdown": {...},
   "metrics": {"interfaces": 6, "error_codes": 4}

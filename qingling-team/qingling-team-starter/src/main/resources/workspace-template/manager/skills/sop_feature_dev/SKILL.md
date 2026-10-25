@@ -38,7 +38,7 @@ kind: sop
   - 外部 checkpoint 回复不是 mailbox message：禁止调用 `mark_done`、禁止虚构 `msg_id`
   - 先 `append_event("checkpoint_reply_classified", {checkpoint_id:"requirements_review", reply_class:"approve"})`
   - 再 `append_event("checkpoint_approved", {checkpoint_id:"requirements_review"})`
-  - 调 `advance_workflow(project_id=<pid>, signal="checkpoint_approved", from_role="", task_done_content={}, feedback="")` → Java 状态机自动分派 PM
+  - 调 `advance_workflow(project_id=<pid>, signal="checkpoint_approved", from_role="", task_done_content={}, feedback="")` → Java 状态机按冻结 profile 自动分派下一 Owner：SIMPLE 直接 RD，STANDARD/STRICT 进入 PM
 - 含修改意见 → 更新 `needs/requirements.md`（调 `write_shared`）+ 再发 checkpoint
 
 ### 阶段 2-4：流水线推进
@@ -78,7 +78,9 @@ kind: sop
 - 不论技术方案经历多少轮评审或修订，只要尚未收到包含 `code/main.py` 与 `code/tests/` 的 RD 完成邮件，就绝不能向 QA 分派测试设计。
 - `from=rd` 不能单独决定下一阶段；必须同时核对产物路径。`tech/tech_design.md` 与 `code/` 分别代表两个不可合并的阶段。
 
-**收到每条 `type=task_done` 邮件时**：
+**runtime v2 coordinated 项目**：正常 `task_done` 在发送工具内已经由 Java 校验证据、关闭当前 WorkExecution、决定 ReviewRound 并生成下一 assignment；Manager 不会收到这封行政邮件，也不得重复执行 `check_review_criteria`、`append_event`、`advance_workflow` 或手工分派。
+
+**仅 legacy 项目收到 `type=task_done` 邮件时**：
 1. 调 `read_inbox(project_id)` → 拿到 task_done
 2. 加载 skill `check_review_criteria` → 只调用一次同名 Java 工具得到 threshold_met，禁止自行遍历历史或计算摘要
 3. threshold_met=false（常见情况）：

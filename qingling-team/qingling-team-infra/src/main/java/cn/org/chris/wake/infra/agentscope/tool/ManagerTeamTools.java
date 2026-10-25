@@ -55,6 +55,9 @@ public final class ManagerTeamTools {
     /** 工具 JSON 响应编解码器。 */
     private final ObjectMapper objectMapper;
 
+    /** 新项目按显式运行配置创建 runtime v2 的窄协调端口。 */
+    private final WorkflowToolCoordinator workflowToolCoordinator;
+
     /**
      * 创建 Manager 独占工具集合。
      *
@@ -69,10 +72,35 @@ public final class ManagerTeamTools {
             SenderGateway senderGateway,
             ObjectMapper objectMapper
     ) {
+        this(
+                workspaceRepository, eventService, senderGateway, objectMapper,
+                WorkflowToolCoordinator.legacy()
+        );
+    }
+
+    /**
+     * 创建可按显式 coordination mode 初始化 runtime v2 的 Manager 工具集合。
+     *
+     * @param workspaceRepository 共享工作区端口
+     * @param eventService legacy 事件领域服务
+     * @param senderGateway 可为空的出站端口
+     * @param objectMapper JSON 编解码器
+     * @param workflowToolCoordinator 新项目 workflow 协调端口
+     */
+    public ManagerTeamTools(
+            WorkspaceRepository workspaceRepository,
+            EventService eventService,
+            SenderGateway senderGateway,
+            ObjectMapper objectMapper,
+            WorkflowToolCoordinator workflowToolCoordinator
+    ) {
         this.workspaceRepository = Objects.requireNonNull(workspaceRepository, "workspaceRepository 不能为空");
         this.eventService = Objects.requireNonNull(eventService, "eventService 不能为空");
         this.senderGateway = senderGateway;
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
+        this.workflowToolCoordinator = Objects.requireNonNull(
+                workflowToolCoordinator, "workflowToolCoordinator 不能为空"
+        );
     }
 
     /**
@@ -85,7 +113,7 @@ public final class ManagerTeamTools {
      */
     @Tool(
             name = "create_project",
-            description = "Manager 专用：初始化项目目录、四角色邮箱、需求文档和 project_created 事件。",
+            description = "Manager 专用：初始化项目目录、角色邮箱、需求文档和 project_created 事件。",
             concurrencySafe = true
     )
     public String createProject(
@@ -101,14 +129,24 @@ public final class ManagerTeamTools {
             workspaceRepository.write(
                     checkedProjectId, "manager", "needs/requirements.md", Objects.requireNonNullElse(needsContent, "")
             );
-            long sequence = eventService.append(checkedProjectId, "manager", "project_created", Map.of(
-                    "project_id", checkedProjectId,
-                    "project_name", checkedProjectName
-            ));
-            return AgentToolSupport.success(objectMapper, Map.of(
-                    "project_id", checkedProjectId,
-                    "event_seq", sequence
-            ));
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("project_id", checkedProjectId);
+            if (workflowToolCoordinator.runtimeV2Enabled()) {
+                response.putAll(workflowToolCoordinator.initializeProject(
+                        checkedProjectId, checkedProjectName
+                ));
+                response.put("event_seq", 0L);
+            } else {
+                long sequence = eventService.append(
+                        checkedProjectId, "manager", "project_created", Map.of(
+                                "project_id", checkedProjectId,
+                                "project_name", checkedProjectName
+                        )
+                );
+                response.put("coordinated", false);
+                response.put("event_seq", sequence);
+            }
+            return AgentToolSupport.success(objectMapper, response);
         } catch (RuntimeException exception) {
             return AgentToolSupport.error(objectMapper, exception);
         }

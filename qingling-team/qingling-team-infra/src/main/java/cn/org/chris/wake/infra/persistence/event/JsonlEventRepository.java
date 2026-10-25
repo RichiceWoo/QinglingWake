@@ -80,6 +80,50 @@ public final class JsonlEventRepository implements EventRepository {
      */
     @Override
     public long append(String projectId, String actor, String action, Map<String, Object> details) {
+        return appendLocked(projectId, "", actor, action, details);
+    }
+
+    /**
+     * 在事件文件锁内按 outbox action ID 查重并追加，消除投影成功后进程崩溃造成的重复事件。
+     *
+     * @param projectId 项目标识
+     * @param projectionId 稳定 outbox action 标识
+     * @param actor 事件发起角色
+     * @param action 动作名称
+     * @param details 有界事件详情
+     * @return 原事件或新事件 seq
+     */
+    @Override
+    public long appendOnce(
+            String projectId,
+            String projectionId,
+            String actor,
+            String action,
+            Map<String, Object> details
+    ) {
+        if (projectionId == null || projectionId.isBlank()) {
+            throw new IllegalArgumentException("projectionId 不能为空");
+        }
+        return appendLocked(projectId, projectionId.trim(), actor, action, details);
+    }
+
+    /**
+     * 在单个文件锁内完成可选投影查重、seq 分配、追加和强制刷盘。
+     *
+     * @param projectId 项目标识
+     * @param projectionId 稳定投影标识；普通事件为空
+     * @param actor 事件发起角色
+     * @param action 动作名称
+     * @param details 事件详情
+     * @return 原事件或新事件 seq
+     */
+    private long appendLocked(
+            String projectId,
+            String projectionId,
+            String actor,
+            String action,
+            Map<String, Object> details
+    ) {
         Path eventsPath = prepareEventsPath(projectId);
         Path lockPath = eventsPath.resolveSibling("events.jsonl.lock");
         ReentrantLock localLock = LOCAL_LOCKS.computeIfAbsent(lockPath, ignored -> new ReentrantLock());
@@ -87,13 +131,23 @@ public final class JsonlEventRepository implements EventRepository {
         try (FileChannel lockChannel = FileChannel.open(
                 lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE
         ); FileLock ignored = lockChannel.lock()) {
+            if (!projectionId.isBlank()) {
+                Long existing = projectionSequence(eventsPath, projectionId);
+                if (existing != null) {
+                    return existing;
+                }
+            }
             long seq = lastSequence(eventsPath) + 1;
             Map<String, Object> event = new LinkedHashMap<>();
             event.put("ts", format(clock.instant()));
             event.put("seq", seq);
             event.put("actor", actor);
             event.put("action", action);
-            event.put("payload", details);
+            Map<String, Object> payload = new LinkedHashMap<>(details);
+            if (!projectionId.isBlank()) {
+                payload.put("outbox_action_id", projectionId);
+            }
+            event.put("payload", payload);
             byte[] line = (objectMapper.writeValueAsString(event) + "\n").getBytes(StandardCharsets.UTF_8);
             try (FileChannel dataChannel = FileChannel.open(
                     eventsPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND
@@ -110,6 +164,37 @@ public final class JsonlEventRepository implements EventRepository {
         } finally {
             localLock.unlock();
         }
+    }
+
+    /**
+     * 查找已经写入指定 outbox action ID 的合法事件。
+     *
+     * @param eventsPath 事件文件
+     * @param projectionId 稳定投影标识
+     * @return 已有 seq；不存在时为空
+     * @throws IOException 文件读取失败
+     */
+    private Long projectionSequence(Path eventsPath, String projectionId) throws IOException {
+        if (!Files.exists(eventsPath) || Files.size(eventsPath) == 0L) {
+            return null;
+        }
+        for (String line : Files.readAllLines(eventsPath, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            try {
+                Map<String, Object> event = objectMapper.readValue(line, new TypeReference<>() { });
+                Object payload = event.get("payload");
+                if (payload instanceof Map<?, ?> values
+                        && projectionId.equals(values.get("outbox_action_id"))
+                        && event.get("seq") instanceof Number sequence) {
+                    return sequence.longValue();
+                }
+            } catch (IOException ignored) {
+                // 单条损坏记录不能阻止后续合法投影标识查重。
+            }
+        }
+        return null;
     }
 
     /**

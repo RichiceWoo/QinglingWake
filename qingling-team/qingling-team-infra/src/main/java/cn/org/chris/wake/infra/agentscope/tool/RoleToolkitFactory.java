@@ -1,6 +1,7 @@
 package cn.org.chris.wake.infra.agentscope.tool;
 
 import cn.org.chris.wake.domain.event.EventService;
+import cn.org.chris.wake.domain.gateway.ProjectTestEvidenceRepository;
 import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.SenderGateway;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
@@ -8,6 +9,7 @@ import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.infra.agentscope.ProjectTestAgentTool;
 import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
+import cn.org.chris.wake.infra.agentscope.RegistryProjectTestEvidenceRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.tool.Toolkit;
 
@@ -74,6 +76,9 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
     /** RD/QA 共享的真实项目测试执行证据账本。 */
     private final ProjectTestExecutionRegistry projectTestExecutionRegistry;
 
+    /** 将 coordinated 工具调用桥接到 app 层原子协调器的窄端口。 */
+    private final WorkflowToolCoordinator workflowToolCoordinator;
+
     /**
      * 创建角色 Toolkit 工厂。
      *
@@ -94,6 +99,65 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
             ImageAndSearchTools imageAndSearchTools,
             ObjectMapper objectMapper
     ) {
+        this(
+                mailboxService, workspaceRepository, wakeScheduler, eventService,
+                senderGateway, imageAndSearchTools, objectMapper, WorkflowToolCoordinator.legacy()
+        );
+    }
+
+    /**
+     * 创建同时支持 legacy 与 runtime v2 工具协议的角色 Toolkit 工厂。
+     *
+     * @param mailboxService 邮箱领域服务
+     * @param workspaceRepository 共享工作区端口
+     * @param wakeScheduler 邮件唤醒用例
+     * @param eventService 事件领域服务
+     * @param senderGateway 可为空的人类出站端口
+     * @param imageAndSearchTools 图片和搜索工具实例
+     * @param objectMapper JSON 编解码器
+     * @param workflowToolCoordinator runtime v2 工具协调端口
+     */
+    public RoleToolkitFactory(
+            MailboxService mailboxService,
+            WorkspaceRepository workspaceRepository,
+            CommonTeamTools.MailWakeScheduler wakeScheduler,
+            EventService eventService,
+            SenderGateway senderGateway,
+            ImageAndSearchTools imageAndSearchTools,
+            ObjectMapper objectMapper,
+            WorkflowToolCoordinator workflowToolCoordinator
+    ) {
+        this(
+                mailboxService, workspaceRepository, wakeScheduler, eventService,
+                senderGateway, imageAndSearchTools, objectMapper, workflowToolCoordinator,
+                new ProjectTestExecutionRegistry()
+        );
+    }
+
+    /**
+     * 创建共享外部 Test Runner 账本与 runtime v2 工具协调器的生产 Toolkit 工厂。
+     *
+     * @param mailboxService 邮箱领域服务
+     * @param workspaceRepository 共享工作区端口
+     * @param wakeScheduler 邮件唤醒用例
+     * @param eventService 事件领域服务
+     * @param senderGateway 可为空的人类出站端口
+     * @param imageAndSearchTools 图片和搜索工具实例
+     * @param objectMapper JSON 编解码器
+     * @param workflowToolCoordinator runtime v2 工具协调端口
+     * @param projectTestExecutionRegistry 真实 Test Runner 共享执行账本
+     */
+    public RoleToolkitFactory(
+            MailboxService mailboxService,
+            WorkspaceRepository workspaceRepository,
+            CommonTeamTools.MailWakeScheduler wakeScheduler,
+            EventService eventService,
+            SenderGateway senderGateway,
+            ImageAndSearchTools imageAndSearchTools,
+            ObjectMapper objectMapper,
+            WorkflowToolCoordinator workflowToolCoordinator,
+            ProjectTestExecutionRegistry projectTestExecutionRegistry
+    ) {
         this.mailboxService = Objects.requireNonNull(mailboxService, "mailboxService 不能为空");
         this.workspaceRepository = Objects.requireNonNull(workspaceRepository, "workspaceRepository 不能为空");
         this.wakeScheduler = Objects.requireNonNull(wakeScheduler, "wakeScheduler 不能为空");
@@ -101,13 +165,19 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
         this.senderGateway = senderGateway;
         this.imageAndSearchTools = Objects.requireNonNull(imageAndSearchTools, "imageAndSearchTools 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
-        this.projectTestExecutionRegistry = new ProjectTestExecutionRegistry();
+        this.workflowToolCoordinator = Objects.requireNonNull(
+                workflowToolCoordinator, "workflowToolCoordinator 不能为空"
+        );
+        this.projectTestExecutionRegistry = Objects.requireNonNull(
+                projectTestExecutionRegistry, "projectTestExecutionRegistry 不能为空"
+        );
         this.workflowTools = new DeterministicWorkflowTools(
                 eventService,
                 mailboxService,
                 wakeScheduler,
                 new TaskCompletionEvidenceGate(workspaceRepository, projectTestExecutionRegistry),
-                objectMapper
+                objectMapper,
+                workflowToolCoordinator
         );
     }
 
@@ -135,11 +205,13 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
         Set<String> skills = activeSkills == null ? Set.of() : Set.copyOf(activeSkills);
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(new CommonTeamTools(
-                role, mailboxService, workspaceRepository, wakeScheduler, objectMapper, workflowTools
+                role, mailboxService, workspaceRepository, wakeScheduler, objectMapper,
+                workflowTools, workflowToolCoordinator
         ));
         if ("manager".equals(role)) {
             toolkit.registerTool(new ManagerTeamTools(
-                    workspaceRepository, eventService, senderGateway, objectMapper
+                    workspaceRepository, eventService, senderGateway, objectMapper,
+                    workflowToolCoordinator
             ));
             toolkit.registerTool(workflowTools);
         }
@@ -296,6 +368,15 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
                         execution
                 )
         );
+    }
+
+    /**
+     * 暴露与 RD/QA 真实测试工具共享同一执行账本的只读领域证据端口。
+     *
+     * @return 不包含 stdout/stderr 的真实 Test Runner 证据仓储
+     */
+    public ProjectTestEvidenceRepository projectTestEvidenceRepository() {
+        return new RegistryProjectTestEvidenceRepository(projectTestExecutionRegistry);
     }
 
     /**

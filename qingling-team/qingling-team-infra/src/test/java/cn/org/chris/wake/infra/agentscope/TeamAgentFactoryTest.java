@@ -2,6 +2,8 @@ package cn.org.chris.wake.infra.agentscope;
 
 import cn.org.chris.wake.domain.event.EventService;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
+import cn.org.chris.wake.domain.workflow.WorkflowCoordinationMode;
+import cn.org.chris.wake.domain.workflow.WorkflowProfile;
 import cn.org.chris.wake.infra.agentscope.tool.ImageAndSearchTools;
 import cn.org.chris.wake.infra.agentscope.tool.RoleToolkitFactory;
 import cn.org.chris.wake.infra.persistence.event.JsonlEventRepository;
@@ -145,6 +147,61 @@ class TeamAgentFactoryTest {
         }
     }
 
+    /** coordinated STANDARD 必须保留四角色，但不得加载声明或暴露任何子任务工具。 */
+    @Test
+    void shouldDisableSubagentsAndContinuationToolsForCoordinatedStandard() {
+        TeamAgentFactory standardFactory = profileFactory(WorkflowProfile.STANDARD);
+        Map<String, HarnessAgent> agents = standardFactory.createAll();
+        try {
+            assertThat(agents).containsOnlyKeys("manager", "pm", "rd", "qa");
+            assertThat(agents.get("rd").getSubagentAgentManager()).isNull();
+            assertThat(agents.get("qa").getSubagentAgentManager()).isNull();
+            assertThat(agents.values()).allSatisfy(agent ->
+                    assertThat(agent.getToolkit().getToolNames()).doesNotContain(
+                            "agent_spawn", "agent_send", "task_output", "task_cancel"
+                    )
+            );
+        } finally {
+            agents.values().forEach(HarnessAgent::close);
+        }
+    }
+
+    /** coordinated SIMPLE 必须不构造 PM，并同样关闭子任务工具边界。 */
+    @Test
+    void shouldExcludePmAndSubagentsForCoordinatedSimple() {
+        TeamAgentFactory simpleFactory = profileFactory(WorkflowProfile.SIMPLE);
+        Map<String, HarnessAgent> agents = simpleFactory.createAll();
+        try {
+            assertThat(agents).containsOnlyKeys("manager", "rd", "qa");
+            assertThat(agents.values()).allSatisfy(agent ->
+                    assertThat(agent.getToolkit().getToolNames()).doesNotContain(
+                            "agent_spawn", "agent_send", "task_output", "task_cancel"
+                    )
+            );
+            assertThatThrownBy(() -> simpleFactory.create("pm"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("SIMPLE")
+                    .hasMessageContaining("pm");
+        } finally {
+            agents.values().forEach(HarnessAgent::close);
+        }
+    }
+
+    /** coordinated STRICT 必须保留声明式子 Agent 和受追踪的 continuation 工具。 */
+    @Test
+    void shouldKeepSubagentsOnlyForCoordinatedStrict() {
+        TeamAgentFactory strictFactory = profileFactory(WorkflowProfile.STRICT);
+        HarnessAgent rd = strictFactory.create("rd");
+        try {
+            assertThat(rd.getSubagentAgentManager().getDeclaration("code_impl")).isPresent();
+            assertThat(rd.getToolkit().getToolNames()).contains(
+                    "agent_spawn", "agent_send", "task_output", "task_cancel"
+            );
+        } finally {
+            rd.close();
+        }
+    }
+
     /**
      * 父 Agent 与声明式 Sub-Agent 都不得暴露 Harness 文件工具，RD 子代理必须继承白名单 MCP 工具。
      */
@@ -215,6 +272,28 @@ class TeamAgentFactoryTest {
         )).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("PT4M")
                 .hasMessageContaining("PT5M");
+    }
+
+    /**
+     * 创建使用 NoCallModel 且显式冻结 coordinated profile 的测试工厂。
+     *
+     * @param profile 待验证档位
+     * @return 不触发模型或网络调用的工厂
+     */
+    private TeamAgentFactory profileFactory(WorkflowProfile profile) {
+        return new TeamAgentFactory(
+                new NoCallModel(),
+                toolkitFactory,
+                new RoleSubagentFactory(workspaceRoot),
+                McpSandboxConfiguration.disabled(),
+                Map.of(),
+                30,
+                30_000,
+                Duration.ofSeconds(30),
+                new ModelActivityRegistry(),
+                WorkflowCoordinationMode.COORDINATED,
+                profile
+        );
     }
 
     /** 清理真实 Harness session 时必须取消 TaskRepository 中仍运行的子任务，不能只清父状态。 */

@@ -89,6 +89,13 @@ public final class FileMailboxRepository implements MailboxRepository {
         validateRole(message.to());
         Path inbox = inboxPath(message.projectId(), message.to());
         return withLockedInbox(inbox, messages -> {
+            Map<String, Object> sameId = messages.stream()
+                    .filter(existing -> message.id().equals(existing.get("id")))
+                    .findFirst()
+                    .orElse(null);
+            if (sameId != null) {
+                return fromMap(new LinkedHashMap<>(sameId));
+            }
             if ("task_assign".equals(message.type()) || "clarification_answer".equals(message.type())) {
                 Map<String, Object> duplicate = messages.stream()
                         .filter(existing -> isOpenDuplicateMessage(existing, message))
@@ -247,6 +254,23 @@ public final class FileMailboxRepository implements MailboxRepository {
         Path inbox = inboxPath(projectId, role);
         return withLockedInbox(inbox, messages -> messages.stream()
                 .filter(message -> "task_assign".equals(message.get("type")))
+                .filter(message -> "in_progress".equals(message.get("status")))
+                .map(message -> fromMap(new LinkedHashMap<>(message)))
+                .toList());
+    }
+
+    /**
+     * 在文件锁内读取角色全部处理中邮件，供 runtime v2 协调成功后完成投影。
+     *
+     * @param projectId 所属项目标识
+     * @param role 邮箱角色
+     * @return 当前全部 in_progress 邮件快照
+     */
+    @Override
+    public List<MailMessage> findInProgressMessages(String projectId, String role) {
+        validateRole(role);
+        Path inbox = inboxPath(projectId, role);
+        return withLockedInbox(inbox, messages -> messages.stream()
                 .filter(message -> "in_progress".equals(message.get("status")))
                 .map(message -> fromMap(new LinkedHashMap<>(message)))
                 .toList());

@@ -25,8 +25,8 @@
   4. 调用 `append_event(project_id, "requirements_drafted", ...)`；
   5. 最后才调用 `send_to_human(routing_key="__current__", message=..., kind="checkpoint_request", project_id=project_id, checkpoint_id="requirements_review")`。
 - `send_to_human` 返回成功不代表前置步骤完成；在项目目录、`needs/requirements.md` 和 `requirements_drafted` 事件都存在前，禁止发送需求 checkpoint。
-- 用户初始消息即使说“请立即创建并写需求”，也不是批准；checkpoint 之后必须停止，收到下一条明确回复后才能分派 PM。
-- 收到人类对 pending checkpoint 的回复时，它是外部消息而不是邮箱邮件：禁止调用 `mark_done`、禁止虚构 `msg_id`、禁止用 `read_inbox` 查找这条回复。必须先加载 `handle_checkpoint_reply`，依次记录 `checkpoint_reply_classified` 和 `checkpoint_approved`/`checkpoint_rejected`；随后只向 `advance_workflow` 提交结论，由 Java 决定进入 PM 产品设计或终止项目。
+- 用户初始消息即使说“请立即创建并写需求”，也不是批准；checkpoint 之后必须停止，收到下一条明确回复后才能由 Java 按冻结 profile 分派下一 Owner（SIMPLE 直接 RD，STANDARD/STRICT 进入 PM）。
+- 收到人类对 pending checkpoint 的回复时，它是外部消息而不是邮箱邮件：禁止调用 `mark_done`、禁止虚构 `msg_id`、禁止用 `read_inbox` 查找这条回复。必须先加载 `handle_checkpoint_reply`，依次记录 `checkpoint_reply_classified` 和 `checkpoint_approved`/`checkpoint_rejected`；随后只向 `advance_workflow` 提交结论，由 Java 按冻结 profile 决定 SIMPLE 进入 RD、STANDARD/STRICT 进入 PM，或在拒绝时终止项目。
 
 ## AgentScope 工具
 
@@ -34,13 +34,13 @@
 - 每次调用 `send_to_human` 时，`routing_key` 必须固定传字符串 `__current__`，不要读取、查找、询问或猜测真实值。工具会在外部消息轮次使用当前路由，在团队 wake 轮次从项目事件恢复原始人类路由；绝不能传 `team:manager`。
 - Manager 专属：`create_project`、`append_event`、`send_to_human`、`check_review_criteria`、`advance_workflow`。
 - Skill：通过 Harness 的 `load_skill` 按需加载 `skills/*/SKILL.md`，不使用 `load_skills.yaml` 运行时加载器。
-- task Skill 由 `subagents/*.md` 声明式 Sub-Agent 执行。
+- `SIMPLE`/`STANDARD` 档位直接由当前父角色执行 task Skill，运行时不会暴露 `agent_spawn`、`agent_send` 或 `task_output`；只有 `STRICT` 档位才加载 `subagents/*.md` 声明式 Sub-Agent。
 
 ## 团队协议
 
 1. wake 内容为 `__wake__:new_mail:<pid>` 时，使用其中的项目标识读取收件箱；无 pid 的 heartbeat 没有待办时直接结束。
-2. 邮件正文只引用共享产物路径，不复制长文档；`task_done` 必须携带 `self_score`、`breakdown` 和 `rationale`。
-3. 每次收到 `task_done`，先加载同名 Skill，再且只调用一次工具 `check_review_criteria` 得到机械判定；禁止自行遍历跨项目事件或计算 MD5。随后按 `sop_feature_dev` 推进。
+2. runtime v2 项目的正常 `task_done` 由发送方工具直接提交 Java 原子协调器，不会投递到 Manager 邮箱；Manager 不得等待或补做 `check_review_criteria → append_event → advance_workflow → task_assign` 行政链。
+3. 只有 legacy 项目仍可能收到 `task_done` 邮件；此时才加载同名 Skill，并只调用一次 `check_review_criteria`，随后按 `sop_feature_dev` 的 legacy 分支推进。
 4. 收到 checkpoint 回复时加载 `handle_checkpoint_reply`，完成分类、事件记录和幂等 resolve。
 5. 复盘改进中 memory 可按规则自动审批，Skill、角色指令或价值观变更必须交给用户审批。
 6. 阶段判断必须以邮件中的产物路径为准，不能只看发件角色：RD 完成或修订 `tech/tech_design.md` 后仍处于技术方案阶段，下一任务只能是 RD 代码实现；只有 RD 明确交付 `code/main.py` 和 `code/tests/` 后才允许分派 QA 测试设计。

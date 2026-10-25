@@ -4,11 +4,14 @@ import cn.org.chris.wake.app.cron.WakeScheduler;
 import cn.org.chris.wake.app.runner.RoutingKeyResolver;
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
 import cn.org.chris.wake.domain.gateway.AgentGateway;
-import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
+import cn.org.chris.wake.domain.gateway.WorkflowRuntimeRepository;
+import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
+import cn.org.chris.wake.domain.workflow.WorkExecutionStatus;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Executors;
@@ -44,6 +47,9 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
     /** 查询真实父 Agent 回合是否仍活跃，避免路由快照竞态误回收租约。 */
     private final AgentGateway agentGateway;
 
+    /** 可选 runtime v2 仓储；存在 aggregate 时 mailbox 必须服从 WorkExecution 状态。 */
+    private final WorkflowRuntimeRepository workflowRuntimeRepository;
+
     /** mailbox 处理租约时长。 */
     private final Duration leaseTimeout;
 
@@ -71,7 +77,34 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
         this(
                 mailboxService, workspaceRepository, dispatchRegistry,
                 wakeScheduler::scheduleMailWake, runtimeIncidentGateway, agentGateway,
-                DEFAULT_LEASE_TIMEOUT
+                null, DEFAULT_LEASE_TIMEOUT
+        );
+    }
+
+    /**
+     * 使用 runtime v2 权威状态和默认租约创建生产 watchdog。
+     *
+     * @param mailboxService 邮箱领域服务
+     * @param workspaceRepository 共享项目仓储
+     * @param dispatchRegistry 路由串行注册表
+     * @param wakeScheduler 唤醒调度器
+     * @param runtimeIncidentGateway 运行时阻断查询端口
+     * @param agentGateway 活跃父 Agent 查询端口
+     * @param workflowRuntimeRepository runtime v2 仓储
+     */
+    public MailboxLeaseWatchdog(
+            MailboxService mailboxService,
+            WorkspaceRepository workspaceRepository,
+            SerialDispatchRegistry dispatchRegistry,
+            WakeScheduler wakeScheduler,
+            RuntimeIncidentGateway runtimeIncidentGateway,
+            AgentGateway agentGateway,
+            WorkflowRuntimeRepository workflowRuntimeRepository
+    ) {
+        this(
+                mailboxService, workspaceRepository, dispatchRegistry,
+                wakeScheduler::scheduleMailWake, runtimeIncidentGateway, agentGateway,
+                workflowRuntimeRepository, DEFAULT_LEASE_TIMEOUT
         );
     }
 
@@ -95,6 +128,34 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
             AgentGateway agentGateway,
             Duration leaseTimeout
     ) {
+        this(
+                mailboxService, workspaceRepository, dispatchRegistry, wakeScheduler,
+                runtimeIncidentGateway, agentGateway, null, leaseTimeout
+        );
+    }
+
+    /**
+     * 使用可选 runtime v2 仓储和可测试租约创建 watchdog。
+     *
+     * @param mailboxService 邮箱领域服务
+     * @param workspaceRepository 共享项目仓储
+     * @param dispatchRegistry 路由串行注册表
+     * @param wakeScheduler 邮件唤醒端口
+     * @param runtimeIncidentGateway 运行时阻断查询端口
+     * @param agentGateway 活跃父 Agent 查询端口
+     * @param workflowRuntimeRepository runtime v2 仓储；为空时保持 legacy 行为
+     * @param leaseTimeout mailbox 处理租约时长
+     */
+    public MailboxLeaseWatchdog(
+            MailboxService mailboxService,
+            WorkspaceRepository workspaceRepository,
+            SerialDispatchRegistry dispatchRegistry,
+            MailWakeScheduler wakeScheduler,
+            RuntimeIncidentGateway runtimeIncidentGateway,
+            AgentGateway agentGateway,
+            WorkflowRuntimeRepository workflowRuntimeRepository,
+            Duration leaseTimeout
+    ) {
         this.mailboxService = Objects.requireNonNull(mailboxService, "mailboxService 不能为空");
         this.workspaceRepository = Objects.requireNonNull(workspaceRepository, "workspaceRepository 不能为空");
         this.dispatchRegistry = Objects.requireNonNull(dispatchRegistry, "dispatchRegistry 不能为空");
@@ -103,6 +164,7 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
                 runtimeIncidentGateway, "runtimeIncidentGateway 不能为空"
         );
         this.agentGateway = Objects.requireNonNull(agentGateway, "agentGateway 不能为空");
+        this.workflowRuntimeRepository = workflowRuntimeRepository;
         this.leaseTimeout = requirePositive(leaseTimeout, "leaseTimeout");
     }
 
@@ -172,11 +234,42 @@ public final class MailboxLeaseWatchdog implements AutoCloseable {
         if (agentGateway.hasActiveExecution(projectId, role)) {
             return 0;
         }
+        if (!runtimeAllowsLeaseRecovery(projectId, role)) {
+            return 0;
+        }
         int restored = mailboxService.resetStale(projectId, role, leaseTimeout);
         if (restored > 0) {
             wakeScheduler.schedule(role, projectId);
         }
         return restored;
+    }
+
+    /**
+     * v2 项目仅在唯一 Owner 执行等待领取、已领取或恢复中时允许回收 mailbox lease。
+     *
+     * <p>RUNNING、WAITING_REVIEW 和终态不能被旧 mailbox 租约反向覆盖；没有 v2 aggregate
+     * 的项目继续使用 legacy 行为。</p>
+     *
+     * @param projectId 项目标识
+     * @param role 邮箱角色
+     * @return 是否允许旧 mailbox 恢复
+     */
+    private boolean runtimeAllowsLeaseRecovery(String projectId, String role) {
+        if (workflowRuntimeRepository == null) {
+            return true;
+        }
+        return workflowRuntimeRepository.find(projectId)
+                .map(state -> {
+                    List<WorkExecutionStatus> statuses = state.executions().stream()
+                            .filter(execution -> execution.owner().equals(role))
+                            .filter(execution -> !execution.status().terminal())
+                            .map(execution -> execution.status())
+                            .toList();
+                    return statuses.size() == 1 && (statuses.get(0) == WorkExecutionStatus.PENDING
+                            || statuses.get(0) == WorkExecutionStatus.CLAIMED
+                            || statuses.get(0) == WorkExecutionStatus.RECOVERING);
+                })
+                .orElse(true);
     }
 
     /** 保护后台线程，单个损坏项目不得终止后续扫描。 */

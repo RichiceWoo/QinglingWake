@@ -83,7 +83,7 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
     /** 解析 MCP 包装 JSON 的编解码器。 */
     private final ObjectMapper objectMapper;
 
-    /** 决定固定 pytest 收集范围的团队角色。 */
+    /** 决定 RD 自测或 QA 固定验收范围的团队角色。 */
     private final String role;
 
     /**
@@ -128,9 +128,10 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
         String runDirectory = runDirectory(executionId);
         String projectDirectory = "/workspace/shared/projects/" + projectId + "/code";
         String targetSetup = "qa".equals(role)
-                ? "test_targets='../qa/contract_tests/test_contract.py'; "
-                : "test_targets='.'; if test -f '../qa/contract_tests/test_contract.py'; then "
-                        + "test_targets='. ../qa/contract_tests/test_contract.py'; fi; ";
+                ? "test_targets='../acceptance/test_todo_contract.py'; "
+                        + "if test -f '../qa/contract_tests/test_contract.py'; then "
+                        + "test_targets=\\\"\\$test_targets ../qa/contract_tests/test_contract.py\\\"; fi; "
+                : "test_targets='.'; ";
         String command = "set -eu; mkdir -p '" + EXECUTION_ROOT + "'; "
                 + "if mkdir '" + runDirectory + "' 2>/dev/null; then "
                 + "printf '%s' '" + projectId + "' > '" + runDirectory + "/project_id'; "

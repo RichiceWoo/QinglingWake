@@ -14,22 +14,38 @@ import cn.org.chris.wake.app.runner.Runner;
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
 import cn.org.chris.wake.app.session.SessionRoutingService;
 import cn.org.chris.wake.app.session.SlashCommandService;
+import cn.org.chris.wake.app.workflow.CoordinatedRuntimeIncidentGateway;
+import cn.org.chris.wake.app.workflow.WorkCompletionCoordinator;
+import cn.org.chris.wake.app.workflow.ReviewDeadlineWatchdog;
+import cn.org.chris.wake.app.workflow.WorkflowOutboxProjector;
+import cn.org.chris.wake.app.workflow.WorkflowShutdownCoordinator;
 import cn.org.chris.wake.domain.event.EventService;
 import cn.org.chris.wake.domain.gateway.AttachmentDownloader;
 import cn.org.chris.wake.domain.gateway.CronJobRepository;
+import cn.org.chris.wake.domain.gateway.EventRepository;
+import cn.org.chris.wake.domain.gateway.MailboxRepository;
 import cn.org.chris.wake.domain.gateway.MetricsGateway;
+import cn.org.chris.wake.domain.gateway.ProjectTestEvidenceRepository;
 import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.SenderGateway;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
+import cn.org.chris.wake.domain.gateway.WorkflowProjectionGateway;
+import cn.org.chris.wake.domain.gateway.WorkflowRuntimeRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.CleanupPolicy;
+import cn.org.chris.wake.domain.workflow.ReviewPolicy;
+import cn.org.chris.wake.domain.workflow.WorkflowProfile;
+import cn.org.chris.wake.domain.workflow.WorkflowCoordinationMode;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
 import cn.org.chris.wake.infra.agentscope.McpSandboxConfiguration;
 import cn.org.chris.wake.infra.agentscope.ModelActivityRegistry;
+import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
+import cn.org.chris.wake.infra.agentscope.RegistryProjectTestEvidenceRepository;
 import cn.org.chris.wake.infra.agentscope.RoleSubagentFactory;
 import cn.org.chris.wake.infra.agentscope.TeamAgentFactory;
 import cn.org.chris.wake.infra.agentscope.tool.ImageAndSearchTools;
 import cn.org.chris.wake.infra.agentscope.tool.RoleToolkitFactory;
+import cn.org.chris.wake.infra.agentscope.tool.WorkflowToolCoordinator;
 import cn.org.chris.wake.infra.feishu.FeishuClientFactory;
 import cn.org.chris.wake.infra.feishu.FeishuDownloader;
 import cn.org.chris.wake.infra.feishu.FeishuSenderGateway;
@@ -44,9 +60,12 @@ import cn.org.chris.wake.infra.persistence.mailbox.FileMailboxRepository;
 import cn.org.chris.wake.infra.persistence.session.FileSessionRouteRepository;
 import cn.org.chris.wake.infra.persistence.session.JsonlConversationAuditRepository;
 import cn.org.chris.wake.infra.persistence.workspace.FileWorkspaceRepository;
+import cn.org.chris.wake.infra.persistence.workflow.FileWorkflowRuntimeRepository;
+import cn.org.chris.wake.infra.persistence.workflow.LegacyWorkflowProjectionGateway;
 import cn.org.chris.wake.infra.workspace.WorkspaceTemplateInitializer;
 import cn.org.chris.wake.starter.cli.LogQueryCommand;
 import cn.org.chris.wake.starter.runtime.RoutingSenderGateway;
+import cn.org.chris.wake.starter.runtime.CoordinatedWorkflowToolCoordinator;
 import cn.org.chris.wake.starter.runtime.RuntimeLifecycle;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lark.oapi.Client;
@@ -64,6 +83,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -86,6 +106,7 @@ public class RuntimeConfiguration {
     @Bean
     public RuntimeSettings runtimeSettings(QinglingTeamProperties properties) {
         validateAgentProvider(properties.agent());
+        validateWorkflow(properties.workflow());
         requireText(properties.agent().model(), "qingling.agent.model 未配置");
         requireText(properties.agent().subAgentModel(), "qingling.agent.sub-agent-model 未配置");
         requirePositive(properties.agent().modelProbeTimeout(), "qingling.agent.model-probe-timeout");
@@ -138,6 +159,34 @@ public class RuntimeConfiguration {
         }
         rejectSensitiveHeaders(properties.sandbox().headers());
         return new RuntimeSettings(properties, properties.workspace().root(), properties.dataDir());
+    }
+
+    /**
+     * 校验 profile、review policy 和业务超时组合，禁止启动后再猜测协调语义。
+     *
+     * @param workflow runtime v2 工作流配置
+     */
+    private static void validateWorkflow(QinglingTeamProperties.Workflow workflow) {
+        if (workflow.coordinationMode() == null) {
+            throw new IllegalStateException("qingling.workflow.coordination-mode 未配置");
+        }
+        if (workflow.defaultProfile() == null) {
+            throw new IllegalStateException("qingling.workflow.default-profile 未配置");
+        }
+        if (workflow.reviewPolicy() == null) {
+            throw new IllegalStateException("qingling.workflow.review-policy 未配置");
+        }
+        requirePositive(workflow.reviewTimeout(), "qingling.workflow.review-timeout");
+        if (workflow.reviewTimeout().compareTo(Duration.ofHours(2)) > 0) {
+            throw new IllegalStateException("qingling.workflow.review-timeout 必须不大于 PT2H");
+        }
+        boolean strictProfile = workflow.defaultProfile() == WorkflowProfile.STRICT;
+        boolean strictReview = workflow.reviewPolicy() == ReviewPolicy.STRICT_BLOCKING;
+        if (strictProfile != strictReview) {
+            throw new IllegalStateException(
+                    "STRICT profile 与 STRICT_BLOCKING review policy 必须同时配置"
+            );
+        }
     }
 
     /**
@@ -309,22 +358,85 @@ public class RuntimeConfiguration {
         return new FileCronJobRepository(settings.dataDirectory().resolve("cron/tasks.json"), objectMapper);
     }
 
+    /** 创建团队邮箱文件仓储，供 legacy 服务和 runtime v2 投影共享同一锁协议。 */
+    @Bean
+    public MailboxRepository mailboxRepository(RuntimeSettings settings, ObjectMapper objectMapper) {
+        return new FileMailboxRepository(settings.workspaceRoot(), objectMapper);
+    }
+
     /** 创建团队邮箱领域服务。 */
     @Bean
-    public MailboxService mailboxService(RuntimeSettings settings, ObjectMapper objectMapper) {
-        return new MailboxService(new FileMailboxRepository(settings.workspaceRoot(), objectMapper));
+    public MailboxService mailboxService(MailboxRepository repository) {
+        return new MailboxService(repository);
+    }
+
+    /** 创建项目事件文件仓储，供 legacy 服务和 runtime v2 投影共享幂等追加。 */
+    @Bean
+    public EventRepository eventRepository(RuntimeSettings settings, ObjectMapper objectMapper) {
+        return new JsonlEventRepository(settings.workspaceRoot(), objectMapper);
     }
 
     /** 创建 Manager 单写者事件服务。 */
     @Bean
-    public EventService eventService(RuntimeSettings settings, ObjectMapper objectMapper) {
-        return new EventService(new JsonlEventRepository(settings.workspaceRoot(), objectMapper));
+    public EventService eventService(EventRepository repository) {
+        return new EventService(repository);
     }
 
     /** 创建 wake 与 heartbeat 调度用例。 */
     @Bean
     public WakeScheduler wakeScheduler(CronJobRepository repository) {
         return new WakeScheduler(repository);
+    }
+
+    /** 创建 runtime v2 单 aggregate 文件仓储。 */
+    @Bean
+    public WorkflowRuntimeRepository workflowRuntimeRepository(
+            RuntimeSettings settings,
+            ObjectMapper objectMapper
+    ) {
+        return new FileWorkflowRuntimeRepository(settings.workspaceRoot(), objectMapper);
+    }
+
+    /** 创建按 action ID 幂等写入旧事件、邮箱和 Cron 的投影适配器。 */
+    @Bean
+    public WorkflowProjectionGateway workflowProjectionGateway(
+            EventRepository eventRepository,
+            MailboxRepository mailboxRepository,
+            CronJobRepository cronJobRepository
+    ) {
+        return new LegacyWorkflowProjectionGateway(
+                eventRepository, mailboxRepository, cronJobRepository
+        );
+    }
+
+    /** 创建 pending outbox 有界后台重放服务。 */
+    @Bean(destroyMethod = "")
+    public WorkflowOutboxProjector workflowOutboxProjector(
+            WorkflowRuntimeRepository runtimeRepository,
+            WorkspaceRepository workspaceRepository,
+            WorkflowProjectionGateway projectionGateway
+    ) {
+        return new WorkflowOutboxProjector(
+                runtimeRepository, workspaceRepository, projectionGateway
+        );
+    }
+
+    /** 创建 shutdown 非终态 WorkExecution 持久化协调器。 */
+    @Bean
+    public WorkflowShutdownCoordinator workflowShutdownCoordinator(
+            WorkflowRuntimeRepository runtimeRepository,
+            WorkspaceRepository workspaceRepository
+    ) {
+        return new WorkflowShutdownCoordinator(runtimeRepository, workspaceRepository);
+    }
+
+    /** 创建阻断式评审 deadline 的明确终态看门狗，由 RuntimeLifecycle 控制启停。 */
+    @Bean(destroyMethod = "")
+    public ReviewDeadlineWatchdog reviewDeadlineWatchdog(
+            WorkflowRuntimeRepository runtimeRepository,
+            WorkspaceRepository workspaceRepository
+    ) {
+        return new ReviewDeadlineWatchdog(runtimeRepository, workspaceRepository);
     }
 
     /** 创建本地图片和可选百度搜索工具。 */
@@ -345,11 +457,84 @@ public class RuntimeConfiguration {
             EventService eventService,
             SenderGateway senderGateway,
             ImageAndSearchTools imageAndSearchTools,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            WorkflowToolCoordinator workflowToolCoordinator,
+            ProjectTestExecutionRegistry projectTestExecutionRegistry
     ) {
         return new RoleToolkitFactory(
                 mailboxService, workspaceRepository, wakeScheduler::scheduleMailWake,
-                eventService, senderGateway, imageAndSearchTools, objectMapper
+                eventService, senderGateway, imageAndSearchTools, objectMapper,
+                workflowToolCoordinator, projectTestExecutionRegistry
+        );
+    }
+
+    /** 创建 RD/QA 真实 Test Runner 与完成协调器共享的进程内执行账本。 */
+    @Bean
+    public ProjectTestExecutionRegistry projectTestExecutionRegistry() {
+        return new ProjectTestExecutionRegistry();
+    }
+
+    /** 创建与 RD/QA 真实 Test Runner 工具共享执行账本的只读证据端口。 */
+    @Bean
+    public ProjectTestEvidenceRepository projectTestEvidenceRepository(
+            ProjectTestExecutionRegistry projectTestExecutionRegistry
+    ) {
+        return new RegistryProjectTestEvidenceRepository(projectTestExecutionRegistry);
+    }
+
+    /** 创建 runtime v2 工作完成、领取、启动与评审的原子协调器。 */
+    @Bean
+    public WorkCompletionCoordinator workCompletionCoordinator(
+            WorkflowRuntimeRepository runtimeRepository,
+            ProjectTestEvidenceRepository testEvidenceRepository,
+            WorkspaceRepository workspaceRepository,
+            RuntimeSettings settings
+    ) {
+        return new WorkCompletionCoordinator(
+                runtimeRepository,
+                testEvidenceRepository,
+                workspaceRepository,
+                settings.properties().workflow().reviewTimeout()
+        );
+    }
+
+    /** 创建把 AgentScope 最小完成/评审协议桥接到 app 原子协调器的窄端口。 */
+    @Bean
+    public WorkflowToolCoordinator workflowToolCoordinator(
+            WorkflowRuntimeRepository runtimeRepository,
+            WorkCompletionCoordinator completionCoordinator,
+            WorkflowOutboxProjector outboxProjector,
+            RuntimeSettings settings
+    ) {
+        return new CoordinatedWorkflowToolCoordinator(
+                runtimeRepository,
+                completionCoordinator,
+                outboxProjector,
+                Clock.systemUTC(),
+                settings.properties().workflow().coordinationMode()
+                        == WorkflowCoordinationMode.COORDINATED,
+                settings.properties().workflow().defaultProfile(),
+                settings.properties().workflow().reviewPolicy()
+        );
+    }
+
+    /**
+     * 按显式 coordination mode 选择 incident 权威；legacy 默认不创建或修改 runtime v2。
+     */
+    @Bean
+    @Primary
+    public RuntimeIncidentGateway runtimeIncidentGateway(
+            RoleToolkitFactory legacyGateway,
+            WorkflowRuntimeRepository runtimeRepository,
+            WorkspaceRepository workspaceRepository,
+            WorkflowOutboxProjector outboxProjector,
+            RuntimeSettings settings
+    ) {
+        if (settings.properties().workflow().coordinationMode() == WorkflowCoordinationMode.LEGACY) {
+            return legacyGateway;
+        }
+        return new CoordinatedRuntimeIncidentGateway(
+                runtimeRepository, workspaceRepository, outboxProjector, legacyGateway
         );
     }
 
@@ -439,7 +624,9 @@ public class RuntimeConfiguration {
                 settings.properties().agent().maxIterations(),
                 settings.properties().agent().maxInputTokens(),
                 settings.properties().agent().asyncToolOffloadTimeout(),
-                modelActivityRegistry
+                modelActivityRegistry,
+                settings.properties().workflow().coordinationMode(),
+                settings.properties().workflow().defaultProfile()
         );
         return new AgentScopeAgentGateway(
                 factory.createAll(), memoryIndexer, sandboxConfiguration, modelActivityRegistry
@@ -489,11 +676,12 @@ public class RuntimeConfiguration {
             SerialDispatchRegistry dispatchRegistry,
             WakeScheduler wakeScheduler,
             RuntimeIncidentGateway runtimeIncidentGateway,
-            AgentScopeAgentGateway agentGateway
+            AgentScopeAgentGateway agentGateway,
+            WorkflowRuntimeRepository workflowRuntimeRepository
     ) {
         return new MailboxLeaseWatchdog(
                 mailboxService, workspaceRepository, dispatchRegistry, wakeScheduler,
-                runtimeIncidentGateway, agentGateway
+                runtimeIncidentGateway, agentGateway, workflowRuntimeRepository
         );
     }
 
@@ -580,13 +768,16 @@ public class RuntimeConfiguration {
             SerialDispatchRegistry dispatchRegistry,
             AgentScopeAgentGateway agentGateway,
             McpSandboxConfiguration sandboxConfiguration,
+            WorkflowOutboxProjector workflowOutboxProjector,
+            WorkflowShutdownCoordinator workflowShutdownCoordinator,
+            ReviewDeadlineWatchdog reviewDeadlineWatchdog,
             ObjectProvider<FeishuWebSocketListener> listenerProvider,
             RuntimeSettings settings
     ) {
         return new RuntimeLifecycle(
                 wakeScheduler, cronService, mailboxLeaseWatchdog, dispatchRegistry, agentGateway,
-                sandboxConfiguration,
-                listenerProvider, settings.properties()
+                sandboxConfiguration, workflowOutboxProjector, workflowShutdownCoordinator,
+                reviewDeadlineWatchdog, listenerProvider, settings.properties()
         );
     }
 

@@ -23,6 +23,83 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class RealTeamE2EDriverTest {
 
+    /** Driver 必须从 runtime v2 直接报告过期阻断评审的 ID、Reviewer、状态和 deadline。 */
+    @Test
+    void shouldDiagnoseExpiredMandatoryReviewFromRuntimeV2() throws Exception {
+        JsonNode runtime = new ObjectMapper().readTree("""
+                {"schema_version":2,"project_id":"todo-mvp","profile":"STANDARD",
+                 "review_policy":"REQUIRED_ONLY","executions":[],"outbox_actions":[],
+                 "review_rounds":[{"review_round_id":"review-7","work_execution_id":"work-4",
+                   "stage":"CODE_IMPLEMENTATION","requirement":"MANDATORY","status":"IN_PROGRESS",
+                   "expected_reviewers":["qa"],"deadline":"2026-10-25T00:05:00Z","failure_reason":""}]}
+                """);
+
+        String reason = RealTeamE2EDriver.authoritativeWorkflowFailureReason(
+                runtime, Instant.parse("2026-10-25T00:05:01Z")
+        );
+
+        assertThat(reason)
+                .contains("review-7", "work-4", "qa", "IN_PROGRESS", "2026-10-25T00:05:00Z")
+                .doesNotContain("qa/test_plan.md");
+    }
+
+    /** 投影尝试耗尽必须报告 action ID/type/attempt，不能继续等待下游文件。 */
+    @Test
+    void shouldDiagnoseExhaustedOutboxFromRuntimeV2() throws Exception {
+        JsonNode runtime = new ObjectMapper().readTree("""
+                {"schema_version":2,"project_id":"todo-mvp","profile":"STANDARD",
+                 "review_policy":"REQUIRED_ONLY","executions":[],"review_rounds":[],
+                 "outbox_actions":[{"action_id":{"value":"action-mail-9"},"type":"MAILBOX_MESSAGE",
+                   "status":"PENDING","attempt":3,"last_failure_type":"IOException"}]}
+                """);
+
+        String reason = RealTeamE2EDriver.authoritativeWorkflowFailureReason(
+                runtime, Instant.parse("2026-10-25T00:05:01Z")
+        );
+
+        assertThat(reason).contains("action-mail-9", "MAILBOX_MESSAGE", "attempt=3", "IOException");
+    }
+
+    /** RUNNING execution 没有 dispatch 和 AgentScope 承载超过宽限后应直接报告孤儿执行。 */
+    @Test
+    void shouldDiagnoseOrphanRunningExecutionFromRuntimeV2() throws Exception {
+        JsonNode runtime = new ObjectMapper().readTree("""
+                {"project_id":"todo-mvp","executions":[{"execution_id":"work-rd-3",
+                 "project_id":"todo-mvp","stage":"CODE_IMPLEMENTATION","owner":"rd",
+                 "status":"RUNNING","last_progress_at":"2026-10-25T00:00:00Z"}]}
+                """);
+
+        String reason = RealTeamE2EDriver.orphanExecutionReason(
+                runtime, Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(0, null)),
+                List.of(), Instant.parse("2026-10-25T00:00:21Z"), Duration.ofSeconds(20)
+        );
+
+        assertThat(reason)
+                .contains("work-rd-3", "CODE_IMPLEMENTATION", "owner=rd", "status=RUNNING",
+                        "dispatch_active=false", "agentscope_active=false");
+    }
+
+    /** summary 的 workflow 证据必须包含 profile、policy、execution 计数与 pending outbox。 */
+    @Test
+    void shouldBuildBoundedWorkflowRuntimeEvidence() throws Exception {
+        JsonNode runtime = new ObjectMapper().readTree("""
+                {"schema_version":2,"project_id":"todo-mvp","profile":"STANDARD",
+                 "review_policy":"REQUIRED_ONLY","executions":[{"execution_id":"work-delivery",
+                   "stage":"DELIVERY_CHECKPOINT","owner":"manager","status":"SUCCEEDED",
+                   "attempt":1,"last_progress_at":"2026-10-25T00:00:00Z","failure_reason":""}],
+                 "review_rounds":[],"outbox_actions":[]}
+                """);
+
+        Map<String, Object> evidence = RealTeamE2EDriver.workflowRuntimeEvidence(runtime);
+
+        assertThat(evidence)
+                .containsEntry("profile", "STANDARD")
+                .containsEntry("review_policy", "REQUIRED_ONLY")
+                .containsEntry("execution_count", 1)
+                .containsEntry("outbox_pending_count", 0)
+                .containsEntry("authoritative_state", "COMPLETED");
+    }
+
     /** JUnit 提供的临时 Maven 项目根目录。 */
     @TempDir
     Path projectRoot;

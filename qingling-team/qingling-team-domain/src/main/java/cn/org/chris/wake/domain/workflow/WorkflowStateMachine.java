@@ -15,6 +15,23 @@ public final class WorkflowStateMachine {
      * @return 固定的阶段迁移与任务分派
      */
     public WorkflowTransition transition(WorkflowStage current, WorkflowSignal signal) {
+        return transition(WorkflowProfile.STANDARD, current, signal);
+    }
+
+    /**
+     * 按项目创建时冻结的档位计算唯一合法迁移，SIMPLE 跳过 PM、独立技术设计和独立测试设计。
+     *
+     * @param profile 项目冻结档位
+     * @param current 当前阶段
+     * @param signal 模型或人类产生的有限结论
+     * @return 与档位一致的固定阶段迁移
+     */
+    public WorkflowTransition transition(
+            WorkflowProfile profile,
+            WorkflowStage current,
+            WorkflowSignal signal
+    ) {
+        Objects.requireNonNull(profile, "profile 不能为空");
         Objects.requireNonNull(current, "current 不能为空");
         Objects.requireNonNull(signal, "signal 不能为空");
         if (signal == WorkflowSignal.STAGE_REVISION_REQUIRED) {
@@ -30,7 +47,7 @@ public final class WorkflowStateMachine {
             return blockAfterToolFailure(current);
         }
         return switch (current) {
-            case REQUIREMENTS_CHECKPOINT -> requirementsTransition(signal);
+            case REQUIREMENTS_CHECKPOINT -> requirementsTransition(profile, signal);
             case PRODUCT_DESIGN -> requireSignal(
                     current, signal, WorkflowSignal.STAGE_ACCEPTED,
                     WorkflowStage.TECH_DESIGN, "rd", "技术方案设计 (第 1 轮)"
@@ -39,10 +56,7 @@ public final class WorkflowStateMachine {
                     current, signal, WorkflowSignal.STAGE_ACCEPTED,
                     WorkflowStage.CODE_IMPLEMENTATION, "rd", "代码实现 (第 1 轮)"
             );
-            case CODE_IMPLEMENTATION -> requireSignal(
-                    current, signal, WorkflowSignal.STAGE_ACCEPTED,
-                    WorkflowStage.QA_TEST_DESIGN, "qa", "测试设计 (第 1 轮)"
-            );
+            case CODE_IMPLEMENTATION -> codeImplementationTransition(profile, signal);
             case QA_TEST_DESIGN -> requireSignal(
                     current, signal, WorkflowSignal.STAGE_ACCEPTED,
                     WorkflowStage.QA_TEST_EXECUTION, "qa", "测试执行 (第 1 轮)"
@@ -63,8 +77,17 @@ public final class WorkflowStateMachine {
      * @param signal 人类确认结论
      * @return 产品设计或项目终止迁移
      */
-    private static WorkflowTransition requirementsTransition(WorkflowSignal signal) {
+    private static WorkflowTransition requirementsTransition(
+            WorkflowProfile profile,
+            WorkflowSignal signal
+    ) {
         if (signal == WorkflowSignal.CHECKPOINT_APPROVED) {
+            if (profile == WorkflowProfile.SIMPLE) {
+                return new WorkflowTransition(
+                        WorkflowStage.REQUIREMENTS_CHECKPOINT, WorkflowStage.CODE_IMPLEMENTATION,
+                        "rd", "代码实现 (第 1 轮)"
+                );
+            }
             return new WorkflowTransition(
                     WorkflowStage.REQUIREMENTS_CHECKPOINT, WorkflowStage.PRODUCT_DESIGN,
                     "pm", "产品设计 (第 1 轮)"
@@ -76,6 +99,29 @@ public final class WorkflowStateMachine {
             );
         }
         throw illegal(WorkflowStage.REQUIREMENTS_CHECKPOINT, signal);
+    }
+
+    /**
+     * 按冻结档位决定研发完成后是否保留独立 QA 测试设计回合。
+     *
+     * @param profile 项目冻结档位
+     * @param signal 研发完成结论
+     * @return QA 测试执行或测试设计迁移
+     */
+    private static WorkflowTransition codeImplementationTransition(
+            WorkflowProfile profile,
+            WorkflowSignal signal
+    ) {
+        if (profile == WorkflowProfile.SIMPLE) {
+            return requireSignal(
+                    WorkflowStage.CODE_IMPLEMENTATION, signal, WorkflowSignal.STAGE_ACCEPTED,
+                    WorkflowStage.QA_TEST_EXECUTION, "qa", "测试验收 (第 1 轮)"
+            );
+        }
+        return requireSignal(
+                WorkflowStage.CODE_IMPLEMENTATION, signal, WorkflowSignal.STAGE_ACCEPTED,
+                WorkflowStage.QA_TEST_DESIGN, "qa", "测试设计 (第 1 轮)"
+        );
     }
 
     /**

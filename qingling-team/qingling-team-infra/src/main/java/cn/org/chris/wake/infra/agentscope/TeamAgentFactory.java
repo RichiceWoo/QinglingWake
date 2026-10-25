@@ -1,5 +1,7 @@
 package cn.org.chris.wake.infra.agentscope;
 
+import cn.org.chris.wake.domain.workflow.WorkflowCoordinationMode;
+import cn.org.chris.wake.domain.workflow.WorkflowProfile;
 import cn.org.chris.wake.infra.agentscope.tool.RoleToolkitFactory;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.permission.PermissionContextState;
@@ -20,7 +22,7 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * 以相同安全基线构造 Manager、PM、RD、QA 四个 AgentScope HarnessAgent。
+ * 按冻结 profile 以相同安全基线构造所需的 AgentScope HarnessAgent。
  */
 public final class TeamAgentFactory {
 
@@ -30,7 +32,7 @@ public final class TeamAgentFactory {
     /** AgentScope 核心工具执行器固定五分钟上限前必须完成异步卸载。 */
     private static final Duration MAX_ASYNC_TOOL_OFFLOAD_TIMEOUT = Duration.ofMinutes(4);
 
-    /** 四角色共享的模型实例。 */
+    /** 当前档位全部运行角色共享的模型实例。 */
     private final Model model;
 
     /** 与 Gateway 共享且仅保存角色时间戳的模型活动注册表。 */
@@ -56,6 +58,15 @@ public final class TeamAgentFactory {
 
     /** 长工具转入 AgentScope 后台任务前的等待时间，必须短于核心工具执行器上限。 */
     private final Duration asyncToolOffloadTimeout;
+
+    /** 当前运行时显式冻结的新旧协调模式。 */
+    private final WorkflowCoordinationMode coordinationMode;
+
+    /** 当前运行时为新项目冻结的工作流档位。 */
+    private final WorkflowProfile workflowProfile;
+
+    /** 当前档位实际构造且允许被唤醒的角色顺序。 */
+    private final List<String> runtimeRoles;
 
     /**
      * 创建只启用团队工具、workspace Skill 和声明式 Sub-Agent 的默认工厂。
@@ -154,6 +165,49 @@ public final class TeamAgentFactory {
             Duration asyncToolOffloadTimeout,
             ModelActivityRegistry modelActivityRegistry
     ) {
+        this(
+                model,
+                toolkitFactory,
+                subagentFactory,
+                sandboxConfiguration,
+                activeSkillsByRole,
+                maxIterations,
+                maxContextTokens,
+                asyncToolOffloadTimeout,
+                modelActivityRegistry,
+                WorkflowCoordinationMode.LEGACY,
+                WorkflowProfile.STANDARD
+        );
+    }
+
+    /**
+     * 创建显式冻结协调模式和工作流档位的团队 Agent 工厂。
+     *
+     * @param model AgentScope 原始模型 Bean
+     * @param toolkitFactory 角色 Toolkit 工厂
+     * @param subagentFactory 角色 Sub-Agent 工厂
+     * @param sandboxConfiguration AIO-Sandbox MCP 配置
+     * @param activeSkillsByRole 按角色启用的辅助 Skill
+     * @param maxIterations 单回合最大 ReAct 迭代数
+     * @param maxContextTokens workspace 上下文最大 token 数
+     * @param asyncToolOffloadTimeout 长工具转后台前的等待时间
+     * @param modelActivityRegistry 与 Gateway 共享的角色模型活动注册表
+     * @param coordinationMode 显式协调模式
+     * @param workflowProfile 新项目冻结档位
+     */
+    public TeamAgentFactory(
+            Model model,
+            RoleToolkitFactory toolkitFactory,
+            RoleSubagentFactory subagentFactory,
+            McpSandboxConfiguration sandboxConfiguration,
+            Map<String, Set<String>> activeSkillsByRole,
+            int maxIterations,
+            int maxContextTokens,
+            Duration asyncToolOffloadTimeout,
+            ModelActivityRegistry modelActivityRegistry,
+            WorkflowCoordinationMode coordinationMode,
+            WorkflowProfile workflowProfile
+    ) {
         this.model = Objects.requireNonNull(model, "model 不能为空");
         this.modelActivityRegistry = Objects.requireNonNull(
                 modelActivityRegistry, "modelActivityRegistry 不能为空"
@@ -170,6 +224,11 @@ public final class TeamAgentFactory {
         this.maxIterations = maxIterations;
         this.maxContextTokens = maxContextTokens;
         this.asyncToolOffloadTimeout = requireSafeOffloadTimeout(asyncToolOffloadTimeout);
+        this.coordinationMode = Objects.requireNonNull(
+                coordinationMode, "coordinationMode 不能为空"
+        );
+        this.workflowProfile = Objects.requireNonNull(workflowProfile, "workflowProfile 不能为空");
+        this.runtimeRoles = runtimeRoles(coordinationMode, workflowProfile);
     }
 
     /**
@@ -179,8 +238,15 @@ public final class TeamAgentFactory {
      * @return 已接入 workspace、Skill、Sub-Agent、Toolkit 和 MCP 的 Agent
      */
     public HarnessAgent create(String role) {
+        if (!runtimeRoles.contains(role)) {
+            throw new IllegalArgumentException(
+                    "当前 " + workflowProfile + " 档位未启用角色: " + role
+            );
+        }
         Path roleWorkspace = subagentFactory.roleWorkspace(role);
-        List<SubagentDeclaration> subagents = subagentFactory.create(role);
+        List<SubagentDeclaration> subagents = subagentsEnabled()
+                ? subagentFactory.create(role)
+                : List.of();
         Toolkit toolkit = toolkitFactory.create(role, activeSkillsByRole.getOrDefault(role, Set.of()));
         HarnessAgent.Builder builder = HarnessAgent.builder()
                 .name(role)
@@ -204,14 +270,33 @@ public final class TeamAgentFactory {
                 // 正式产物只能经团队共享工具读写，避免 Harness 相对路径文件工具写入错误目录或长时间阻塞。
                 .disableFilesystemTools()
                 .disableShellTool();
+        if (!subagentsEnabled()) {
+            builder.disableSubagents();
+        }
         HarnessAgent.Builder configuredBuilder = sandboxConfiguration.applyTo(builder, toolkit, role);
         if (sandboxConfiguration.enabled() && Set.of("rd", "qa").contains(role)) {
             toolkit.registerAgentTool(toolkitFactory.createProjectTestTool(toolkit, role));
         }
         HarnessAgent agent = configuredBuilder.build();
-        replaceBlockingTaskOutput(agent);
-        trackTaskSemantics(agent);
+        if (subagentsEnabled()) {
+            replaceBlockingTaskOutput(agent);
+            trackTaskSemantics(agent);
+        } else {
+            removeSubagentTools(agent);
+        }
         return agent;
+    }
+
+    /**
+     * 从 SIMPLE/STANDARD Toolkit 移除全部子任务入口，使越权调用在工具边界明确不可用。
+     *
+     * @param agent 已完成 Harness 内置工具装配的角色 Agent
+     */
+    private static void removeSubagentTools(HarnessAgent agent) {
+        Toolkit runtimeToolkit = agent.getToolkit();
+        for (String toolName : List.of("agent_spawn", "agent_send", "task_output", "task_cancel")) {
+            runtimeToolkit.removeTool(toolName);
+        }
     }
 
     /**
@@ -244,14 +329,14 @@ public final class TeamAgentFactory {
     }
 
     /**
-     * 一次性构造四角色 Agent；中途失败时关闭已创建实例，避免资源泄漏。
+     * 一次性构造当前档位需要的角色 Agent；中途失败时关闭已创建实例，避免资源泄漏。
      *
-     * @return 以 manager、pm、rd、qa 顺序排列的不可变映射
+     * @return SIMPLE 排除 PM、其他档位保持四角色顺序的不可变映射
      */
     public Map<String, HarnessAgent> createAll() {
         Map<String, HarnessAgent> agents = new LinkedHashMap<>();
         try {
-            for (String role : TEAM_ROLES) {
+            for (String role : runtimeRoles) {
                 agents.put(role, create(role));
             }
             return Collections.unmodifiableMap(new LinkedHashMap<>(agents));
@@ -259,6 +344,34 @@ public final class TeamAgentFactory {
             agents.values().forEach(HarnessAgent::close);
             throw exception;
         }
+    }
+
+    /**
+     * 判断当前运行时是否允许声明式子 Agent 和相关 continuation 工具。
+     *
+     * @return legacy 或 STRICT 档位返回 true
+     */
+    private boolean subagentsEnabled() {
+        return coordinationMode == WorkflowCoordinationMode.LEGACY
+                || workflowProfile == WorkflowProfile.STRICT;
+    }
+
+    /**
+     * 计算当前档位实际需要的角色；SIMPLE 不构造也不唤醒 PM。
+     *
+     * @param coordinationMode 显式协调模式
+     * @param workflowProfile 冻结档位
+     * @return 稳定顺序的运行角色
+     */
+    private static List<String> runtimeRoles(
+            WorkflowCoordinationMode coordinationMode,
+            WorkflowProfile workflowProfile
+    ) {
+        if (coordinationMode == WorkflowCoordinationMode.COORDINATED
+                && workflowProfile == WorkflowProfile.SIMPLE) {
+            return List.of("manager", "rd", "qa");
+        }
+        return TEAM_ROLES;
     }
 
     /**

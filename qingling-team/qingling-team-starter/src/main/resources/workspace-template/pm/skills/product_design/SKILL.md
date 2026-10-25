@@ -63,7 +63,9 @@ type: reference
 加载 skill `self_score` → 5 维打分，得到 `{self_score, breakdown, rationale}`。
 
 ### Step 5 — 发 task_done
-`send_mail(to="manager", type="task_done", subject="产品设计完成", content={json}, project_id=...)`，content 含 self_score + artifacts。
+`send_mail(to="manager", type="task_done", subject="产品设计完成", content={"execution_id":"<task_assign.content.execution_id>","artifacts":["design/product_spec.md"],"decision":"ACCEPTED","rationale":"产品设计已完成并回读","self_score":0.xx}, project_id=...)`。
+
+`execution_id` 必须来自本轮 `task_assign`；`artifacts` 必须是路径字符串数组，不得提交 `{path, kind}` 对象。
 
 ### Step 6 — 标 done
 `send_mail` 成功后 Java 自动标记自己刚处理的 `task_assign` 已完成；不得提前或单独调用 `mark_done`。
@@ -72,8 +74,9 @@ type: reference
 
 ```json
 {
-  "status": "success",
-  "artifacts": [{"path": "design/product_spec.md", "kind": "doc"}],
+  "execution_id": "<task_assign.content.execution_id>",
+  "artifacts": ["design/product_spec.md"],
+  "decision": "ACCEPTED",
   "self_score": 0.82,
   "breakdown": {
     "completeness": 1.0,
@@ -82,7 +85,7 @@ type: reference
     "clarity": 0.7,
     "timeliness": 0.8
   },
-  "rationale": "..."
+  "rationale": "产品设计已完成并回读"
 }
 ```
 

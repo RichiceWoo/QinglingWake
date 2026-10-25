@@ -142,6 +142,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 最近一次轮询提取的真实进展指纹，不包含周期 Cron 心跳和缓存噪声。 */
     private String lastRuntimeProgressFingerprint = "";
 
+    /** Harness 固定验收文件的安装摘要，用于在交付前识别角色越权修改。 */
+    private Map<String, String> acceptanceDigests = Map.of();
+
     /**
      * 保存已启动的真实运行时依赖；调用方应使用 {@link #start(String)}。
      */
@@ -211,6 +214,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
                             "--qingling.sandbox.timeout=10m",
                             "--qingling.sandbox.initialization-timeout=30s",
                             "--qingling.cleanup.enabled=false",
+                            "--qingling.workflow.coordination-mode=coordinated",
+                            "--qingling.workflow.default-profile=STANDARD",
+                            "--qingling.workflow.review-policy=REQUIRED_ONLY",
                             "--qingling.cron.heartbeat-interval=10m",
                             "--qingling.cron.heartbeat-stagger-seconds=600,607,614,621"
                     );
@@ -260,6 +266,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
                 STAGE_TIMEOUT,
                 "requirements checkpoint"
         );
+        acceptanceDigests = TodoAcceptanceFixture.install(requireProjectDirectory(), objectMapper);
     }
 
     /** 提交需求修改意见，并等待修订内容进入需求或产品文档。 */
@@ -308,6 +315,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** 验证四场景共享的产物、邮件、事件、Session、MCP 和最终回复契约。 */
     void assertCommonContract() throws Exception {
         Path project = requireProjectDirectory();
+        TodoAcceptanceFixture.verifyUnmodified(project, acceptanceDigests);
         assertThat(projectDirectories()).as("E2E 不得串项目").containsExactly(project);
         assertThat(List.of(
                 "needs/requirements.md", "design/product_spec.md", "tech/tech_design.md",
@@ -432,9 +440,15 @@ final class RealTeamE2EDriver implements AutoCloseable {
                         "diagnostic", status.diagnostic()
                 )).toList());
         summary.put("called_tools", sandboxConfiguration.calledToolNames());
+        summary.put("model_administrative_tool_calls", sandboxConfiguration.calledToolNames().stream()
+                .filter(Set.of("check_review_criteria", "advance_workflow", "agent_spawn", "agent_send",
+                        "task_output", "task_cancel")::contains)
+                .count());
         summary.put("mcp_health", sandboxConfiguration.circuitHealth());
         summary.put("runtime_snapshot", lastRuntimeSnapshot);
-        summary.put("final_runtime_snapshot", finalRuntimeSnapshot());
+        Map<String, Object> finalSnapshot = finalRuntimeSnapshot();
+        summary.put("final_runtime_snapshot", finalSnapshot);
+        summary.putAll(workflowSummaryFields(project));
         if (failure != null) {
             summary.put("failure_type", failure.getClass().getSimpleName());
             summary.put("failure_message", sanitizeEvidenceText(failure.getMessage()));
@@ -497,7 +511,162 @@ final class RealTeamE2EDriver implements AutoCloseable {
         snapshot.put("dispatch_pending", pending);
         snapshot.put("agentscope_active", agentDiagnosticEvidence(agentGateway.activeExecutionDiagnostics()));
         snapshot.put("mcp_health", sandboxConfiguration.circuitHealth());
+        Path project = currentProjectDirectory();
+        snapshot.put("workflow_v2", project == null ? Map.of() : workflowRuntimeEvidence(project));
         return Map.copyOf(snapshot);
+    }
+
+    /**
+     * 提取 summary 顶层要求的 profile、policy、execution/outbox 数量和最终权威状态。
+     *
+     * @param project 当前项目目录，可为空
+     * @return 可直接合并进 summary 的有界字段
+     */
+    private Map<String, Object> workflowSummaryFields(Path project) {
+        if (project == null) {
+            return Map.of(
+                    "workflow_profile", "",
+                    "review_policy", "",
+                    "work_execution_count", 0,
+                    "outbox_pending_count", 0,
+                    "authoritative_final_state", "MISSING"
+            );
+        }
+        Map<String, Object> evidence = workflowRuntimeEvidence(project);
+        return Map.of(
+                "workflow_profile", evidence.getOrDefault("profile", ""),
+                "review_policy", evidence.getOrDefault("review_policy", ""),
+                "work_execution_count", evidence.getOrDefault("execution_count", 0),
+                "outbox_pending_count", evidence.getOrDefault("outbox_pending_count", 0),
+                "authoritative_final_state", evidence.getOrDefault("authoritative_state", "MISSING")
+        );
+    }
+
+    /**
+     * 直接读取 runtime v2 aggregate 并压缩为不含正文、prompt 或凭据的诊断证据。
+     *
+     * @param project 当前项目目录
+     * @return 有界 workflow 权威快照；状态文件尚未出现时为空映射
+     */
+    private Map<String, Object> workflowRuntimeEvidence(Path project) {
+        JsonNode runtime = readWorkflowRuntime(project);
+        return runtime == null ? Map.of() : workflowRuntimeEvidence(runtime);
+    }
+
+    /**
+     * 把 runtime v2 JSON 转成 summary 可序列化的最小权威快照。
+     *
+     * @param runtime workflow-v2 JSON 根节点
+     * @return profile、执行、评审和 pending outbox 的脱敏证据
+     */
+    static Map<String, Object> workflowRuntimeEvidence(JsonNode runtime) {
+        List<Map<String, Object>> executions = new ArrayList<>();
+        Map<String, Long> statusCounts = new LinkedHashMap<>();
+        for (JsonNode execution : runtime.path("executions")) {
+            String status = execution.path("status").asText("UNKNOWN");
+            statusCounts.merge(status, 1L, Long::sum);
+            executions.add(Map.of(
+                    "execution_id", execution.path("execution_id").asText("unknown"),
+                    "stage", execution.path("stage").asText("unknown"),
+                    "owner", execution.path("owner").asText("unknown"),
+                    "status", status,
+                    "attempt", execution.path("attempt").asInt(0),
+                    "last_progress_at", execution.path("last_progress_at").asText(""),
+                    "failure_reason", sanitizeEvidenceText(execution.path("failure_reason").asText(""))
+            ));
+        }
+        List<Map<String, Object>> reviews = new ArrayList<>();
+        for (JsonNode review : runtime.path("review_rounds")) {
+            reviews.add(Map.of(
+                    "review_round_id", review.path("review_round_id").asText("unknown"),
+                    "work_execution_id", review.path("work_execution_id").asText("unknown"),
+                    "stage", review.path("stage").asText("unknown"),
+                    "requirement", review.path("requirement").asText("unknown"),
+                    "status", review.path("status").asText("unknown"),
+                    "expected_reviewers", textValues(review.path("expected_reviewers")),
+                    "deadline", review.path("deadline").asText(""),
+                    "failure_reason", sanitizeEvidenceText(review.path("failure_reason").asText(""))
+            ));
+        }
+        List<Map<String, Object>> pendingOutbox = new ArrayList<>();
+        for (JsonNode action : runtime.path("outbox_actions")) {
+            if (!"PENDING".equals(action.path("status").asText())) {
+                continue;
+            }
+            pendingOutbox.add(Map.of(
+                    "action_id", nestedValue(action.path("action_id")),
+                    "type", action.path("type").asText("unknown"),
+                    "attempt", action.path("attempt").asInt(0),
+                    "last_failure_type", sanitizeEvidenceText(action.path("last_failure_type").asText(""))
+            ));
+        }
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("schema_version", runtime.path("schema_version").asInt(0));
+        evidence.put("profile", runtime.path("profile").asText(""));
+        evidence.put("review_policy", runtime.path("review_policy").asText(""));
+        evidence.put("execution_count", executions.size());
+        evidence.put("execution_status_counts", statusCounts);
+        evidence.put("executions", executions);
+        evidence.put("review_rounds", reviews);
+        evidence.put("outbox_pending_count", pendingOutbox.size());
+        evidence.put("pending_outbox", pendingOutbox);
+        evidence.put("authoritative_state", authoritativeWorkflowState(runtime));
+        return Map.copyOf(evidence);
+    }
+
+    /** 返回 JSON 字符串数组中的稳定文本集合。 */
+    private static List<String> textValues(JsonNode values) {
+        List<String> result = new ArrayList<>();
+        values.forEach(value -> result.add(value.asText("unknown")));
+        return List.copyOf(result);
+    }
+
+    /** 返回值对象的 value 字段，兼容直接字符串序列化。 */
+    private static String nestedValue(JsonNode valueObject) {
+        return valueObject.isTextual()
+                ? valueObject.asText("unknown")
+                : valueObject.path("value").asText("unknown");
+    }
+
+    /**
+     * 由唯一开放 execution 或交付 checkpoint 终态计算项目权威摘要状态。
+     *
+     * @param runtime workflow-v2 JSON
+     * @return MISSING、ACTIVE、COMPLETED、CANCELLED、BLOCKED 或 FAILED
+     */
+    private static String authoritativeWorkflowState(JsonNode runtime) {
+        for (JsonNode execution : runtime.path("executions")) {
+            String status = execution.path("status").asText();
+            if (!Set.of("SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED").contains(status)) {
+                return "ACTIVE:" + execution.path("stage").asText("unknown") + ":" + status;
+            }
+        }
+        for (JsonNode execution : runtime.path("executions")) {
+            if ("DELIVERY_CHECKPOINT".equals(execution.path("stage").asText())
+                    && "SUCCEEDED".equals(execution.path("status").asText())) {
+                return "COMPLETED";
+            }
+        }
+        for (JsonNode execution : runtime.path("executions")) {
+            String status = execution.path("status").asText();
+            if (Set.of("BLOCKED", "FAILED", "CANCELLED").contains(status)) {
+                return status;
+            }
+        }
+        return runtime.path("executions").isEmpty() ? "MISSING" : "SUCCEEDED";
+    }
+
+    /** 从当前项目读取原子 workflow-v2.json；文件尚未创建时返回 null。 */
+    private JsonNode readWorkflowRuntime(Path project) {
+        Path state = project.resolve("runtime/workflow-v2.json");
+        if (!Files.isRegularFile(state)) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(state.toFile());
+        } catch (IOException exception) {
+            throw new IllegalStateException("读取 runtime v2 aggregate 失败", exception);
+        }
     }
 
     /** 场景启动后立即保存模型选择，确保后续业务失败仍可审计动态回退结果。 */
@@ -750,6 +919,8 @@ final class RealTeamE2EDriver implements AutoCloseable {
             List<JsonNode> eventSnapshot = project == null ? List.of() : events();
             List<JsonNode> mailSnapshot = project == null ? List.of() : readAvailableMail(project);
             List<CronJob> cronSnapshot = cronJobRepository.findAll();
+            JsonNode workflowRuntime = project == null ? null : readWorkflowRuntime(project);
+            String authoritativeFailure = authoritativeWorkflowFailureReason(workflowRuntime, Instant.now());
             String incident = terminalIncidentReason(eventSnapshot);
             String recoveringIncidentConflict = recoveringIncidentConflictReason(eventSnapshot);
             Map<String, Integer> dispatch = new LinkedHashMap<>();
@@ -768,6 +939,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
             Instant now = Instant.now();
             List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics =
                     agentGateway.activeExecutionDiagnostics();
+            String orphanExecution = orphanExecutionReason(
+                    workflowRuntime, dispatchStates, agentDiagnostics, now, IDLE_CRON_FAILURE_GRACE
+            );
             String hangingDispatch = hangingDispatchReason(
                     dispatchStates,
                     agentDiagnostics,
@@ -836,6 +1010,12 @@ final class RealTeamE2EDriver implements AutoCloseable {
             snapshot.put("agentscope_active", agentDiagnosticEvidence(agentDiagnostics));
             snapshot.put("cron_jobs", cronJobEvidence(cronSnapshot));
             snapshot.put("mcp_health", mcpHealth);
+            snapshot.put("workflow_v2", workflowRuntime == null
+                    ? Map.of() : workflowRuntimeEvidence(workflowRuntime));
+            snapshot.put("authoritative_failure", authoritativeFailure == null
+                    ? "" : sanitizeEvidenceText(authoritativeFailure));
+            snapshot.put("orphan_execution", orphanExecution == null
+                    ? "" : sanitizeEvidenceText(orphanExecution));
             snapshot.put("terminal_incident", incident == null ? "" : sanitizeEvidenceText(incident));
             snapshot.put("recovering_incident_conflict", recoveringIncidentConflict == null
                     ? "" : sanitizeEvidenceText(recoveringIncidentConflict));
@@ -849,6 +1029,12 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     ? "" : sanitizeEvidenceText(hangingDispatch));
             lastRuntimeSnapshot = Map.copyOf(snapshot);
             lastRuntimeProgressFingerprint = runtimeProgressFingerprint(lastRuntimeSnapshot);
+            if (authoritativeFailure != null) {
+                throw new AssertionError("runtime v2 权威故障：" + authoritativeFailure);
+            }
+            if (orphanExecution != null) {
+                throw new AssertionError("runtime v2 孤儿执行：" + orphanExecution);
+            }
             if (incident != null) {
                 throw new AssertionError("不可恢复工具基础设施故障：" + incident);
             }
@@ -884,6 +1070,107 @@ final class RealTeamE2EDriver implements AutoCloseable {
         } catch (Exception failure) {
             throw new AssertionError("读取 E2E 运行时诊断失败：" + failure.getClass().getSimpleName(), failure);
         }
+    }
+
+    /**
+     * 从 runtime v2 直接识别阻断评审、耗尽 outbox 或失败执行，避免伪装成文件等待超时。
+     *
+     * @param runtime workflow-v2 JSON，可为空
+     * @param now 当前时间
+     * @return 权威故障摘要；尚可推进时为空
+     */
+    static String authoritativeWorkflowFailureReason(JsonNode runtime, Instant now) {
+        if (runtime == null || runtime.isMissingNode() || runtime.isNull()) {
+            return null;
+        }
+        for (JsonNode review : runtime.path("review_rounds")) {
+            if (!"MANDATORY".equals(review.path("requirement").asText())) {
+                continue;
+            }
+            String status = review.path("status").asText("UNKNOWN");
+            String deadline = review.path("deadline").asText("");
+            boolean deadlineExceeded = !deadline.isBlank()
+                    && !Instant.parse(deadline).isAfter(now)
+                    && Set.of("PENDING", "IN_PROGRESS").contains(status);
+            if ("EXPIRED".equals(status) || deadlineExceeded) {
+                return "review_round_id=" + review.path("review_round_id").asText("unknown")
+                        + ", work_execution_id=" + review.path("work_execution_id").asText("unknown")
+                        + ", reviewer=" + textValues(review.path("expected_reviewers"))
+                        + ", status=" + status
+                        + ", deadline=" + deadline;
+            }
+        }
+        for (JsonNode action : runtime.path("outbox_actions")) {
+            if ("PENDING".equals(action.path("status").asText())
+                    && action.path("attempt").asInt(0) >= 3) {
+                return "outbox_action_id=" + nestedValue(action.path("action_id"))
+                        + ", type=" + action.path("type").asText("unknown")
+                        + ", attempt=" + action.path("attempt").asInt(0)
+                        + ", last_failure_type="
+                        + sanitizeEvidenceText(action.path("last_failure_type").asText("unknown"));
+            }
+        }
+        for (JsonNode execution : runtime.path("executions")) {
+            String status = execution.path("status").asText();
+            if (Set.of("BLOCKED", "FAILED").contains(status)) {
+                return "execution_id=" + execution.path("execution_id").asText("unknown")
+                        + ", stage=" + execution.path("stage").asText("unknown")
+                        + ", owner=" + execution.path("owner").asText("unknown")
+                        + ", status=" + status
+                        + ", failure_reason="
+                        + sanitizeEvidenceText(execution.path("failure_reason").asText("unknown"));
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 识别已是 RUNNING、超过宽限且既无 dispatch 也无 AgentScope 回合的孤儿 WorkExecution。
+     *
+     * @param runtime workflow-v2 JSON，可为空
+     * @param dispatchStates 当前 dispatch 快照
+     * @param agentDiagnostics 当前 AgentScope 回合
+     * @param now 当前时间
+     * @param grace 无承载执行宽限
+     * @return 孤儿 execution 摘要；仍有承载或处于宽限时为空
+     */
+    static String orphanExecutionReason(
+            JsonNode runtime,
+            Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates,
+            List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics,
+            Instant now,
+            Duration grace
+    ) {
+        if (runtime == null || runtime.isMissingNode() || runtime.isNull()) {
+            return null;
+        }
+        for (JsonNode execution : runtime.path("executions")) {
+            if (!"RUNNING".equals(execution.path("status").asText())) {
+                continue;
+            }
+            String projectId = execution.path("project_id").asText(runtime.path("project_id").asText(""));
+            String owner = execution.path("owner").asText("");
+            String route = "team:" + owner;
+            SerialDispatchRegistry.DispatchSnapshot dispatch = dispatchStates.get(route);
+            boolean activeDispatch = dispatch != null && dispatch.active();
+            boolean activeAgent = agentDiagnostics.stream().anyMatch(diagnostic ->
+                    diagnostic.role().equals(owner) && diagnostic.projectId().equals(projectId)
+            );
+            if (activeDispatch || activeAgent) {
+                continue;
+            }
+            String progressText = execution.path("last_progress_at").asText("");
+            if (progressText.isBlank() || Duration.between(Instant.parse(progressText), now).compareTo(grace) < 0) {
+                continue;
+            }
+            return "execution_id=" + execution.path("execution_id").asText("unknown")
+                    + ", stage=" + execution.path("stage").asText("unknown")
+                    + ", owner=" + owner
+                    + ", status=RUNNING"
+                    + ", last_progress_at=" + progressText
+                    + ", dispatch_active=false, agentscope_active=false";
+        }
+        return null;
     }
 
     /**
@@ -1959,11 +2246,30 @@ final class RealTeamE2EDriver implements AutoCloseable {
         if (!Files.exists(normalizedTarget)) {
             return;
         }
+        makeDirectoriesOwnerWritable(normalizedTarget);
         try (Stream<Path> paths = Files.walk(normalizedTarget)) {
             for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
                 if (!path.equals(normalizedTarget)) {
                     Files.deleteIfExists(path);
                 }
+            }
+        }
+    }
+
+    /**
+     * 清理前给隔离树目录恢复所有者写权限，使上轮只读 acceptance 仍可被可靠删除。
+     *
+     * @param root 隔离 E2E 目录
+     * @throws IOException 权限或遍历失败
+     */
+    private static void makeDirectoriesOwnerWritable(Path root) throws IOException {
+        try (Stream<Path> paths = Files.walk(root)) {
+            for (Path directory : paths.filter(Files::isDirectory).toList()) {
+                Set<java.nio.file.attribute.PosixFilePermission> permissions =
+                        new LinkedHashSet<>(Files.getPosixFilePermissions(directory));
+                permissions.add(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE);
+                permissions.add(java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE);
+                Files.setPosixFilePermissions(directory, permissions);
             }
         }
     }

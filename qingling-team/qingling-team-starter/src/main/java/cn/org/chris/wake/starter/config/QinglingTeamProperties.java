@@ -1,5 +1,8 @@
 package cn.org.chris.wake.starter.config;
 
+import cn.org.chris.wake.domain.workflow.ReviewPolicy;
+import cn.org.chris.wake.domain.workflow.WorkflowCoordinationMode;
+import cn.org.chris.wake.domain.workflow.WorkflowProfile;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
@@ -25,6 +28,7 @@ public record QinglingTeamProperties(
         /** 数据保留和启动清理配置。 */ @DefaultValue Cleanup cleanup,
         /** Cron tick 与 heartbeat 配置。 */ @DefaultValue Cron cron,
         /** 百度搜索工具配置。 */ @DefaultValue Search search,
+        /** runtime v2 工作流档位、评审和兼容模式配置。 */ @DefaultValue Workflow workflow,
         /** session、cron、日志与凭据的外部数据根目录。 */ @DefaultValue("./data") Path dataDir
 ) {
 
@@ -203,5 +207,19 @@ public record QinglingTeamProperties(
     /** 百度千帆网页搜索配置。 */
     public record Search(
             /** 百度 AppBuilder API Key，空值让搜索工具返回建设性错误。 */ @DefaultValue("") String baiduApiKey
+    ) { }
+
+    /** runtime v2 工作流档位、评审策略和兼容切换配置。 */
+    public record Workflow(
+            /** 使用旧链路或 WorkExecution 单一权威协调链。 */
+            @DefaultValue("legacy") WorkflowCoordinationMode coordinationMode,
+            /** 新项目创建时固定且运行中不可切换的复杂度档位。 */
+            @DefaultValue("standard") WorkflowProfile defaultProfile,
+            /** 控制 mandatory 与 advisory 评审是否阻断主流程。 */
+            @DefaultValue("required-only") ReviewPolicy reviewPolicy,
+            /** 是否记录新手期和抽查命中的建议性审计证据。 */
+            @DefaultValue("true") boolean advisoryAuditEnabled,
+            /** 阻断式 ReviewRound 从创建到明确终态的最长业务时间。 */
+            @DefaultValue("10m") Duration reviewTimeout
     ) { }
 }

@@ -16,8 +16,8 @@
 
 - 直接使用 `read_inbox`、`send_mail`、`mark_done`、`read_shared`、`write_shared`。
 - 通过 Harness 的 `load_skill` 按需加载 `product_design`、评审、自评和复盘 Skill。
-- task Skill 由 `subagents/*.md` 声明式 Sub-Agent 执行，不使用 `load_skills.yaml`。
-- 发 `task_done` 前必须加载 `self_score`，正文携带产物路径、自评分解和依据；发送成功会自动完成原 `task_assign`，无需再次调用 `mark_done`。
+- `STANDARD` 档位直接由当前 PM 执行 task Skill；只有 `STRICT` 档位才允许 `subagents/*.md` 声明式 Sub-Agent。`SIMPLE` 不创建或唤醒 PM。不使用 `load_skills.yaml`。
+- 发 `task_done` 前必须加载 `self_score`。正文只提交当前 `task_assign.content.execution_id`、字符串数组 `artifacts`、有限 `decision`、`rationale` 和可选 `self_score`；Java 直接完成状态迁移并自动关闭原 `task_assign`，无需再次调用 `mark_done`。
 - 收到 `retro_approved` 后只做批准提案中指定的精确文本替换，并向 Manager 回报结果。
 
 ## 默认业务交付约束

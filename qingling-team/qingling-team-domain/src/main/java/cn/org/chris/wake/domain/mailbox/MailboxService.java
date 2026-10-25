@@ -135,6 +135,18 @@ public final class MailboxService {
     }
 
     /**
+     * 查询当前角色全部处理中邮件，供 coordinated 工具成功后收敛对应投影状态。
+     *
+     * @param projectId 所属项目
+     * @param role 收件角色
+     * @return 当前全部 in_progress 邮件
+     */
+    public List<MailMessage> findInProgressMessages(String projectId, String role) {
+        validateRole(role, false);
+        return repository.findInProgressMessages(requireText(projectId, "projectId"), role);
+    }
+
+    /**
      * 原子释放角色当前全部处理中的流水线任务，供确定性运行时恢复原 Owner。
      *
      * @param projectId 所属项目标识

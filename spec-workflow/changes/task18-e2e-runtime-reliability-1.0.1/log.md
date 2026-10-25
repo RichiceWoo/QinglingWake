@@ -189,3 +189,10 @@
 - **mailbox 直接诊断**：诊断阈值直接由 `MailboxLeaseWatchdog.DEFAULT_LEASE_TIMEOUT`、`DEFAULT_SCAN_INTERVAL` 和恢复宽限组成。`in_progress` 邮件只有在超出完整窗口且不存在活跃 dispatch、对应项目/Owner Agent 回合或一次性恢复 wake 时，才以 `mailbox 租约悬挂` 直接失败；正常 watchdog 恢复不会再被 Driver 抢跑。
 - **验证**：定向 `TaskSemanticsTrackingToolTest,RealTeamE2EDriverTest,MailboxLeaseWatchdogTest` 通过 38 项（3.077 秒）；完整 `mvn verify` 通过 311 项（18.978 秒）；零模型真实 Docker `RealSandboxToolContractIT` 通过 1 IT（17.48 秒，Maven 32.525 秒）；`git diff --check` 通过。
 - **范围**：按用户要求没有启动真实 E2E、没有调用百炼、没有 commit 或 push。Task 8、Task 9 与父需求 Task 18 均保持未完成；工作区既有 `CompletableFutureDemo.java` 和 `../tmp.txt` 未触碰。
+
+## 2026-10-25 确定性编排改造非 E2E 门禁完成
+
+- **改造**：专项版本 `agent-workflow-determinism-1.0.0` 已接入 runtime v2 WorkExecution/outbox、Java 完成协调、固定 profile/review、SIMPLE/STANDARD 父角色直做、只读 Todo acceptance 和 Driver v2 直接诊断。
+- **真实发现**：首次 Docker 工具契约因 QA 固定验收 fixture 未安装而以 `exit_code=4` 失败；复用公共 `TodoAcceptanceFixture` 并为契约工作区安装只读验收和最小正确应用后才重跑通过。
+- **验证**：相关模块 165 项通过；最终 `mvn verify` 394 项通过（18.805s）；修复后 `RealSandboxToolContractIT` 1 IT 通过（37.157s）；`CoordinatedWorkflowContractIT` 1 IT 通过（27.483s）；`git diff --check` 与 orphan 复核通过。
+- **门禁**：未 source E2E 凭据、未调用真实模型、未运行真实 E2E。Task 8、Task 9 与父 Task 18 继续未完成，等待用户二次授权。

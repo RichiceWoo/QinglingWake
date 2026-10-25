@@ -36,7 +36,9 @@ type: reference
 
 ### Step 5 — 写报告 + review_done
 `write_shared(pid, "reviews/test_design/rd_boundary.md", report)`
-`send_mail(to="manager", type="review_done", subject="测试设计评审完成 (RD)", content=..., project_id=pid)`
+`send_mail(to="manager", type="review_done", subject="测试设计评审完成 (RD)", content={"review_round_id":"<review_request.content.review_round_id>","verdict":"APPROVED"|"CHANGES_REQUESTED","rationale":"评审结论","artifacts":["reviews/test_design/rd_boundary.md"]}, project_id=pid)`
+
+`review_round_id` 必须逐字取自当前 `review_request.content`；成功后 Java 自动完成该 `review_request`。
 
 ## 输出
 

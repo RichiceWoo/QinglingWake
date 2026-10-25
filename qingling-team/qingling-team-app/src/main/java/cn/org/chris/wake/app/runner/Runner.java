@@ -361,6 +361,7 @@ public final class Runner implements CronDispatchGateway {
     ) {
         Map<String, Object> attributes = new LinkedHashMap<>(inbound.meta());
         attributes.put("routingKey", inbound.routingKey());
+        attributes.put("dispatchId", inbound.msgId());
         attributes.put("rootId", inbound.rootId());
         attributes.put("verbose", session.verbose());
         attributes.put("cron", inbound.cron());

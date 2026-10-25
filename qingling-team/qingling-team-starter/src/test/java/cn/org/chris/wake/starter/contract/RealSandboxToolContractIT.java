@@ -11,6 +11,7 @@ import cn.org.chris.wake.infra.persistence.event.JsonlEventRepository;
 import cn.org.chris.wake.infra.persistence.mailbox.FileMailboxRepository;
 import cn.org.chris.wake.infra.persistence.workspace.FileWorkspaceRepository;
 import cn.org.chris.wake.infra.workspace.WorkspaceTemplateInitializer;
+import cn.org.chris.wake.starter.e2e.TodoAcceptanceFixture;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
@@ -31,8 +32,10 @@ import reactor.core.publisher.Flux;
 import java.net.http.HttpClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.time.Duration;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashSet;
@@ -76,8 +79,11 @@ class RealSandboxToolContractIT {
         new WorkspaceTemplateInitializer(workspaceRoot, objectMapper).initialize();
         FileWorkspaceRepository workspaceRepository = new FileWorkspaceRepository(workspaceRoot);
         workspaceRepository.initializeProject("tool-contract");
+        Path contractProjectDirectory = workspaceRoot.resolve("shared/projects/tool-contract");
+        TodoAcceptanceFixture.install(contractProjectDirectory, objectMapper);
         Path codeDirectory = workspaceRoot.resolve("shared/projects/tool-contract/code");
         Files.createDirectories(codeDirectory);
+        Files.writeString(codeDirectory.resolve("main.py"), todoApplicationSource());
         Files.writeString(codeDirectory.resolve("test_contract.py"),
                 "# 验证 RD 受控回归测试能够在真实沙盒执行。\n"
                         + "def test_contract():\n    assert 2 + 2 == 4\n");
@@ -168,11 +174,114 @@ class RealSandboxToolContractIT {
         if (!Files.exists(normalizedProject)) {
             return;
         }
+        makeDirectoriesOwnerWritable(normalizedProject);
         try (Stream<Path> paths = Files.walk(normalizedProject)) {
             for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
                 Files.deleteIfExists(path);
             }
         }
+    }
+
+    /** 让上轮只读 acceptance 目录恢复所有者写权限，以便安全清理隔离项目。 */
+    private static void makeDirectoriesOwnerWritable(Path projectDirectory) throws Exception {
+        try (Stream<Path> paths = Files.walk(projectDirectory)) {
+            for (Path directory : paths.filter(Files::isDirectory).toList()) {
+                Set<PosixFilePermission> permissions = EnumSet.copyOf(
+                        Files.getPosixFilePermissions(directory)
+                );
+                permissions.add(PosixFilePermission.OWNER_WRITE);
+                Files.setPosixFilePermissions(directory, permissions);
+            }
+        }
+    }
+
+    /** 返回供真实 QA acceptance 执行的最小、持久化且满足固定接口的 FastAPI 应用。 */
+    private static String todoApplicationSource() {
+        return """
+                import sqlite3
+                from pathlib import Path
+                from fastapi import FastAPI, HTTPException, Response
+                from fastapi.responses import HTMLResponse
+                from pydantic import BaseModel, validator
+
+                # 固定测试数据库位于隔离项目代码目录，跨 TestClient 保留数据。
+                DB_PATH = Path(__file__).with_name("todos.db")
+                # FastAPI 应用是固定验收 pytest 的唯一入口。
+                app = FastAPI()
+
+                # 创建请求只接受一个非空标题。
+                class TodoCreate(BaseModel):
+                    title: str
+
+                    # 归一化标题并拒绝空白输入。
+                    @validator("title")
+                    def title_not_blank(cls, value):
+                        if not value.strip():
+                            raise ValueError("title must not be blank")
+                        return value.strip()
+
+                # 打开持久化 SQLite 连接并幂等初始化表结构。
+                def connect():
+                    connection = sqlite3.connect(DB_PATH)
+                    connection.row_factory = sqlite3.Row
+                    connection.execute(
+                        "CREATE TABLE IF NOT EXISTS todos "
+                        "(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0)"
+                    )
+                    connection.commit()
+                    return connection
+
+                # 将 SQLite 行转换为稳定 JSON 契约。
+                def as_todo(row):
+                    return {"id": row["id"], "title": row["title"], "completed": bool(row["completed"])}
+
+                # 创建并返回一条持久化待办。
+                @app.post("/todos", status_code=201)
+                def create_todo(payload: TodoCreate):
+                    with connect() as connection:
+                        cursor = connection.execute("INSERT INTO todos(title) VALUES (?)", (payload.title,))
+                        row = connection.execute("SELECT * FROM todos WHERE id = ?", (cursor.lastrowid,)).fetchone()
+                        return as_todo(row)
+
+                # 按整数主键倒序返回全部待办。
+                @app.get("/todos")
+                def list_todos():
+                    with connect() as connection:
+                        return [as_todo(row) for row in connection.execute("SELECT * FROM todos ORDER BY id DESC")]
+
+                # 返回指定待办，不存在时给出 404。
+                @app.get("/todos/{todo_id}")
+                def get_todo(todo_id: int):
+                    with connect() as connection:
+                        row = connection.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
+                        if row is None:
+                            raise HTTPException(status_code=404)
+                        return as_todo(row)
+
+                # 将指定待办标记为完成。
+                @app.patch("/todos/{todo_id}/complete")
+                def complete_todo(todo_id: int):
+                    with connect() as connection:
+                        cursor = connection.execute("UPDATE todos SET completed = 1 WHERE id = ?", (todo_id,))
+                        if cursor.rowcount == 0:
+                            raise HTTPException(status_code=404)
+                        row = connection.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
+                        return as_todo(row)
+
+                # 物理删除指定待办并返回 204。
+                @app.delete("/todos/{todo_id}", status_code=204)
+                def delete_todo(todo_id: int):
+                    with connect() as connection:
+                        cursor = connection.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
+                        if cursor.rowcount == 0:
+                            raise HTTPException(status_code=404)
+                    return Response(status_code=204)
+
+                # 返回不依赖本地脚本或样式文件的单文件页面。
+                @app.get("/", response_class=HTMLResponse)
+                def index():
+                    return "<!doctype html><html><body><main id='app'>Todo</main><script>void 0</script></body></html>"
+                """;
     }
 
     /**
@@ -319,7 +428,7 @@ class RealSandboxToolContractIT {
     private static void ensureSandboxPythonDependencies() throws Exception {
         List<String> checkCommand = List.of(
                 "docker", "exec", "--user", "1000", SANDBOX_CONTAINER,
-                "python", "-c", "import pytest, pytest_cov"
+                "python", "-c", "import pytest, pytest_cov, fastapi, httpx"
         );
         if (!runFixedDockerCommand(checkCommand, 15)) {
             List<String> installCommand = List.of(
@@ -327,14 +436,15 @@ class RealSandboxToolContractIT {
                     "python", "-m", "pip", "install", "--user",
                     "--disable-pip-version-check", "--no-input", "--quiet",
                     "--timeout", "15", "--retries", "1",
-                    "--index-url", "https://pypi.org/simple", "pytest", "pytest-cov"
+                    "--index-url", "https://pypi.org/simple",
+                    "pytest", "pytest-cov", "fastapi", "httpx"
             );
             assertThat(runFixedDockerCommand(installCommand, 180))
                     .as("干净沙盒必须能在 180 秒内安装 pytest 和 pytest-cov")
                     .isTrue();
         }
         assertThat(runFixedDockerCommand(checkCommand, 15))
-                .as("沙盒中 pytest 和 pytest-cov 必须可导入")
+                .as("沙盒中 pytest、pytest-cov、FastAPI 和 HTTPX 必须可导入")
                 .isTrue();
     }
 

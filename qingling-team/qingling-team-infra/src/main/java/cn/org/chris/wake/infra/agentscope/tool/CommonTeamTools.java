@@ -4,6 +4,7 @@ import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.MailMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 
@@ -39,6 +40,9 @@ public final class CommonTeamTools {
     /** 工具 JSON 响应编解码器。 */
     private final ObjectMapper objectMapper;
 
+    /** coordinated 项目完成、评审和运行时关联的窄协调端口。 */
+    private final WorkflowToolCoordinator workflowToolCoordinator;
+
     /**
      * 创建绑定单个团队角色的五个公共工具。
      *
@@ -55,7 +59,10 @@ public final class CommonTeamTools {
             MailWakeScheduler wakeScheduler,
             ObjectMapper objectMapper
     ) {
-        this(role, mailboxService, workspaceRepository, wakeScheduler, objectMapper, null);
+        this(
+                role, mailboxService, workspaceRepository, wakeScheduler, objectMapper,
+                null, WorkflowToolCoordinator.legacy()
+        );
     }
 
     /**
@@ -76,6 +83,32 @@ public final class CommonTeamTools {
             ObjectMapper objectMapper,
             DeterministicWorkflowTools workflowTools
     ) {
+        this(
+                role, mailboxService, workspaceRepository, wakeScheduler, objectMapper,
+                workflowTools, WorkflowToolCoordinator.legacy()
+        );
+    }
+
+    /**
+     * 创建同时支持 legacy 邮箱协议与 runtime v2 原子工具协议的公共工具。
+     *
+     * @param role 当前角色
+     * @param mailboxService 邮箱领域服务
+     * @param workspaceRepository 共享工作区端口
+     * @param wakeScheduler 邮件唤醒调度端口
+     * @param objectMapper JSON 编解码器
+     * @param workflowTools legacy Java 状态机与完成证据门禁
+     * @param workflowToolCoordinator runtime v2 工具协调端口
+     */
+    public CommonTeamTools(
+            String role,
+            MailboxService mailboxService,
+            WorkspaceRepository workspaceRepository,
+            MailWakeScheduler wakeScheduler,
+            ObjectMapper objectMapper,
+            DeterministicWorkflowTools workflowTools,
+            WorkflowToolCoordinator workflowToolCoordinator
+    ) {
         if (!MailboxService.TEAM_ROLES.contains(role)) {
             throw new IllegalArgumentException("未知团队角色: " + role);
         }
@@ -85,6 +118,29 @@ public final class CommonTeamTools {
         this.wakeScheduler = Objects.requireNonNull(wakeScheduler, "wakeScheduler 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
         this.workflowTools = workflowTools;
+        this.workflowToolCoordinator = Objects.requireNonNull(
+                workflowToolCoordinator, "workflowToolCoordinator 不能为空"
+        );
+    }
+
+    /**
+     * 为 Java 直接调用保留不传 AgentScope 上下文的兼容入口。
+     *
+     * @param to 收件角色
+     * @param type 邮件业务类型
+     * @param subject 邮件主题
+     * @param content 字符串或结构化正文
+     * @param projectId 项目标识
+     * @return 工具 JSON 结果
+     */
+    public String sendMail(
+            String to,
+            String type,
+            String subject,
+            Object content,
+            String projectId
+    ) {
+        return sendMail(to, type, subject, content, projectId, null);
     }
 
     /**
@@ -95,6 +151,7 @@ public final class CommonTeamTools {
      * @param subject 邮件主题
      * @param content 字符串或结构化正文
      * @param projectId 项目标识
+     * @param runtimeContext AgentScope 注入的当前执行上下文，不进入工具 schema
      * @return 包含 msg_id 和 scheduled_wake 的 JSON
      */
     @Tool(
@@ -107,11 +164,18 @@ public final class CommonTeamTools {
             @ToolParam(name = "type", description = "邮件类型，如 task_done/review_request/clarification_request；流水线分派和澄清答复必须走 advance_workflow") String type,
             @ToolParam(name = "subject", description = "一行邮件标题") String subject,
             @ToolParam(name = "content", description = "字符串或结构化 JSON 正文") Object content,
-            @ToolParam(name = "project_id", description = "小写项目 ID") String projectId
+            @ToolParam(name = "project_id", description = "小写项目 ID") String projectId,
+            RuntimeContext runtimeContext
     ) {
         try {
             String checkedProjectId = AgentToolSupport.requireProjectId(projectId);
-            Object normalizedContent = normalizeTaskDoneContent(type, content);
+            Object normalizedContent = normalizeStructuredContent(type, content);
+            if (workflowToolCoordinator.coordinated(checkedProjectId)
+                    && ("task_done".equals(type) || "review_done".equals(type))) {
+                return completeCoordinatedMail(
+                        checkedProjectId, to, type, subject, normalizedContent, runtimeContext
+                );
+            }
             if (workflowTools != null) {
                 workflowTools.validateOutgoingMail(checkedProjectId, role, type, normalizedContent);
             }
@@ -151,14 +215,57 @@ public final class CommonTeamTools {
     }
 
     /**
-     * 将 AgentScope 实际传入的 task_done JSON 字符串恢复为对象，其他正文保持原类型。
+     * 在 runtime v2 项目中把完成或评审邮件直接转换为原子命令，并收敛旧邮箱投影。
+     *
+     * @param projectId 项目标识
+     * @param to 兼容入口收件角色
+     * @param type task_done 或 review_done
+     * @param subject 有界邮件主题
+     * @param content 已归一化正文
+     * @param runtimeContext 当前 AgentScope 上下文
+     * @return 不产生 Manager 行政邮件的权威协调结果
+     */
+    private String completeCoordinatedMail(
+            String projectId,
+            String to,
+            String type,
+            String subject,
+            Object content,
+            RuntimeContext runtimeContext
+    ) {
+        if (!"manager".equals(to)) {
+            throw new IllegalStateException(type + " 被拒绝：兼容入口必须发送给 manager");
+        }
+        Map<String, Object> coordinated = "task_done".equals(type)
+                ? workflowToolCoordinator.complete(projectId, role, subject, content)
+                : workflowToolCoordinator.submitReview(projectId, role, content);
+        String expectedMessageType = "task_done".equals(type) ? "task_assign" : "review_request";
+        List<MailMessage> completed = mailboxService.findInProgressMessages(projectId, role).stream()
+                .filter(message -> expectedMessageType.equals(message.type()))
+                .toList();
+        for (MailMessage message : completed) {
+            mailboxService.markDone(projectId, role, message.id());
+        }
+        Map<String, Object> response = new LinkedHashMap<>(coordinated);
+        response.put("coordinated", true);
+        response.put("legacy_mail_sent", false);
+        response.put("completed_assignment_ids", completed.stream().map(MailMessage::id).toList());
+        if (runtimeContext != null) {
+            response.put("agent_session_id", Objects.toString(runtimeContext.getSessionId(), ""));
+        }
+        return AgentToolSupport.success(objectMapper, response);
+    }
+
+    /**
+     * 将 AgentScope 实际传入的 task_done/review_done JSON 字符串恢复为对象，其他正文保持原类型。
      *
      * @param type 邮件业务类型
      * @param content 原始工具入参
      * @return 可供证据门禁和邮箱共同使用的正文
      */
-    private Object normalizeTaskDoneContent(String type, Object content) {
-        if (!"task_done".equals(type) || !(content instanceof String text)) {
+    private Object normalizeStructuredContent(String type, Object content) {
+        if (!("task_done".equals(type) || "review_done".equals(type))
+                || !(content instanceof String text)) {
             return content;
         }
         String trimmed = text.trim();
@@ -174,9 +281,20 @@ public final class CommonTeamTools {
     }
 
     /**
+     * 为 Java 直接调用保留不传 AgentScope 上下文的兼容入口。
+     *
+     * @param projectId 项目标识
+     * @return 邮件数量与消息快照 JSON
+     */
+    public String readInbox(String projectId) {
+        return readInbox(projectId, null);
+    }
+
+    /**
      * 原子领取当前角色的 unread 邮件并转为 in_progress。
      *
      * @param projectId 项目标识
+     * @param runtimeContext AgentScope 注入的当前执行上下文，不进入工具 schema
      * @return 邮件数量与消息快照 JSON
      */
     @Tool(
@@ -185,12 +303,17 @@ public final class CommonTeamTools {
             concurrencySafe = true
     )
     public String readInbox(
-            @ToolParam(name = "project_id", description = "项目 ID") String projectId
+            @ToolParam(name = "project_id", description = "项目 ID") String projectId,
+            RuntimeContext runtimeContext
     ) {
         try {
+            String checkedProjectId = AgentToolSupport.requireProjectId(projectId);
             List<MailMessage> messages = mailboxService.readInbox(
-                    AgentToolSupport.requireProjectId(projectId), role
+                    checkedProjectId, role
             );
+            if (workflowToolCoordinator.coordinated(checkedProjectId)) {
+                bindCoordinatedAssignments(checkedProjectId, messages, runtimeContext);
+            }
             return AgentToolSupport.success(objectMapper, Map.of(
                     "role", role,
                     "count", messages.size(),
@@ -198,6 +321,35 @@ public final class CommonTeamTools {
             ));
         } catch (RuntimeException exception) {
             return AgentToolSupport.error(objectMapper, exception);
+        }
+    }
+
+    /**
+     * 把本轮领取到的 v2 task_assign 绑定到 WorkExecution 和当前 AgentScope 回合。
+     *
+     * @param projectId 项目标识
+     * @param messages 本轮领取邮件
+     * @param runtimeContext 当前 AgentScope 上下文
+     */
+    private void bindCoordinatedAssignments(
+            String projectId,
+            List<MailMessage> messages,
+            RuntimeContext runtimeContext
+    ) {
+        if (runtimeContext == null) {
+            throw new IllegalStateException("coordinated read_inbox 缺少 AgentScope RuntimeContext");
+        }
+        String dispatchId = Objects.toString(runtimeContext.get("dispatchId", String.class), "").trim();
+        String sessionId = Objects.toString(runtimeContext.getSessionId(), "").trim();
+        if (dispatchId.isEmpty() || sessionId.isEmpty()) {
+            throw new IllegalStateException("coordinated read_inbox 缺少 dispatch/session 上下文");
+        }
+        for (MailMessage message : messages) {
+            if ("task_assign".equals(message.type())) {
+                workflowToolCoordinator.claimAndStart(
+                        projectId, role, message.id(), message.content(), dispatchId, sessionId
+                );
+            }
         }
     }
 

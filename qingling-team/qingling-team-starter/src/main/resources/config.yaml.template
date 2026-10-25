@@ -90,6 +90,15 @@ qingling:
   search:
     baidu-api-key: ""
 
+  workflow:
+    # runtime v2 完成全部验证前使用 legacy；新项目切换时显式改为 coordinated。
+    coordination-mode: legacy
+    # STANDARD 保留四角色产物契约，但不让 optional review 或子 Agent 阻断主路径。
+    default-profile: standard
+    review-policy: required-only
+    advisory-audit-enabled: true
+    review-timeout: 10m
+
 # 默认 DashScope：export QINGLING_MODEL_PROVIDER=dashscope DASHSCOPE_API_KEY=sk-xxx
 # NewAPI（地址开放后）：export QINGLING_MODEL_PROVIDER=newapi NEWAPI_API_KEY=sk-xxx NEWAPI_BASE_URL=https://newapi.example.com/v1 QINGLING_AGENT_MODEL=qwen3.8 QINGLING_SUB_AGENT_MODEL=qwen3.8
 # pgvector 开启后独立配置：export QINGLING_MEMORY_DB_DSN=jdbc:postgresql://db:5432/qingling QINGLING_MEMORY_DASHSCOPE_API_KEY=sk-xxx

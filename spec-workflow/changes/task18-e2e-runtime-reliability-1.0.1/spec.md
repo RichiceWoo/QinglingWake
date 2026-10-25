@@ -283,6 +283,14 @@ RD 首次完成回报因 `content` 不是结构化 JSON 被确定性门禁拒绝
 
 Failsafe 为 1 test、1 failure、0 errors、0 skipped，E2E 2584 秒，Maven 总耗时 43 分 19 秒。finally 保存 `summary.json`/`failure-summary.json`，关闭后 dispatch pending=0、AgentScope active=0、AIO shell session=0，容器内无 pytest/pip/tmux，宿主无 E2E Maven/Java 残留。Task 8、Task 9 与父 Task 18 继续保持未完成。
 
+### 12.7 2026-10-25 确定性编排改造与非 E2E 门禁
+
+后续专项版本 `agent-workflow-determinism-1.0.0` 已把新项目工作流收敛到 runtime v2 单一 WorkExecution aggregate 与内置 outbox：模型负责业务产物和有限语义结论，Java 负责完成协调、阶段迁移、评审 barrier、副作用投影和恢复。Task 18 固定为 `STANDARD + REQUIRED_ONLY`，不再随机插入阻断审计/新手评审；SIMPLE/STANDARD 默认由父角色直接完成，不强制声明式子 Agent。Harness 注入只读 Todo acceptance，QA Runner 固定执行独立验收，Driver 直接检查 execution、review、outbox 与 orphan，而不是等待下游文件掩盖根因。
+
+非 E2E 门禁全部通过：相关模块定向 165 项；最终 `mvn verify` 394 项（domain 72、app 61、infra 159、adapter 13、starter 89），18.805 秒；真实 Docker/AgentScope/MCP + NoCallModel 工具契约 1 IT，37.157 秒；零模型 coordinated STANDARD 全链 1 IT，27.483 秒；`git diff --check` 和宿主/容器孤儿复核通过。工具契约首次运行曾真实发现 QA 固定验收 fixture 未安装并以 `exit_code=4` 失败，修复为复用公共只读 fixture 后才取得上述通过结果。
+
+本轮没有 source E2E 凭据、没有调用百炼，也没有运行真实场景。上述结果只能证明确定性编排与工具边界已满足下一轮 E2E 的前置门禁，不能替代四条真实 E2E；Task 8、Task 9 与父 Task 18 继续保持未完成，等待用户二次明确授权。
+
 ## 13. 确认记录（HARD-GATE）
 
 - **确认时间**：2026-10-07

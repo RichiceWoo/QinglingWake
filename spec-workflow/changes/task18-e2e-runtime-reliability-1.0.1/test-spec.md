@@ -261,3 +261,8 @@ git diff --check
 | 2026-10-25 | `mvn verify` | 通过（311 tests，18.978 秒） | domain 44、app 38、infra 143、adapter 13、starter 73；0 failures、0 errors、0 skipped；未加载 E2E profile、未调用百炼 |
 | 2026-10-25 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（1 IT，17.48 秒；Maven 32.525 秒） | 真实 Docker AIO-Sandbox + RD/QA AgentScope + NoCallModel；连续 Shell、结构化 Test Runner、受控连接恢复及 pending/orphan 清理契约通过；未运行真实 E2E |
 | 2026-10-25 | `git diff --check` | 通过 | 工作区既有修改和未跟踪文件全部保留；未 reset、checkout、commit 或 push |
+| 2026-10-25 | 确定性编排相关模块定向测试 | 通过（165 tests，13.633s） | runtime v2 aggregate/outbox、完成协调、profile/review、固定验收、Driver 直接诊断相关测试 0 failure/error/skip；未调用模型、未运行 E2E |
+| 2026-10-25 | 首次 `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 失败，不能计为通过 | QA 固定验收 `../acceptance/test_todo_contract.py` 未安装，真实 Test Runner 返回 exit_code=4；问题已作为 fixture 缺口修复，没有跳过或放宽断言 |
+| 2026-10-25 | 修复后 `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过（394 unit + 1 IT，37.157s） | 真实 Docker AIO-Sandbox、RD/QA AgentScope/MCP、NoCallModel；10 次 Shell、5 次成功项目测试、大输出业务失败、受控连接恢复及无 pending/pytest/pip/tmux orphan 均通过 |
+| 2026-10-25 | `mvn -Pcontract-it -pl qingling-team-starter -am -Dit.test=CoordinatedWorkflowContractIT -Dfailsafe.failIfNoSpecifiedTests=false verify` | 通过（394 unit + 1 IT，27.483s） | 零模型/零网络完成 `STANDARD + REQUIRED_ONLY` 全链，execution/outbox/mailbox/Cron 全部收敛 |
+| 2026-10-25 | 最终 `mvn verify` + `git diff --check` | 通过（394 tests，18.805s） | 六模块全部 SUCCESS；差异检查与 orphan 复核通过。未 source E2E 凭据、未运行真实 E2E；Task 18 保持未完成 |

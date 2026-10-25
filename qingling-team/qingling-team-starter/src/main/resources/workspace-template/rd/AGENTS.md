@@ -19,10 +19,11 @@
 
 - 直接使用 `read_inbox`、`send_mail`、`mark_done`、`read_shared`、`write_shared`。
 - 通过 Harness 的 `load_skill` 按需加载 `tech_design`、`code_impl`、评审、自评和复盘 Skill。
-- `code_impl` 由 `subagents/code_impl.md` 声明的 Sub-Agent 执行；正式测试调用 Java 结构化 `run_project_tests(project_id)`，原始 `sandbox_execute_bash` 仅用于无副作用探测和依赖安装。
+- `SIMPLE`/`STANDARD` 的 `code_impl` 由当前 RD 父角色直接执行；只有 `STRICT` 才允许使用 `subagents/code_impl.md`。正式测试调用 Java 结构化 `run_project_tests(project_id)`，原始 `sandbox_execute_bash` 仅用于无副作用探测和依赖安装。
 - Python 唯一导入根是 `code/`：测试必须使用 `from main import app`，并直接导入 `routers`、`services`、`models`、`schemas` 等真实公开模块；禁止 `from app ...`、`import app` 与 `code/app/main.py`，避免入口和包根歧义。
 - 写测试前必须回读被测实现并只引用真实公开符号；`run_project_tests` 的 collection 预检未通过时只修现有导入、fixture 或实现契约，禁止继续新增测试。
-- 每个代码实现或缺陷修复阶段只允许维护一个 `code_impl` 逻辑子代理：先 `agent_spawn` 一次，之后只用 `task_output(block=false)` 查询最新任务。`agent_send` 会启动同一子代理的新 continuation，只有上一任务已进入终态且确需补充指令时才可调用；子任务仍为 Running 时禁止并发 `agent_send`。
-- 禁止使用 `wait_async_results` 阻塞父回合。不得仅因一次 heartbeat 尚未完成就调用 `task_cancel`；若子任务仍在运行，保存中间状态并结束本轮，由下一次唤醒继续非阻塞查询。只有明确放弃本阶段执行时才允许取消，并必须让 Java 运行时记录恢复或 BLOCKED incident。
-- 发 `task_done` 前必须加载 `self_score`，正文原样携带 `run_project_tests` 返回的 `execution_id`、`status`、`exit_code=0`、正数 `pytest_collected`/`pytest_passed`、`coverage_percent`、`failure_type`、`retryable`，并附产物路径和自评分解；缺一项会被 Java 门禁拒绝。发送成功会自动完成原 `task_assign`，无需再次调用 `mark_done`。
+- `SIMPLE`/`STANDARD` 不得尝试 `agent_spawn`、`agent_send`、`task_output` 或 `task_cancel`；这些工具在运行时边界不可用，当前 RD 应在同一父角色会话内完成读写、沙盒探测和真实测试。
+- `STRICT` 若启用 `code_impl` 子 Agent，每个代码实现或缺陷修复阶段只允许维护一个逻辑子代理：先 `agent_spawn` 一次，之后只用 `task_output(block=false)` 查询最新任务；上一任务终态且确需补充指令时才可调用 `agent_send`，禁止并发 continuation。
+- 禁止使用 `wait_async_results` 阻塞父回合。`STRICT` 子任务尚在运行时保存中间状态并结束本轮，由下一次唤醒继续非阻塞查询；只有明确放弃本阶段执行时才允许取消，并必须让 Java 运行时记录恢复或 BLOCKED incident。
+- 发 `task_done` 前必须加载 `self_score`。技术设计阶段引用当前 `task_assign.content.execution_id`；代码/缺陷修复阶段只引用 `run_project_tests.execution_id`，再提交字符串数组 `artifacts`、有限 `decision`、`rationale` 和可选 `self_score`。不得复制 `status/exit_code/pytest_collected/pytest_passed/coverage_percent/failure_type/retryable`，真实测试终态由 Java 从 Test Runner 账本读取。发送成功会自动完成原 `task_assign`。
 - 收到 `retro_approved` 后只做批准提案中指定的精确文本替换，并向 Manager 回报结果。

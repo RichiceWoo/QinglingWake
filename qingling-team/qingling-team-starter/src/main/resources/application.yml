@@ -82,6 +82,14 @@ qingling:
     heartbeat-stagger-seconds: [0, 7, 14, 21]
   search:
     baidu-api-key: ${BAIDU_APPBUILDER_API_KEY:}
+  workflow:
+    # runtime v2 完成全部门禁前保持 legacy；切换 coordinated 必须显式配置。
+    coordination-mode: ${QINGLING_WORKFLOW_COORDINATION_MODE:legacy}
+    # Task 18 使用 STANDARD，保留四角色产物但不让可选评审和子 Agent 阻断主路径。
+    default-profile: ${QINGLING_WORKFLOW_DEFAULT_PROFILE:standard}
+    review-policy: ${QINGLING_WORKFLOW_REVIEW_POLICY:required-only}
+    advisory-audit-enabled: ${QINGLING_WORKFLOW_ADVISORY_AUDIT_ENABLED:true}
+    review-timeout: ${QINGLING_WORKFLOW_REVIEW_TIMEOUT:10m}
 
 management:
   endpoints:

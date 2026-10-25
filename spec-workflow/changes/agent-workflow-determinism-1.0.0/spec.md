@@ -1,6 +1,6 @@
 # Agent 工作流确定性与编排收敛 1.0.0
 
-> status: propose
+> status: apply
 > created: 2026-10-25
 > complexity: 🔴复杂
 > change-dir: `spec-workflow/changes/agent-workflow-determinism-1.0.0/`
@@ -9,8 +9,7 @@
 
 ## 0. 实施门禁（HARD-GATE）
 
-- 本版本当前仅允许编写和评审需求文档，不允许修改 Java、Workspace Skill、配置、测试或 E2E Driver。
-- 只有用户明确确认本目录的 `spec.md`、`tasks.md` 与 `test-spec.md` 后，才允许从 Task 1 开始编码。
+- 用户已于 2026-10-25 明确确认本目录需求并授权从 Task 1 开始编码；当前按 Task 1 → Task 9 严格实施。
 - 用户确认编码不等于授权真实模型 E2E。完成定向测试、`mvn verify`、零模型真实 Docker 契约和 `git diff --check` 后，必须再次获得用户明确授权，才能启动真实 E2E。
 - 未经用户明确要求，不提交、不推送代码。
 
@@ -119,7 +118,7 @@ Task 18 已经历大量真实 E2E。历史失败先后暴露 MCP 会话失步、
 
 ### 4.1 工作流档位
 
-- [ ] 新增 `WorkflowProfile`：`SIMPLE`、`STANDARD`、`STRICT`。
+- [x] 新增 `WorkflowProfile`：`SIMPLE`、`STANDARD`、`STRICT`。
 - [ ] `SIMPLE`：需求确认 → RD 直接实现 → QA 验收 → 交付；不强制 PM、独立技术设计回合或子 Agent。
 - [ ] `STANDARD`：保留 PM、RD、QA 与 Task 18 现有产物契约，但 optional review 不阻断、RD 默认直接执行、不强制子 Agent。
 - [ ] `STRICT`：保留完整阶段和阻断式 ReviewRound，可允许复杂任务使用子 Agent。
@@ -130,32 +129,34 @@ Task 18 已经历大量真实 E2E。历史失败先后暴露 MCP 会话失步、
 
 ### 4.2 确定性评审策略
 
-- [ ] 新增 `ReviewPolicy`：`REQUIRED_ONLY`、`ADVISORY_AUDIT`、`STRICT_BLOCKING`。
-- [ ] 高/严重影响、`self_score < 0.70`、`hard_constraints < 0.80` 属于 mandatory risk，可创建阻断式 ReviewRound。
+- [x] 新增 `ReviewPolicy`：`REQUIRED_ONLY`、`ADVISORY_AUDIT`、`STRICT_BLOCKING`。
+- [x] 高/严重影响、`self_score < 0.70`、`hard_constraints < 0.80` 属于 mandatory risk，可创建阻断式 ReviewRound。
 - [ ] “同 Skill 完成不足 3 次”和 15% 抽查只产生 `review_suggested`/审计指标，不阻断 `SIMPLE` 和 `STANDARD` 主流程。
-- [ ] `STRICT` 才允许两个 Reviewer 形成 barrier；其他档位最多一个确定性 Reviewer。
-- [ ] 每个 ReviewRound 持久化预期 Reviewer、已收到结论、deadline、最终 verdict 和失败原因。
+- [x] `STRICT_BLOCKING` 才允许两个 Reviewer 形成 barrier；其他 policy 固定一个确定性 Reviewer。profile 与 policy 的组合仍由 Task 4 协调器复核。
+- [x] 每个 ReviewRound 持久化预期 Reviewer、已收到结论、deadline、最终 verdict 和失败原因。
 - [ ] Reviewer 超时必须形成明确 `EXPIRED/BLOCKED`，不得只留下 `review_request=in_progress`。
 
 
 
 ### 4.3 单一 WorkExecution 事实源
 
-- [ ] 每个活动工作项有唯一 execution ID，并绑定 project、stage、owner、assignment、dispatch、Agent session、child task、test execution 和 review round。
-- [ ] 同一 project/stage/owner 同时最多一个非终态 WorkExecution。
-- [ ] 状态至少包含：`PENDING`、`CLAIMED`、`RUNNING`、`WAITING_REVIEW`、`SUCCEEDED`、`FAILED`、`CANCELLED`、`BLOCKED`。
-- [ ] 所有 retry/continuation 必须引用原 WorkExecution，不得另建平行事实源。
-- [ ] `last_progress_at` 只接受明确业务进度，不接受 Cron tick、健康轮询和无变化 heartbeat。
-- [ ] Driver、watchdog 和 incident 使用同一 WorkExecution 状态与时间戳，不再分别推导当前任务。
+- [x] 每个活动工作项有唯一 execution ID，并绑定 project、stage、owner、assignment、dispatch、Agent session、child task、test execution 和 review round。
+- [x] runtime v2 aggregate 强制同一 project/stage/owner 同时最多一个非终态 WorkExecution。
+- [x] 状态包含：`PENDING`、`CLAIMED`、`RUNNING`、`WAITING_REVIEW`、`RECOVERING`、`SUCCEEDED`、`FAILED`、`CANCELLED`、`BLOCKED`。
+- [x] 领域状态机中的 retry/continuation 复用原 WorkExecution ID，不得另建平行事实源。
+- [x] `last_progress_at` 只由显式 `recordProgress` 业务证据刷新；关联 assignment、dispatch、child task 或 test execution 均不会续租。
+- [x] watchdog 和 incident 已使用同一 WorkExecution 状态；stale mailbox lease 不得覆盖 RUNNING、WAITING_REVIEW 或终态，incident 保持 stage/owner 并在同 execution 内 RECOVERING/BLOCKED。
+- [ ] Driver 使用同一 WorkExecution 状态与时间戳直接诊断当前任务，不再从旧投影推导。
 
 
 
 ### 4.4 项目级原子协调与 outbox
 
-- [ ] 新增项目级 runtime v2 状态文件，原子保存 WorkExecution、ReviewRound、已处理 command ID 和待投影 outbox。
-- [ ] `completeWorkItem(command)` 在一次项目锁内完成幂等检查、证据门禁、工作项终态、review 决策和下一工作项计算。
-- [ ] event、mailbox 和 Cron wake 作为 outbox 投影，以稳定 action ID 幂等应用；进程在投影中间退出后可以重放。
-- [ ] 不要求跨多个 JSON/JSONL 文件实现不可行的物理事务；runtime v2 aggregate 是权威，其他文件允许最终一致但必须可重建。
+- [x] 新增项目级 runtime v2 状态文件，原子保存 WorkExecution、ReviewRound、已处理 command ID 和待投影 outbox。
+- [x] `completeWorkItem(command)` 在一次项目锁内完成幂等检查、证据门禁、工作项终态、review 决策和下一工作项计算。
+- [x] event、mailbox 和 Cron wake 以稳定 action ID 幂等投影；副作用成功后原子确认 APPLIED，失败记录有界类型并最多尝试三次，启动后后台重放 pending action。
+- [x] runtime v2 aggregate 采用单文件、项目级文件锁、强制刷盘和原子替换，不依赖跨多个 JSON/JSONL 文件的物理事务。
+- [x] shutdown 在停止入站、Cron/wake 和 dispatch 并有限排空后，把非终态 WorkExecution/ReviewRound 持久化为 `CANCELLED/RUNTIME_SHUTDOWN`，再停止 projector 和外部 Agent/MCP。
 
 
 
@@ -360,17 +361,25 @@ int projectPendingOutbox(String projectId);
 | Task     | 状态  | 实际改动文件         | 备注                      |
 | -------- | --- | -------------- | ----------------------- |
 | 需求规划     | 已完成 | 本目录四份 Markdown | 仅新增方案文档，未编码、未测试、未运行 E2E |
-| Task 1～9 | 未开始 | —              | 等待用户确认 HARD-GATE        |
+| Task 1 | 已完成 | domain/starter 协议与配置 | 18 项定向测试通过，未运行 E2E |
+| Task 2 | 已完成 | WorkExecution/ReviewRound | domain 63 项通过，未运行 E2E |
+| Task 3 | 已完成 | runtime v2 aggregate/文件仓储 | domain+infra 219 项通过，未运行 E2E |
+| Task 4 | 已完成 | Java 完成协调器/Test Runner 证据适配 | 新增协调器测试 11 项；domain+app+infra 共 267 项通过，未运行 E2E |
+| Task 5 | 已完成 | 幂等投影、incident/watchdog/shutdown/Spring 接线 | 联合模块共 367 项通过，`git diff --check` 通过，未运行 E2E |
+| Task 6 | 已完成 | 最小完成协议、ReviewRound 工具、评审 deadline | 联合回归 375 项通过，`git diff --check` 通过，未运行 E2E |
+| Task 7 | 已完成 | profile 状态机、v2 项目入口、角色/子 Agent 策略与模板 | SIMPLE 跳过 PM/独立设计阶段；SIMPLE/STANDARD 父角色直做；STRICT 保留子 Agent；完整单元回归 393 项通过 |
+| Task 8 | 已完成 | 固定验收 fixture、QA 独立 runner、Driver v2 诊断、零模型 coordinated IT | 聚焦 53 项及 contract IT 1 项通过；未运行真实 E2E |
+| Task 9 | 非 E2E 已完成 | 完整回归、真实 Docker/NoCallModel 契约、coordinated IT 与三组需求回写 | 394 项默认回归、1 项 Docker 工具契约、1 项 coordinated IT 和 diff/orphan 检查均通过；真实 E2E 仍需二次授权 |
 
 
 
 
 ## 14. 审查结论
 
-待用户审查。当前建议优先实施 P0 编排收敛，再进行下一轮 Task 18 真实 E2E；不建议继续以单点 timeout/diagnostic 补丁作为主要推进方式。
+用户已确认实施，当前已完成 Task 1～8，并完成 Task 9 的全部非 E2E 门禁。新项目入口已接入 runtime v2，profile 在创建时冻结；固定 Todo 验收由 Harness 只读注入，QA Runner 不再以 RD 自测代替验收；Driver 直接诊断 execution/review/outbox/orphan；零模型 STANDARD 全链与真实 Docker 工具契约均已收敛。当前按 HARD-GATE 暂停，等待用户二次明确授权真实 E2E；四条场景尚未运行，因此父 Task 18 继续未完成。
 
 ## 15. 确认记录（HARD-GATE）
 
-- **确认时间**：待填写
-- **确认人**：待用户确认
-- **确认说明**：待明确说明“同意 `agent-workflow-determinism-1.0.0` 进入编码”；该确认不自动授权真实 E2E。
+- **确认时间**：2026-10-25
+- **确认人**：用户
+- **确认说明**：用户明确要求按 `tasks.md` 开始实施代码；该确认不自动授权真实 E2E。

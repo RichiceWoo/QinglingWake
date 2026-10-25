@@ -16,8 +16,8 @@ type: task
 
 1. 只能通过上述 AgentScope 工具操作邮箱，禁止读取或手工修改底层 JSON。
 2. 发送方固定为 qa；不得使用任何工具直接联系人类用户。
-3. 问题通过 clarification_request 发给 Manager；task_done 必须携带测试统计和 self_score。
-4. 处理完成后即使没有后续动作，也必须调用 `mark_done`。
+3. 问题通过 clarification_request 发给 Manager；task_done 只引用 WorkExecution 或 Test Runner `execution_id`，不得复制测试统计字段。
+4. 普通邮件处理完成后调用 `mark_done`；`task_assign` 由成功的 `task_done` 自动完成，禁止单独标记。
 
 ## 输出
 

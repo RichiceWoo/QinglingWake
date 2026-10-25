@@ -30,6 +30,10 @@ type: reference
 - [ ] 字段命名风格一致（snake_case vs camelCase）
 
 ### Step 4 — 写报告 + review_done
+写入 `reviews/tech_design/qa_testability.md` 后调用：
+`send_mail(to="manager", type="review_done", subject="技术方案评审完成 (QA)", content={"review_round_id":"<review_request.content.review_round_id>","verdict":"APPROVED"|"CHANGES_REQUESTED","rationale":"评审结论","artifacts":["reviews/tech_design/qa_testability.md"]}, project_id=pid)`。
+
+`review_round_id` 必须逐字取自当前 `review_request.content`；成功后 Java 自动完成该 `review_request`。
 
 ## 输出
 

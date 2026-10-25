@@ -3,6 +3,13 @@ package cn.org.chris.wake.starter;
 import cn.org.chris.wake.adapter.api.TestApiController;
 import cn.org.chris.wake.adapter.feishu.FeishuWebSocketListener;
 import cn.org.chris.wake.app.cron.CronService;
+import cn.org.chris.wake.app.workflow.CoordinatedRuntimeIncidentGateway;
+import cn.org.chris.wake.app.workflow.WorkCompletionCoordinator;
+import cn.org.chris.wake.domain.gateway.ProjectTestEvidenceRepository;
+import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
+import cn.org.chris.wake.domain.workflow.ReviewPolicy;
+import cn.org.chris.wake.domain.workflow.WorkflowCoordinationMode;
+import cn.org.chris.wake.domain.workflow.WorkflowProfile;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
 import cn.org.chris.wake.starter.config.QinglingTeamProperties;
 import cn.org.chris.wake.starter.config.ModelAvailabilitySelector;
@@ -73,9 +80,16 @@ class RuntimeBootstrapTest {
             assertThat(properties.agent().shutdownDrainTimeout()).isEqualTo(java.time.Duration.ofSeconds(30));
             assertThat(properties.sandbox().enabled()).isFalse();
             assertThat(properties.team().roles()).containsExactly("manager", "pm", "rd", "qa");
+            assertThat(properties.workflow().coordinationMode()).isEqualTo(WorkflowCoordinationMode.LEGACY);
+            assertThat(properties.workflow().defaultProfile()).isEqualTo(WorkflowProfile.STANDARD);
+            assertThat(properties.workflow().reviewPolicy()).isEqualTo(ReviewPolicy.REQUIRED_ONLY);
+            assertThat(properties.workflow().advisoryAuditEnabled()).isTrue();
+            assertThat(properties.workflow().reviewTimeout()).isEqualTo(java.time.Duration.ofMinutes(10));
             assertThat(context.getBean(RuntimeLifecycle.class).isRunning()).isTrue();
             assertThat(context.getBean(CronService.class).currentJobs()).hasSize(4);
             assertThat(context.getBean(AgentScopeAgentGateway.class)).isNotNull();
+            assertThat(context.getBean(WorkCompletionCoordinator.class)).isNotNull();
+            assertThat(context.getBean(ProjectTestEvidenceRepository.class)).isNotNull();
             assertThat(context.getBean(TestApiController.class)).isNotNull();
             assertThat(context.getBeansOfType(FeishuWebSocketListener.class)).isEmpty();
             assertThat(Files.isRegularFile(workspace.resolve("manager/AGENTS.md"))).isTrue();
@@ -319,6 +333,73 @@ class RuntimeBootstrapTest {
 
         assertThat(domainOnly.normalizedBaseUrl()).hasToString("https://newapi.invalid/v1");
         assertThat(versionRoot.normalizedBaseUrl()).hasToString("https://newapi.invalid/v1");
+    }
+
+    /** 验证 coordinated 与严格档位可以通过类型安全配置显式启用。 */
+    @Test
+    void shouldBindCoordinatedStrictWorkflowConfiguration() {
+        Path workspace = temporaryDirectory.resolve("coordinated-workspace");
+
+        try (ConfigurableApplicationContext context = start(
+                "--qingling.agent.dashscope.api-key=test-only-key",
+                "--qingling.workspace.root=" + workspace,
+                "--qingling.data-dir=" + temporaryDirectory.resolve("coordinated-data"),
+                "--qingling.feishu.enabled=false",
+                "--qingling.sandbox.enabled=false",
+                "--qingling.cleanup.run-on-startup=false",
+                "--qingling.workflow.coordination-mode=coordinated",
+                "--qingling.workflow.default-profile=strict",
+                "--qingling.workflow.review-policy=strict-blocking",
+                "--qingling.workflow.advisory-audit-enabled=false",
+                "--qingling.workflow.review-timeout=45m"
+        )) {
+            QinglingTeamProperties.Workflow workflow = context.getBean(QinglingTeamProperties.class).workflow();
+
+            assertThat(workflow.coordinationMode()).isEqualTo(WorkflowCoordinationMode.COORDINATED);
+            assertThat(workflow.defaultProfile()).isEqualTo(WorkflowProfile.STRICT);
+            assertThat(workflow.reviewPolicy()).isEqualTo(ReviewPolicy.STRICT_BLOCKING);
+            assertThat(workflow.advisoryAuditEnabled()).isFalse();
+            assertThat(workflow.reviewTimeout()).isEqualTo(java.time.Duration.ofMinutes(45));
+            assertThat(context.getBean(RuntimeIncidentGateway.class))
+                    .isInstanceOf(CoordinatedRuntimeIncidentGateway.class);
+        }
+    }
+
+    /** 验证严格评审不能与非严格 profile 混用，且失败发生在 workspace 初始化前。 */
+    @Test
+    void shouldRejectStrictReviewForStandardProfile() {
+        Path workspace = temporaryDirectory.resolve("invalid-review-policy-workspace");
+
+        Throwable failure = catchThrowable(() -> start(
+                "--qingling.agent.dashscope.api-key=test-only-key",
+                "--qingling.workspace.root=" + workspace,
+                "--qingling.data-dir=" + temporaryDirectory.resolve("invalid-review-policy-data"),
+                "--qingling.feishu.enabled=false",
+                "--qingling.sandbox.enabled=false",
+                "--qingling.workflow.default-profile=standard",
+                "--qingling.workflow.review-policy=strict-blocking"
+        ));
+
+        assertThat(rootMessage(failure)).contains("STRICT profile 与 STRICT_BLOCKING review policy 必须同时配置");
+        assertThat(Files.exists(workspace)).isFalse();
+    }
+
+    /** 验证评审业务超时必须为正且不超过两小时。 */
+    @Test
+    void shouldRejectUnboundedReviewTimeout() {
+        Path workspace = temporaryDirectory.resolve("invalid-review-timeout-workspace");
+
+        Throwable failure = catchThrowable(() -> start(
+                "--qingling.agent.dashscope.api-key=test-only-key",
+                "--qingling.workspace.root=" + workspace,
+                "--qingling.data-dir=" + temporaryDirectory.resolve("invalid-review-timeout-data"),
+                "--qingling.feishu.enabled=false",
+                "--qingling.sandbox.enabled=false",
+                "--qingling.workflow.review-timeout=121m"
+        ));
+
+        assertThat(rootMessage(failure)).contains("qingling.workflow.review-timeout 必须不大于 PT2H");
+        assertThat(Files.exists(workspace)).isFalse();
     }
 
     /** 使用命令行高优先级属性启动非 Web 测试上下文。 */

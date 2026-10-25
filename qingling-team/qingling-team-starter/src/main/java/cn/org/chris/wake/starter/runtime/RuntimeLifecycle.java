@@ -5,6 +5,11 @@ import cn.org.chris.wake.app.cron.CronService;
 import cn.org.chris.wake.app.cron.WakeScheduler;
 import cn.org.chris.wake.app.mailbox.MailboxLeaseWatchdog;
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
+import cn.org.chris.wake.app.workflow.WorkflowOutboxProjector;
+import cn.org.chris.wake.app.workflow.WorkflowShutdownCoordinator;
+import cn.org.chris.wake.app.workflow.ReviewDeadlineWatchdog;
+import cn.org.chris.wake.domain.workflow.WorkflowCoordinationMode;
+import cn.org.chris.wake.domain.workflow.WorkflowProfile;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
 import cn.org.chris.wake.infra.agentscope.McpSandboxConfiguration;
 import cn.org.chris.wake.starter.config.QinglingTeamProperties;
@@ -34,11 +39,20 @@ public final class RuntimeLifecycle implements SmartLifecycle {
     /** Runner 路由队列注册表。 */
     private final SerialDispatchRegistry dispatchRegistry;
 
-    /** 持有四角色 HarnessAgent 的网关。 */
+    /** 持有当前档位运行角色 HarnessAgent 的网关。 */
     private final AgentScopeAgentGateway agentGateway;
 
     /** 持有各角色 MCP client 并负责显式释放服务端会话的配置。 */
     private final McpSandboxConfiguration sandboxConfiguration;
+
+    /** coordinated 模式 pending outbox 后台重放器。 */
+    private final WorkflowOutboxProjector workflowOutboxProjector;
+
+    /** coordinated 模式 shutdown 非终态持久化协调器。 */
+    private final WorkflowShutdownCoordinator workflowShutdownCoordinator;
+
+    /** coordinated 模式评审 deadline 明确终态看门狗。 */
+    private final ReviewDeadlineWatchdog reviewDeadlineWatchdog;
 
     /** 飞书关闭模式下返回空的 Listener 提供器。 */
     private final ObjectProvider<FeishuWebSocketListener> listenerProvider;
@@ -59,6 +73,9 @@ public final class RuntimeLifecycle implements SmartLifecycle {
             SerialDispatchRegistry dispatchRegistry,
             AgentScopeAgentGateway agentGateway,
             McpSandboxConfiguration sandboxConfiguration,
+            WorkflowOutboxProjector workflowOutboxProjector,
+            WorkflowShutdownCoordinator workflowShutdownCoordinator,
+            ReviewDeadlineWatchdog reviewDeadlineWatchdog,
             ObjectProvider<FeishuWebSocketListener> listenerProvider,
             QinglingTeamProperties properties
     ) {
@@ -72,6 +89,15 @@ public final class RuntimeLifecycle implements SmartLifecycle {
         this.sandboxConfiguration = Objects.requireNonNull(
                 sandboxConfiguration, "sandboxConfiguration 不能为空"
         );
+        this.workflowOutboxProjector = Objects.requireNonNull(
+                workflowOutboxProjector, "workflowOutboxProjector 不能为空"
+        );
+        this.workflowShutdownCoordinator = Objects.requireNonNull(
+                workflowShutdownCoordinator, "workflowShutdownCoordinator 不能为空"
+        );
+        this.reviewDeadlineWatchdog = Objects.requireNonNull(
+                reviewDeadlineWatchdog, "reviewDeadlineWatchdog 不能为空"
+        );
         this.listenerProvider = Objects.requireNonNull(listenerProvider, "listenerProvider 不能为空");
         this.properties = Objects.requireNonNull(properties, "properties 不能为空");
     }
@@ -84,6 +110,10 @@ public final class RuntimeLifecycle implements SmartLifecycle {
         }
         dispatchRegistry.startAccepting();
         wakeScheduler.startAccepting();
+        if (coordinated()) {
+            workflowOutboxProjector.start(properties.cron().tickInterval());
+            reviewDeadlineWatchdog.start(properties.cron().tickInterval());
+        }
         registerHeartbeats();
         mailboxLeaseWatchdog.start(MailboxLeaseWatchdog.DEFAULT_SCAN_INTERVAL);
         cronService.start(properties.cron().tickInterval());
@@ -115,12 +145,14 @@ public final class RuntimeLifecycle implements SmartLifecycle {
             FeishuWebSocketListener listener = listenerProvider.getIfAvailable();
             shutdownInOrder(
                     () -> closeListener(listener),
+                    reviewDeadlineWatchdog::stop,
                     mailboxLeaseWatchdog::stop,
                     wakeScheduler::stopAccepting,
                     cronService::stop,
                     dispatchRegistry::stopAccepting,
                     () -> dispatchRegistry.awaitDrained(properties.agent().shutdownDrainTimeout()),
                     dispatchRegistry::cancelOutstanding,
+                    this::finalizeWorkflow,
                     this::closeAgentsAndMcp
             );
         } finally {
@@ -146,40 +178,70 @@ public final class RuntimeLifecycle implements SmartLifecycle {
         return Integer.MAX_VALUE;
     }
 
-    /** 按配置周期与错峰值注册四角色 heartbeat。 */
+    /** 按配置周期与错峰值注册当前档位角色 heartbeat，SIMPLE 明确排除 PM。 */
     private void registerHeartbeats() {
         List<String> roles = properties.team().roles();
         List<Long> stagger = properties.cron().heartbeatStaggerSeconds();
         Duration interval = properties.cron().heartbeatInterval();
         for (int index = 0; index < roles.size(); index++) {
+            if (!heartbeatEnabled(
+                    properties.workflow().coordinationMode(),
+                    properties.workflow().defaultProfile(),
+                    roles.get(index)
+            )) {
+                continue;
+            }
             wakeScheduler.scheduleHeartbeat(roles.get(index), interval, Duration.ofSeconds(stagger.get(index)));
         }
+    }
+
+    /**
+     * 判断角色是否属于当前冻结档位；SIMPLE 不得通过 heartbeat 隐式唤醒 PM。
+     *
+     * @param coordinationMode 显式协调模式
+     * @param profile 冻结工作流档位
+     * @param role 候选 heartbeat 角色
+     * @return 角色可被周期唤醒时返回 true
+     */
+    static boolean heartbeatEnabled(
+            WorkflowCoordinationMode coordinationMode,
+            WorkflowProfile profile,
+            String role
+    ) {
+        return coordinationMode != WorkflowCoordinationMode.COORDINATED
+                || profile != WorkflowProfile.SIMPLE
+                || !"pm".equals(role);
     }
 
     /**
      * 按可靠关闭顺序执行各阶段；前序阶段失败时仍尽力关闭后续资源。
      *
      * @param closeInbound 关闭新入站动作
+     * @param stopReviewWatchdog 停止评审 deadline 看门狗动作
      * @param stopWatchdog 停止 mailbox watchdog 动作
      * @param stopWake 停止接纳一次性 wake 动作
      * @param stopCron 停止 Cron 和一次性 wake 投递动作
      * @param stopAccepting 停止 dispatch 接纳动作
      * @param awaitDrained 有限排空动作
      * @param cancelOutstanding 排空超时后的取消动作
+     * @param finalizeWorkflow 持久化非终态工作并停止 outbox 的动作
      * @param closeAgents 关闭 MCP 与 Agent 动作
      */
     static void shutdownInOrder(
             Runnable closeInbound,
+            Runnable stopReviewWatchdog,
             Runnable stopWatchdog,
             Runnable stopWake,
             Runnable stopCron,
             Runnable stopAccepting,
             BooleanSupplier awaitDrained,
             Runnable cancelOutstanding,
+            Runnable finalizeWorkflow,
             Runnable closeAgents
     ) {
         RuntimeException failure = null;
         failure = runShutdownStep(closeInbound, failure);
+        failure = runShutdownStep(stopReviewWatchdog, failure);
         failure = runShutdownStep(stopWatchdog, failure);
         failure = runShutdownStep(stopWake, failure);
         failure = runShutdownStep(stopCron, failure);
@@ -193,10 +255,34 @@ public final class RuntimeLifecycle implements SmartLifecycle {
         if (!drained) {
             failure = runShutdownStep(cancelOutstanding, failure);
         }
+        failure = runShutdownStep(finalizeWorkflow, failure);
         failure = runShutdownStep(closeAgents, failure);
         if (failure != null) {
             throw failure;
         }
+    }
+
+    /**
+     * coordinated 模式在 Agent/MCP 关闭前持久化所有非终态工作，并停止 outbox 后台线程。
+     */
+    private void finalizeWorkflow() {
+        RuntimeException failure = null;
+        if (coordinated()) {
+            failure = runShutdownStep(workflowShutdownCoordinator::cancelNonTerminal, failure);
+        }
+        failure = runShutdownStep(workflowOutboxProjector::stop, failure);
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    /**
+     * 判断当前运行时是否显式启用 runtime v2 协调链。
+     *
+     * @return coordinated 模式返回 true
+     */
+    private boolean coordinated() {
+        return properties.workflow().coordinationMode() == WorkflowCoordinationMode.COORDINATED;
     }
 
     /**

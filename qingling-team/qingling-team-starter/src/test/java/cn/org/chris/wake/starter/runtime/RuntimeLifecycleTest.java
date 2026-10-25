@@ -1,5 +1,7 @@
 package cn.org.chris.wake.starter.runtime;
 
+import cn.org.chris.wake.domain.workflow.WorkflowCoordinationMode;
+import cn.org.chris.wake.domain.workflow.WorkflowProfile;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -12,6 +14,23 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class RuntimeLifecycleTest {
 
+    /** coordinated SIMPLE 只排除 PM，STANDARD/STRICT 与 legacy 仍保留四角色 heartbeat。 */
+    @Test
+    void shouldExcludePmHeartbeatOnlyForCoordinatedSimpleProfile() {
+        assertThat(RuntimeLifecycle.heartbeatEnabled(
+                WorkflowCoordinationMode.COORDINATED, WorkflowProfile.SIMPLE, "pm"
+        )).isFalse();
+        assertThat(RuntimeLifecycle.heartbeatEnabled(
+                WorkflowCoordinationMode.COORDINATED, WorkflowProfile.SIMPLE, "rd"
+        )).isTrue();
+        assertThat(RuntimeLifecycle.heartbeatEnabled(
+                WorkflowCoordinationMode.COORDINATED, WorkflowProfile.STANDARD, "pm"
+        )).isTrue();
+        assertThat(RuntimeLifecycle.heartbeatEnabled(
+                WorkflowCoordinationMode.LEGACY, WorkflowProfile.SIMPLE, "pm"
+        )).isTrue();
+    }
+
     /** 排空成功时不得执行取消，Agent 必须最后关闭。 */
     @Test
     void shouldStopProducersBeforeSuccessfulDrain() {
@@ -19,6 +38,7 @@ class RuntimeLifecycleTest {
 
         RuntimeLifecycle.shutdownInOrder(
                 () -> order.add("inbound"),
+                () -> order.add("review-watchdog"),
                 () -> order.add("watchdog"),
                 () -> order.add("wake"),
                 () -> order.add("cron"),
@@ -28,11 +48,13 @@ class RuntimeLifecycleTest {
                     return true;
                 },
                 () -> order.add("cancel"),
+                () -> order.add("workflow"),
                 () -> order.add("agents")
         );
 
         assertThat(order).containsExactly(
-                "inbound", "watchdog", "wake", "cron", "admission", "drain", "agents"
+                "inbound", "review-watchdog", "watchdog", "wake", "cron", "admission",
+                "drain", "workflow", "agents"
         );
     }
 
@@ -43,6 +65,7 @@ class RuntimeLifecycleTest {
 
         RuntimeLifecycle.shutdownInOrder(
                 () -> order.add("inbound"),
+                () -> order.add("review-watchdog"),
                 () -> order.add("watchdog"),
                 () -> order.add("wake"),
                 () -> order.add("cron"),
@@ -52,11 +75,13 @@ class RuntimeLifecycleTest {
                     return false;
                 },
                 () -> order.add("cancel"),
+                () -> order.add("workflow"),
                 () -> order.add("agents")
         );
 
         assertThat(order).containsExactly(
-                "inbound", "watchdog", "wake", "cron", "admission", "drain", "cancel", "agents"
+                "inbound", "review-watchdog", "watchdog", "wake", "cron", "admission",
+                "drain", "cancel", "workflow", "agents"
         );
     }
 }

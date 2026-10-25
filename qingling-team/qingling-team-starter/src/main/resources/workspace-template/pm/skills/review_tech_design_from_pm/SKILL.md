@@ -59,11 +59,11 @@ PM 关心的不是架构优雅不优雅，而是"技术方案会不会让产品 
 send_mail(
   to="manager", type="review_done",
   subject="技术方案评审完成 (PM)",
-  content={"verdict": "pass"|"revise", "issues_count": N, "report_path": "reviews/tech_design/pm_consistency.md", "self_score": 0.xx, "breakdown": {...}},
+  content={"review_round_id": "<review_request.content.review_round_id>", "verdict": "APPROVED"|"CHANGES_REQUESTED", "rationale": "评审结论", "artifacts": ["reviews/tech_design/pm_consistency.md"]},
   project_id=pid,
 )
-mark_done(pid, <review_request_msg_id>)
 ```
+`review_round_id` 必须逐字取自当前 `review_request.content`；不得用主题或产物路径猜测评审轮次。成功后 Java 自动完成该 `review_request`。
 
 ## 输出
 

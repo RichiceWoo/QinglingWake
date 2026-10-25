@@ -5,12 +5,19 @@ import cn.org.chris.wake.domain.gateway.AgentGateway;
 import cn.org.chris.wake.domain.gateway.MailboxRepository;
 import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
+import cn.org.chris.wake.domain.gateway.WorkflowRuntimeRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.MailMessage;
 import cn.org.chris.wake.domain.model.AgentExecutionException;
+import cn.org.chris.wake.domain.workflow.ReviewPolicy;
+import cn.org.chris.wake.domain.workflow.WorkExecution;
+import cn.org.chris.wake.domain.workflow.WorkflowProfile;
+import cn.org.chris.wake.domain.workflow.WorkflowRuntimeState;
+import cn.org.chris.wake.domain.workflow.WorkflowStage;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -128,6 +135,47 @@ class MailboxLeaseWatchdogTest {
         assertThat(watchdog.tick()).isZero();
         assertThat(mailboxRepository.pmResetCalls).hasValue(0);
         assertThat(wakes).hasValue(0);
+    }
+
+    /** v2 WorkExecution 仍为 RUNNING 时，空闲 mailbox 路由也不得反向回收其租约。 */
+    @Test
+    void shouldNotLetMailboxLeaseOverrideRunningWorkExecution() {
+        RecordingMailboxRepository mailboxRepository = new RecordingMailboxRepository();
+        WorkspaceRepository workspaceRepository = mock(WorkspaceRepository.class);
+        WorkflowRuntimeRepository runtimeRepository = mock(WorkflowRuntimeRepository.class);
+        AtomicInteger wakes = new AtomicInteger();
+        when(workspaceRepository.listProjectIds()).thenReturn(List.of("p1"));
+        when(runtimeRepository.find("p1")).thenReturn(Optional.of(runningRuntime()));
+        mailboxRepository.pmRestores.set(1);
+        MailboxLeaseWatchdog watchdog = new MailboxLeaseWatchdog(
+                new MailboxService(mailboxRepository), workspaceRepository,
+                new SerialDispatchRegistry(Runnable::run),
+                (role, projectId) -> "wake-" + wakes.incrementAndGet(),
+                new FixedRuntimeIncidentGateway(false), mock(AgentGateway.class),
+                runtimeRepository, Duration.ofMinutes(10)
+        );
+
+        assertThat(watchdog.tick()).isZero();
+        assertThat(mailboxRepository.pmResetCalls).hasValue(0);
+        assertThat(wakes).hasValue(0);
+    }
+
+    /**
+     * 创建 PM 正在运行的最小 runtime v2 aggregate。
+     *
+     * @return 运行中 aggregate
+     */
+    private static WorkflowRuntimeState runningRuntime() {
+        Instant now = Instant.parse("2026-10-25T05:00:00Z");
+        WorkExecution running = WorkExecution.create(
+                        "work-1", "p1", WorkflowStage.PRODUCT_DESIGN,
+                        "pm", WorkflowProfile.STANDARD, now
+                )
+                .claim("assignment-1", now.plusSeconds(1))
+                .start("dispatch-1", "session-1", now.plusSeconds(2));
+        return WorkflowRuntimeState.initialize(
+                "p1", WorkflowProfile.STANDARD, ReviewPolicy.REQUIRED_ONLY, now
+        ).addExecution(running, now.plusSeconds(2));
     }
 
     /** 提供固定 BLOCKED 查询结果且拒绝测试意外上报的运行时端口。 */

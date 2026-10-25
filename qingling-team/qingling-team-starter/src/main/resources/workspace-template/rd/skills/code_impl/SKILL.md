@@ -8,6 +8,7 @@ type: task
 
 ## ⚠️ 执行方式
 **必须真实调用 `run_project_tests(project_id)` 跑正式测试**。文件写入与沙盒执行分工如下：
+- `SIMPLE`/`STANDARD` 由当前 RD 父角色直接执行本 Skill，不得调用 `agent_spawn`、`agent_send` 或 `task_output`；只有 `STRICT` 才允许声明式 `code_impl` 子 Agent。
 - 用宿主机 Tool `write_shared(project_id, rel_path, content)` 逐个写 `code/` 文件；它会安全创建父目录，且产物立即映射到沙盒 `/workspace/shared/projects/{pid}/code/`。
 - `{pid}` 不是字面量：必须替换为当前 `task_assign.project_id`。第一次沙盒调用必须执行 `test -d /workspace/shared/projects/{pid}/code && cd /workspace/shared/projects/{pid}/code && pwd` 验证唯一目录；验证失败时发送 `clarification_request`，禁止猜测或切换目录。
 - 用 `sandbox_execute_bash` 只做目录探针和依赖安装；正式 pytest 只能由 `run_project_tests` 在固定 Docker 目录执行。不要用 heredoc、`cat >`、`tee` 或 shell 重定向写源码。
@@ -83,17 +84,10 @@ send_mail(
   subject="代码实现完成",
   content={
     "execution_id": "<run_project_tests.execution_id>",
-    "status": "<run_project_tests.status>",
-    "exit_code": 0,
-    "pytest_collected": "<run_project_tests.pytest_collected>",
-    "pytest_passed": "<run_project_tests.pytest_passed>",
-    "coverage_percent": "<run_project_tests.coverage_percent>",
-    "failure_type": "<run_project_tests.failure_type>",
-    "retryable": "<run_project_tests.retryable>",
     "artifacts": ["code/main.py", "code/tests/...", "code/requirements.txt"],
-    "metrics": {"pytest_final_status": "pass", "pytest_attempts": N, "loc": ...},
-    "self_score": 0.XX, "breakdown": {...},
-    "rationale": "..."
+    "decision": "ACCEPTED",
+    "self_score": 0.XX,
+    "rationale": "正式测试已完成，真实终态由 Java Test Runner 账本读取"
   },
   project_id=pid,
 )
@@ -101,22 +95,16 @@ send_mail(
 
 `send_mail` 成功后 Java 会自动把对应 `task_assign` 标记为 `done`；不得在门禁失败后单独调用 `mark_done`。
 
+`task_done` 不得复制 `status`、`exit_code`、`pytest_collected`、`pytest_passed`、`coverage_percent`、`failure_type` 或 `retryable`。这些字段即使出现在历史正文中也只会被忽略并审计，不能覆盖 Test Runner 权威账本。
+
 ## 输出
 
 ```json
 {
-  "status": "success",
-  "artifacts": [{"path": "code/main.py", "kind": "code"}, ...],
   "execution_id": "test-run-...",
-  "status": "PASSED",
-  "exit_code": 0,
-  "pytest_collected": 12,
-  "pytest_passed": 12,
-  "coverage_percent": 87.0,
-  "failure_type": "NONE",
-  "retryable": false,
-  "metrics": {"pytest_final_status": "pass", "pytest_attempts": 1, "loc_total": 420, "loc_test": 180},
+  "artifacts": ["code/main.py", "code/tests/test_api.py", "code/requirements.txt"],
+  "decision": "ACCEPTED",
   "self_score": 0.88,
-  "breakdown": {"completeness": 1.0, "self_review": 0.95, "hard_constraints": 1.0, "clarity": 0.7, "timeliness": 0.85}
+  "rationale": "正式测试已完成，真实终态由 Java Test Runner 账本读取"
 }
 ```

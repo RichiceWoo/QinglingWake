@@ -59,6 +59,8 @@
 | 2026-10-14 | apply/verify | 修复 Task 18 的 RD 取消恢复、incident 归属与快速诊断，不运行 E2E | 新增 AgentScope task kind/取消来源登记并按同一 agent 的最新 continuation 判断终态；最新失败/取消以类型化异常终止父调用。Runner 将明确 project 路由以及唯一可归属的 heartbeat 故障接入 Java incident，第一次不同 occurrence 保持 stage/Owner、释放 assignment 并重唤醒，第二次 BLOCKED，重复 occurrence 幂等；watchdog 跳过 BLOCKED。Driver 同时检查 Cron 失败和 runtime 空闲，不再只能等待 QA 文件。定向 56 项、完整 245 项及真实 Docker 1 IT 全部通过，NoCallModel 零百炼调用；按用户要求未启动真实 E2E，父 Task 18 继续未完成 |
 | 2026-10-15 | e2e/fail | Task 18 单次 `qwen3.8-flash happy-path` 暴露 Test Runner 终态协调错误 | 唯一一次真实运行完成 checkpoint、PM 与 RD 技术设计并进入代码实现；单一 spawn、终态后 continuation、无主动取消、stale lease 恢复和直接 incident 诊断均生效。容器 execution `84eab81b-ec29-47ef-9f98-fc3f9246eb03` 最终 `FINISHED/exit_code=1`，pytest 32 collected、11 passed、21 failed、coverage 72%，但 Java 返回 `INFRASTRUCTURE_FAILED/RESULT_UNAVAILABLE/exit_code=null`，把可由 RD 修复的业务失败升级为基础设施恢复并在 2 秒内 BLOCKED。Driver 立即给出 tool/execution/failure/stage/owner，未等待 QA 文件。Failsafe 1 failure、0 errors、0 skipped，Maven 29 分 55 秒；证据位于 `target/e2e-evidence/happy-path`，退出后无孤儿进程。父 Task 18 保持未完成 |
 
+| 2026-10-25 | apply/verify | 完成 Task 18 确定性编排专项的非 E2E 门禁 | runtime v2 WorkExecution/outbox、Java 完成协调、固定 profile/review、SIMPLE/STANDARD 父角色直做、只读 Todo acceptance 与 Driver v2 已接入。相关模块 165 项、最终 `mvn verify` 394 项、修复后真实 Docker/NoCallModel 工具契约 1 IT、coordinated IT 1 项和 `git diff --check` 全部通过；首次工具契约发现并修复 QA fixture 未安装。未 source E2E 凭据、未运行真实 E2E，父 Task 18 继续未完成 |
+
 ## 技术决策
 
 | 决策 | 选择 | 放弃的方案 | 原因 |

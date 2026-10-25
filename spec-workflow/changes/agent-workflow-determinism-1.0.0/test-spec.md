@@ -1,8 +1,8 @@
 # 测试 Spec — Agent 工作流确定性与编排收敛 1.0.0
 
-> status: propose
+> status: apply
 > created: 2026-10-25
-> 当前仅规划测试，不执行命令；用户确认编码后按 Task 顺序实施。
+> 用户已于 2026-10-25 确认编码；当前按 Task 顺序执行非 E2E 验证，真实模型 E2E 仍需二次授权。
 
 ## 0. 测试原则
 
@@ -191,15 +191,16 @@
 
 ## 6. 执行计划
 
-- [ ] Task 1：配置和协议定向测试。
-- [ ] Task 2：领域状态表驱动测试。
-- [ ] Task 3：文件仓储、并发、崩溃恢复测试。
-- [ ] Task 4：完成协调器测试。
-- [ ] Task 5：outbox 投影和生命周期测试。
-- [ ] Task 6：工具协议与历史正文重放测试。
-- [ ] Task 7：profile、模板和去子 Agent 测试。
-- [ ] Task 8：固定验收契约、Driver 和 L0～L2。
-- [ ] Task 9：完整非 E2E 门禁；等待用户二次授权；真实 E2E。
+- [x] Task 1：配置和协议定向测试。`WorkflowProtocolTest` 4 项、`RuntimeBootstrapTest` 14 项，共 18 项通过；命令耗时 13.215s。
+- [x] Task 2：领域状态表驱动测试。新增 `WorkExecutionTest` 7 项、`ReviewRoundTest` 8 项；domain 全模块 63 项通过。
+- [x] Task 3：文件仓储、并发、崩溃恢复测试。新增 aggregate 5 项、文件仓储 8 项；domain+infra 全量 219 项通过。
+- [x] Task 4：完成协调器测试。新增 11 项，覆盖 command 去重、claim/start、pytest 成功/业务失败/基础设施失败、QA 缺陷回流、mandatory/Strict/advisory 评审、修订复用 execution 与原子回滚；domain+app+infra 267 项通过。
+- [x] Task 5：outbox 投影和生命周期测试。覆盖 event/mailbox/Cron action ID 重放、投影中断、有限失败、incident RECOVERING/BLOCKED、恢复领取、watchdog v2 终态保护、shutdown 终态和 Spring 接线；联合模块 367 项通过。
+- [x] Task 6：工具协议与历史正文重放测试。覆盖 Map/合法 JSON 字符串同义、旧字段非权威审计、重复 `task_done`、同 WorkExecution 多次 Test Runner execution、`review_round_id` 必填、mandatory/advisory reviewer deadline；联合回归共 375 项通过。
+- [x] Task 7：profile、模板和去子 Agent 测试。覆盖 SIMPLE/STANDARD/STRICT 固定迁移、运行中不可换档、真实项目入口初始化 v2、SIMPLE 角色裁剪、SIMPLE/STANDARD 无子 Agent 工具、STRICT 保留子 Agent，以及生命周期 heartbeat 角色集合。
+- [x] Task 8：固定验收契约、Driver 和 L0～L2。Harness fixture 8 项、Driver v2 直接诊断、QA 独立 runner 与零模型 STANDARD 全链均已覆盖。
+- [x] Task 9 非 E2E：完整非 E2E 门禁通过，已暂停等待用户二次授权。
+- [ ] Task 9 真实 E2E：尚未授权、尚未执行。
 
 ## 7. 计划验证命令
 
@@ -221,4 +222,26 @@ git diff --check
 
 ## 8. 测试结果
 
-当前为空。本次仅新增需求与测试计划，没有运行任何测试或 E2E。
+| 日期 | Task | 命令 | 结果 |
+|------|------|------|------|
+| 2026-10-25 | Task 1 | `mvn -pl qingling-team-domain,qingling-team-starter -am -Dtest=WorkflowProtocolTest,RuntimeBootstrapTest -Dsurefire.failIfNoSpecifiedTests=false test` | 18 项通过，0 failure/error/skip，BUILD SUCCESS，13.215s；未运行真实 E2E |
+| 2026-10-25 | Task 2 | `mvn -pl qingling-team-domain test` | domain 全模块 63 项通过，含 `WorkExecutionTest` 7 项、`ReviewRoundTest` 8 项；0 failure/error/skip，BUILD SUCCESS，2.035s；未运行真实 E2E |
+| 2026-10-25 | Task 3 | `mvn -pl qingling-team-domain,qingling-team-infra -am test` | domain 68 项、infra 151 项，共 219 项通过；覆盖 10 路并发 command、原子临时文件、pending/部分 outbox 重启、schema/corrupt fail-fast、legacy 隔离与凭据拒绝；BUILD SUCCESS，8.685s；未运行真实 E2E |
+| 2026-10-25 | Task 4 | `mvn -pl qingling-team-app -am -Dtest=WorkCompletionCoordinatorTest -Dsurefire.failIfNoSpecifiedTests=false test` | `WorkCompletionCoordinatorTest` 11 项通过，0 failure/error/skip，BUILD SUCCESS，1.607s；`git diff --check` 同命令链通过 |
+| 2026-10-25 | Task 4 | `mvn -pl qingling-team-domain,qingling-team-app,qingling-team-infra -am test` | domain 68 项、app 48 项、infra 151 项，共 267 项通过，0 failure/error/skip，BUILD SUCCESS，8.937s；未运行真实 E2E |
+| 2026-10-25 | Task 5 | `mvn -pl qingling-team-app -am -Dtest=MailboxLeaseWatchdogTest,WorkflowShutdownCoordinatorTest,WorkflowOutboxProjectorTest,CoordinatedRuntimeIncidentGatewayTest,WorkCompletionCoordinatorTest -Dsurefire.failIfNoSpecifiedTests=false test` | 22 项通过；覆盖恢复领取同 execution/attempt+1、watchdog v2 RUNNING 保护、shutdown 终态、outbox crash window/有限重试及 incident 恢复预算；BUILD SUCCESS，2.078s |
+| 2026-10-25 | Task 5 | `mvn -pl qingling-team-infra,qingling-team-starter -am -Dtest=LegacyWorkflowProjectionGatewayTest,RuntimeLifecycleTest,RuntimeBootstrapTest -Dsurefire.failIfNoSpecifiedTests=false test` | infra 投影 3 项、starter 16 项，共 19 项通过；验证三类旧存储幂等副作用、协调模式 Bean 接线和 shutdown 次序；BUILD SUCCESS，12.199s |
+| 2026-10-25 | Task 5 | `mvn -pl qingling-team-domain,qingling-team-app,qingling-team-infra,qingling-team-starter -am test` | domain 68、app 56、infra 154、adapter 13、starter 76，共 367 项通过，0 failure/error/skip，BUILD SUCCESS，17.953s；`git diff --check` 通过；未运行真实 E2E |
+| 2026-10-25 | Task 6 | `mvn -pl qingling-team-domain,qingling-team-app,qingling-team-infra,qingling-team-starter -am test` | domain 68、app 58、infra 156、adapter 13、starter 80，共 375 项通过，0 failure/error/skip，BUILD SUCCESS，16.910s；`git diff --check` 通过；未运行真实 E2E |
+| 2026-10-25 | Task 7 | `mvn -pl qingling-team-starter -am -Dtest=WorkflowStateMachineTest,WorkExecutionTest,WorkflowRuntimeStateTest,WorkCompletionCoordinatorTest,CommonTeamToolsCoordinatedTest,TeamAgentFactoryTest,CoordinatedWorkflowToolCoordinatorTest,WorkspaceTemplateContractTest,RuntimeLifecycleTest -Dsurefire.failIfNoSpecifiedTests=false test` | domain 23、app 17、infra 12、starter 24，共 76 项通过；覆盖 profile、v2 初始化、角色裁剪、子 Agent 工具边界和模板契约，BUILD SUCCESS，5.321s |
+| 2026-10-25 | Task 7 | `mvn test` | domain 72、app 61、infra 159、adapter 13、starter 88，共 393 项通过，0 failure/error/skip，BUILD SUCCESS，17.539s；`git diff --check` 通过；未运行真实 E2E |
+| 2026-10-25 | Task 8 | `mvn -pl qingling-team-starter -am -Dtest=McpProjectTestRunnerTest,TodoAcceptanceFixtureTest,RealTeamE2EDriverTest,WorkspaceTemplateContractTest -Dsurefire.failIfNoSpecifiedTests=false test` | infra 6、starter 47，共 53 项通过；覆盖 QA 固定 acceptance 目标、只读 fixture、Driver review/outbox/execution/orphan 直接诊断、summary 字段和 QA requirement ID 模板，BUILD SUCCESS，4.909s |
+| 2026-10-25 | Task 8 | `python3 -c 'import ast, pathlib; ast.parse(...)'` | 固定验收 pytest 源码语法校验通过；未生成 `__pycache__` |
+| 2026-10-25 | Task 8 | `mvn -Pcontract-it -pl qingling-team-starter -am -Dit.test=CoordinatedWorkflowContractIT -Dfailsafe.failIfNoSpecifiedTests=false verify` | domain 72、app 61、infra 159、adapter 13、starter 89 项单元测试及 `CoordinatedWorkflowContractIT` 1 项通过；零模型、零网络完成 STANDARD 全链并验证 mailbox/Cron/outbox/execution 无残留，BUILD SUCCESS，21.803s |
+| 2026-10-25 | Task 8 | `git diff --check` | 通过；未 source E2E 凭据、未运行真实 E2E |
+| 2026-10-25 | Task 9 | 相关模块定向测试 | domain 35、app 27、infra 29、starter 74，共 165 项通过，0 failure/error/skip，BUILD SUCCESS，13.633s |
+| 2026-10-25 | Task 9 | 首次 `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 失败并暴露真实 fixture 缺口：QA 固定目标 `../acceptance/test_todo_contract.py` 未安装，Test Runner 返回 `exit_code=4`；未掩盖或按环境抖动跳过 |
+| 2026-10-25 | Task 9 | 修复后 `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 394 项单元回归及 `RealSandboxToolContractIT` 1 IT 通过，BUILD SUCCESS，37.157s；真实 Docker/AgentScope/MCP + NoCallModel，10 次 Shell、5 次成功 Test Runner、大输出 `exit_code=1`、受控连接恢复和无 pytest/pip/tmux orphan 均通过 |
+| 2026-10-25 | Task 9 | `mvn -Pcontract-it -pl qingling-team-starter -am -Dit.test=CoordinatedWorkflowContractIT -Dfailsafe.failIfNoSpecifiedTests=false verify` | 394 项单元回归及 coordinated IT 1 项通过，BUILD SUCCESS，27.483s；STANDARD 全链无模型/无网络并收敛 execution/outbox/mailbox/Cron |
+| 2026-10-25 | Task 9 | 最终 `mvn verify` | domain 72、app 61、infra 159、adapter 13、starter 89，共 394 项通过，0 failure/error/skip，BUILD SUCCESS，18.805s |
+| 2026-10-25 | Task 9 | `git diff --check` 与宿主/容器进程复核 | 通过；无 pending tool，未发现 pytest/pip/tmux/Maven/E2E 孤儿；未 source E2E 凭据、未调用真实模型、未运行真实 E2E |

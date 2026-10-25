@@ -235,7 +235,7 @@
 | Task 15 日志查询、Metrics 与结构化日志 | 已完成 | app LogQueryService、infra JSONL/Metrics、starter CLI/metrics/logback | stats/tasks/steps/l1/all-agents Python 契约、7 类 Prometheus 指标、50MB×5 滚动 JSONL 与凭据掩码通过；对应命令共 137 项测试 |
 | Task 16 Starter、配置与生命周期装配 | 已完成 | starter Application/Properties/RuntimeConfiguration、YAML 模板、生命周期与路由 Sender | 无飞书 Spring 容器启动、配置 fail-fast、四角色 heartbeat/Cron、Runner 排空与反向关闭通过；对应命令共 140 项测试，未调用真实模型 |
 | Task 17 跨语言契约与无 LLM 集成测试 | 已完成 | `contract-fixtures/generate_contract_fixture.py`、starter contract fixtures/IT、Maven `contract-it` profile | Python 源快照无 `.git`，以目录及 11 个源文件 SHA-256 追溯；140 项单测与 10 项契约/集成测试通过，未调用真实 LLM、飞书或网络 |
-| Task 18 四条真实 E2E | 未完成；当前阻断为 Test Runner 业务终态被误判为 RESULT_UNAVAILABLE | `sandbox-docker-compose.yaml`、`E2E.md`、starter `RealTeamE2E`/Driver、模型选择器、AgentScope 任务语义与父子生命周期、Java incident/工作流状态机、完成证据门禁、`run_project_tests`、MCP cwd 归一化/熔断与零模型真实工具契约、`target/e2e-evidence/happy-path` | 2026-10-15 只运行一次显式 `qwen3.8-flash happy-path`：流程完成 checkpoint、PM、RD 技术设计并进入代码实现，单一 spawn、终态后 continuation、无主动取消与 stale lease 恢复均生效。Test Runner 容器终态实际为 `FINISHED/exit_code=1`，pytest 32 collected、11 passed、21 failed、coverage 72%，却被 Java 返回为 `INFRASTRUCTURE_FAILED/RESULT_UNAVAILABLE/exit_code=null` 并进入 RECOVERING、BLOCKED，使业务失败无法交给 RD 正常修复。Driver 已直接报告结构化 incident，未退化为 QA 文件超时。未重试或启动后三个场景，退出后无孤儿进程；四条 E2E 尚未通过，Task 18 保持未完成 |
+| Task 18 四条真实 E2E | 未完成；确定性编排非 E2E 门禁已通过，等待新一轮真实 E2E 二次授权 | `sandbox-docker-compose.yaml`、`E2E.md`、starter `RealTeamE2E`/Driver、runtime v2 WorkExecution/outbox、Java 完成协调、固定 Todo acceptance、真实 Docker/NoCallModel 契约 | 2026-10-25 已完成 `agent-workflow-determinism-1.0.0`：Task 18 固定 `STANDARD + REQUIRED_ONLY`，SIMPLE/STANDARD 不再强制子 Agent，QA 使用独立只读验收，Driver 直接观察 execution/review/outbox/orphan。相关模块 165 项、最终 `mvn verify` 394 项、真实 Docker 工具契约 1 IT、coordinated IT 1 项及 `git diff --check` 均通过；首次工具契约暴露并修复 QA fixture 未安装。未 source E2E 凭据、未运行新一轮真实场景；四条 E2E 尚未通过，Task 18 保持未完成 |
 | Task 19 迁移收尾与文档 | 已完成 | `qingling-team/README.md`、`qingling-team-starter/pom.xml`、父需求 `spec.md`/`tasks.md`/`test-spec.md`/`log.md` | README 已覆盖整体架构、端到端工作流、运行/部署、配置迁移、数据兼容、AgentScope 2.0.3、AIO-Sandbox、Python Skill 产物、pgvector DDL、升级/回滚、已知差异和 27 行迁移矩阵证据；starter 以 `exec` classifier 生成可执行 Spring Boot JAR并保留普通主 JAR供 Failsafe 使用。2026-10-11 `mvn verify` 六模块 SUCCESS，225 tests 全通过；Task 19 后续门禁暴露并修正了主产物被 repackage 后集成测试无法读取模板资源的问题；Task 18 仍未完成 |
 
 ## 12. 审查结论
@@ -245,6 +245,7 @@
 - 当前结论：**用户已确认，可按 `tasks.md` 进入实现阶段。**
 - 2026-10-14：Task 18 最新 RD 取消恢复缺口已完成代码与非 E2E 验证，但未执行新的真实场景；四条 E2E 全部通过前，Task 18 继续保持未完成。
 - 2026-10-15：唯一一次新 `happy-path` 证明取消恢复与快速诊断链生效，同时暴露 Test Runner 对已完成 `exit_code=1` 的 pytest 业务失败错误升级为 `RESULT_UNAVAILABLE/BLOCKED`；修复并重新验证前，Task 18 继续保持未完成。
+- 2026-10-25：确定性编排专项改造及全部非 E2E 门禁已通过；这只解除下一轮真实 E2E 的技术前置，不构成 Task 18 完成证据。当前等待用户二次授权，四条场景全部通过前 Task 18 继续保持未完成。
 
 ## 13. 确认记录（HARD-GATE）
 

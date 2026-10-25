@@ -28,7 +28,7 @@ type: reference
 
 | checkpoint.kind | reply_class | 动作 |
 |-----------------|-------------|------|
-| checkpoint_request（需求确认） | approve | 先 `append_event("checkpoint_reply_classified")`、再 `append_event("checkpoint_approved")`，最后 `advance_workflow(signal="checkpoint_approved")`，由 Java 分派 PM |
+| checkpoint_request（需求确认） | approve | 先 `append_event("checkpoint_reply_classified")`、再 `append_event("checkpoint_approved")`，最后 `advance_workflow(signal="checkpoint_approved")`，由 Java 按冻结 profile 分派下一 Owner |
 | checkpoint_request（需求确认） | revise | 更新 `needs/requirements.md` + 再发 checkpoint_request |
 | checkpoint_request（需求确认） | reject | `advance_workflow(signal="checkpoint_rejected")` 进入 `CANCELLED`，再通知需求已取消并归档项目 |
 | proposal_review（复盘审批） | approve | 按 approved_ids 发 `retro_approved` 给 target_role × N |
@@ -42,7 +42,7 @@ type: reference
 - `append_event("checkpoint_approved" or "checkpoint_rejected", {cid})`
 - 通过 feishu_bridge 的 CheckpointStore.resolve(cid)（需通过 AgentScope Skill loader 加载辅助脚本，v0 先手动记忆）
 
-对于需求 approve，确认上述两个事件都返回成功后，再发送 PM 产品设计任务。不得把当前外部消息当作 mailbox message，也不得为它调用 `mark_done`。
+对于需求 approve，确认上述两个事件都返回成功后，只调用 `advance_workflow`；不得自行发送 PM 或 RD 任务。Java 会按冻结 profile 让 SIMPLE 直接进入 RD，让 STANDARD/STRICT 进入 PM。不得把当前外部消息当作 mailbox message，也不得为它调用 `mark_done`。
 
 ## 输出
 

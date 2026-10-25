@@ -1,0 +1,14 @@
+{
+  "contract_version": 1,
+  "profile": "STANDARD",
+  "requirements": [
+    {"id": "TODO-API-001", "method": "POST", "path": "/todos", "expected": "201 and persisted todo", "evidence": "automated", "mandatory": true},
+    {"id": "TODO-API-002", "method": "GET", "path": "/todos", "expected": "JSON array ordered by id descending", "evidence": "automated", "mandatory": true},
+    {"id": "TODO-API-003", "method": "PATCH", "path": "/todos/{id}/complete", "expected": "200 and completed=true", "evidence": "automated", "mandatory": true},
+    {"id": "TODO-API-004", "method": "DELETE", "path": "/todos/{id}", "expected": "204 physical delete", "evidence": "automated", "mandatory": true},
+    {"id": "TODO-API-005", "method": "GET", "path": "/todos/{missing_id}", "expected": "404", "evidence": "automated", "mandatory": true},
+    {"id": "TODO-API-006", "method": "POST", "path": "/todos", "expected": "blank title returns 422", "evidence": "automated", "mandatory": true},
+    {"id": "TODO-WEB-001", "method": "GET", "path": "/", "expected": "single HTML without local script or stylesheet dependency", "evidence": "automated", "mandatory": true},
+    {"id": "TODO-DATA-001", "method": "RESTART", "path": "SQLite", "expected": "created todo remains visible to a new TestClient", "evidence": "automated", "mandatory": true}
+  ]
+}

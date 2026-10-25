@@ -9,6 +9,8 @@ type: task
 ## ⚠️ 执行方式
 正式 pytest 只能调用 `run_project_tests(project_id)`；它在 Docker 沙盒内固定执行 QA 的 `qa/contract_tests/test_contract.py` 并返回可核验 execution ID。宿主机写 defect 报告和邮件使用 AgentScope 团队工具。
 
+`SIMPLE`/`STANDARD` 由当前 QA 父角色直接执行本 Skill，不得调用 `agent_spawn`、`agent_send` 或 `task_output`；只有 `STRICT` 才允许声明式 `test_run` 子 Agent。
+
 原始 `sandbox_execute_bash` 只用于无副作用目录探测和 `pip install -r requirements.txt`；调用时优先省略 `timeout`，确需设置时必须传 JSON 整数秒（例如 `timeout=300`），禁止传字符串（例如 `timeout="300"`）。
 
 ## 🚨 Critical Rules
@@ -87,25 +89,21 @@ Defect 模板：
 所有 defect 和 QA 契约测试写完后逐个 `read_shared` 回读，报告写完后必须 `read_shared(pid, "qa/test_report.md")` 回读确认。任一正式产物回读失败，或证据矩阵数量校验失败时，不得发送成功状态的 `task_done` 或声称交付完成。
 
 ### Step 5 — 发 task_done
-1. `send_mail(to="manager", type="task_done", subject="测试执行完成", content={"execution_id": "<run_project_tests.execution_id>", "status": "<run_project_tests.status>", "exit_code": "<run_project_tests.exit_code>", "pytest_collected": "<run_project_tests.pytest_collected>", "pytest_passed": "<run_project_tests.pytest_passed>", "coverage_percent": "<run_project_tests.coverage_percent>", "failure_type": "<run_project_tests.failure_type>", "retryable": "<run_project_tests.retryable>", ...}, project_id=pid)`
-2. 若有 defect：在上述 `task_done` 正文中携带 `"defects": ["qa/defects/defect_c07.md", ...]`，由 Manager 唯一决定并分派修复任务。
+1. 全部通过时：`send_mail(to="manager", type="task_done", subject="测试执行完成", content={"execution_id":"<run_project_tests.execution_id>","artifacts":["qa/test_report.md","qa/contract_tests/test_contract.py"],"decision":"ACCEPTED","rationale":"QA 契约测试全部通过","self_score":0.xx}, project_id=pid)`。
+2. 若有 defect：仍引用同一个 `run_project_tests.execution_id`，将 `decision` 设为 `DEFECT_FOUND`，并在 `artifacts` 与 `defects` 中携带 `qa/defects/defect_c07.md` 等路径。Java 依据真实 TEST_FAILED 证据唯一创建 RD 修复执行，不经过 Manager 行政分派。
 3. `send_mail` 成功后 Java 自动完成对应 `task_assign`；门禁失败时禁止单独调用 `mark_done`。
+
+禁止在 `task_done` 复制 `status`、`exit_code`、`pytest_collected`、`pytest_passed`、`coverage_percent`、`failure_type` 或 `retryable`；Java 会从 Test Runner 账本补全真实终态。
 
 ## 输出
 
 ```json
 {
-  "status": "success",
   "execution_id": "test-run-...",
-  "exit_code": 1,
-  "pytest_collected": 18,
-  "pytest_passed": 16,
-  "coverage_percent": 78.0,
-  "failure_type": "PYTEST_FAILURE",
-  "retryable": false,
-  "artifacts": [{"path": "qa/test_report.md"}, {"path": "qa/defects/defect_c07.md"}, {"path": "qa/defects/defect_c12.md"}],
-  "metrics": {"total": 18, "pass": 16, "fail": 2, "coverage": 0.78},
+  "artifacts": ["qa/test_report.md", "qa/contract_tests/test_contract.py", "qa/defects/defect_c07.md"],
+  "defects": ["qa/defects/defect_c07.md"],
+  "decision": "DEFECT_FOUND",
   "self_score": 0.83,
-  "breakdown": {...}
+  "rationale": "QA 契约测试发现文档契约缺陷"
 }
 ```

@@ -204,6 +204,8 @@ project_id -> execution_id + status + exit_code + pytest_collected
 
 - **阶段进度租约与后台任务语义修复（2026-10-25）**：`TaskSemanticsTrackingTool` 在 Java 工具边界将 `agent_spawn`、`agent_send` 的 `timeout_seconds` 强制归一为 0，并同步重建实际 `ToolUseBlock`，使模型请求从调用开始即进入 TaskRepository 后台执行，不再撞上 AgentScope 固定 `PT5M` 工具超时。`RealTeamE2EDriver` 将阶段等待拆分为 90 分钟硬总预算和由真实事件、mailbox、dispatch、AgentScope 进度刷新的 12 分钟无进展租约；Cron 心跳和 MCP 健康轮询不能伪造进展。Driver 从正式 watchdog 的 10 分钟租约、30 秒扫描间隔和 60 秒恢复宽限推导 mailbox 诊断窗口，只有超窗且无 dispatch、无活跃 Agent、无恢复 wake 时才直接报告租约悬挂。定向 38 项、`mvn verify` 311 项以及零模型真实 Docker 1 IT 全部通过；按用户要求未运行真实 E2E，Task 8 继续保持未完成。
 
+- **确定性编排改造的非 E2E 门禁（2026-10-25）**：已按 `agent-workflow-determinism-1.0.0` 完成 runtime v2 单一 WorkExecution/outbox、Java 完成协调、固定 profile/review、SIMPLE/STANDARD 父角色直做、固定 Todo acceptance 与 Driver v2 直接诊断。相关模块 165 项通过；最终 `mvn verify` 共 394 项通过（18.805s）；真实 Docker `RealSandboxToolContractIT` 首次因 QA fixture 未安装以 `exit_code=4` 失败，补齐公共只读 fixture 后重跑 1 IT 通过（37.157s）；`CoordinatedWorkflowContractIT` 1 IT 通过（27.483s）；`git diff --check` 与 orphan 复核通过。未 source E2E 凭据、未运行真实 E2E，Task 8 仍保持未完成并等待二次授权。
+
 - [ ] 完成
 
 ## Task 9: 最终回归、质量审计与父需求回写
@@ -226,6 +228,8 @@ project_id -> execution_id + status + exit_code + pytest_collected
 - **验证命令**: `mvn verify && git diff --check`
 
 - [ ] 完成
+
+- **2026-10-25 状态**：本次已完成非 E2E 回归和三组需求回写；因 Task 8 四条真实场景尚未通过，Task 9 不能勾选完成，父 Task 18 继续未完成。
 
 ---
 

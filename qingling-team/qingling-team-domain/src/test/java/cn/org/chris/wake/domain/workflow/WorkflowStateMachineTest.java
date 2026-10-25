@@ -2,6 +2,7 @@ package cn.org.chris.wake.domain.workflow;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -14,6 +15,50 @@ class WorkflowStateMachineTest {
 
     /** 待测确定性状态机。 */
     private final WorkflowStateMachine stateMachine = new WorkflowStateMachine();
+
+    /** SIMPLE 必须从需求确认直接进入 RD 实现，再直接进入 QA 测试验收。 */
+    @Test
+    void shouldSkipIndependentDesignRoundsForSimpleProfile() {
+        WorkflowTransition implementation = stateMachine.transition(
+                WorkflowProfile.SIMPLE,
+                WorkflowStage.REQUIREMENTS_CHECKPOINT,
+                WorkflowSignal.CHECKPOINT_APPROVED
+        );
+        WorkflowTransition verification = stateMachine.transition(
+                WorkflowProfile.SIMPLE,
+                implementation.to(),
+                WorkflowSignal.STAGE_ACCEPTED
+        );
+
+        assertThat(implementation.to()).isEqualTo(WorkflowStage.CODE_IMPLEMENTATION);
+        assertThat(implementation.assignee()).isEqualTo("rd");
+        assertThat(verification.to()).isEqualTo(WorkflowStage.QA_TEST_EXECUTION);
+        assertThat(verification.assignee()).isEqualTo("qa");
+    }
+
+    /** STANDARD 与 STRICT 必须保留 PM、技术设计和 QA 测试设计完整阶段。 */
+    @Test
+    void shouldKeepFullStageSequenceForStandardAndStrictProfiles() {
+        for (WorkflowProfile profile : List.of(WorkflowProfile.STANDARD, WorkflowProfile.STRICT)) {
+            WorkflowTransition product = stateMachine.transition(
+                    profile, WorkflowStage.REQUIREMENTS_CHECKPOINT, WorkflowSignal.CHECKPOINT_APPROVED
+            );
+            WorkflowTransition technical = stateMachine.transition(
+                    profile, product.to(), WorkflowSignal.STAGE_ACCEPTED
+            );
+            WorkflowTransition implementation = stateMachine.transition(
+                    profile, technical.to(), WorkflowSignal.STAGE_ACCEPTED
+            );
+            WorkflowTransition testDesign = stateMachine.transition(
+                    profile, implementation.to(), WorkflowSignal.STAGE_ACCEPTED
+            );
+
+            assertThat(product.to()).isEqualTo(WorkflowStage.PRODUCT_DESIGN);
+            assertThat(technical.to()).isEqualTo(WorkflowStage.TECH_DESIGN);
+            assertThat(implementation.to()).isEqualTo(WorkflowStage.CODE_IMPLEMENTATION);
+            assertThat(testDesign.to()).isEqualTo(WorkflowStage.QA_TEST_DESIGN);
+        }
+    }
 
     /**
      * 技术方案接受后必须进入 RD 代码实现，不能直接跳到 QA。

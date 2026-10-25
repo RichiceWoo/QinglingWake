@@ -207,10 +207,12 @@
 - **验收标准**：四条真实 E2E、最终 `mvn verify` 和 `git diff --check` 全通过后，才允许父 Task 18 完成。
 
 - [x] 非 E2E 验证完成，等待二次授权
-- [ ] 用户二次授权真实 E2E
+- [x] 用户二次授权真实 E2E
 - [ ] 真实 E2E 完成
 
 - **非 E2E 门禁结果（2026-10-25）**：相关模块定向测试共 165 项通过（13.633s）；最终 `mvn verify` 通过 domain 72、app 61、infra 159、adapter 13、starter 89，共 394 项，0 failure/error/skip（18.805s）。零模型真实 Docker 工具契约首次暴露 QA 固定验收 fixture 未安装，`run_project_tests` 以 `exit_code=4` 报告 `../acceptance/test_todo_contract.py` 不存在；修复为由公共 `TodoAcceptanceFixture` 安装只读契约，并为契约工作区提供满足验收的最小 FastAPI/SQLite 实现后，`mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` 重跑通过 1 IT（37.157s），覆盖 10 次无副作用 Shell、5 次成功 Test Runner、大输出业务失败、受控连接恢复、NoCallModel 零模型调用及无 pytest/pip/tmux 孤儿。`CoordinatedWorkflowContractIT` 1 IT 通过（27.483s），`git diff --check` 通过；宿主与容器复核无 pending/orphan。未 source E2E 凭据，未运行真实 E2E，当前严格暂停在二次授权门禁。
+
+- **首次真实 E2E（2026-10-25）**：用户二次授权后严格只执行一次干净 `qwen3.8-flash happy-path`，没有重试或启动后三个场景。Failsafe 在 Spring 启动阶段 7.139 秒内报错：`COORDINATED + STANDARD` 通过 `disableSubagents()` 构造的真实 HarnessAgent 没有 TaskRepository，而 `AgentScopeAgentGateway.adaptAgents` 仍无条件调用 `TaskSemanticsRegistry.forRepository(agent.getTaskRepository())`，触发 `NullPointerException: repository 不能为空`。业务工作流和角色模型调用均未开始；Maven 26.359 秒失败。脱敏 `summary.json`/`failure-summary.json` 已保存，宿主和容器无 Maven/E2E/pytest/pip/tmux 残留。真实 E2E 保持未完成，下一轮前需让无 Sub-Agent 运行时使用空任务诊断/取消语义，并补真实 Spring + HarnessAgent 启动测试。
 
 ---
 
@@ -219,5 +221,58 @@
 - **变更摘要**：已完成 runtime v2 单一 WorkExecution/outbox、Java 完成协调、确定性 profile/review、SIMPLE/STANDARD 去强制子 Agent、固定 Todo 验收与 Driver 直接诊断；非 E2E 门禁全部通过。
 - **总文件数**：最终 E2E 完成后统计；当前工作区包含本版本源码、测试、模板和文档改动，并保留用户既有 `adapter/demo/` 与 `tmp.txt`。
 - **Spec-Plan 偏差记录**：首次真实 Docker 工具契约发现 QA fixture 未安装，已补齐公共只读 fixture 与契约用最小应用后重跑通过；其余验证层级未减少。
-- **遗留问题**：仅剩用户二次授权后的四条真实 E2E；在其全部通过前，父 Task 18 不得完成。
-- **真实 E2E 授权与结果**：尚未获得本轮二次授权，未运行。
+- **遗留问题**：空 TaskRepository 启动缺陷已修复并通过真实 Spring 启动测试与默认回归；仍需按门禁重新执行四条真实 E2E。
+- **真实 E2E 授权与结果**：已获得二次授权并只运行一次 `happy-path`；启动阶段因空 TaskRepository 接线缺陷失败，未重试。
+
+- [x] 修复无 TaskRepository 时的空子任务诊断、取消与关闭适配
+- [x] 增加 `COORDINATED + STANDARD` 真实 Spring/HarnessAgent 启动测试
+- [x] 修复后定向测试与 `mvn verify`
+- [ ] 修复后真实 E2E（已执行一次 `happy-path`，因 Driver 孤儿 execution 误判竞态失败，未重试）
+- [x] 修复 Owner 完成到 Manager 状态迁移之间的孤儿诊断竞态，并保留有限、精确匹配的失败边界
+- [x] 完成交接诊断定向测试与完整默认回归
+- [ ] 交接诊断修复后的真实 E2E（本轮未运行）
+
+### 2026-10-25 单次真实 E2E 复核
+
+- [x] 仅执行一次干净 `happy-path`，未自动重试
+- [x] 保存脱敏 `summary.json` 与 `failure-summary.json`，并确认无 Maven/pytest/pip/tmux 孤儿
+- [x] 修复 `task_done.content.decision` 的契约可发现性与非法枚举后的确定性收敛
+- [ ] 重新执行 `happy-path`；通过前不得启动后三个场景
+
+本轮 E2E 500.7 秒失败，Maven 总耗时 8 分 40 秒。PM 已生成产品规格，但连续猜测非法 `WorkCompletionDecision` 枚举后正常退出，权威 execution 留在 `PRODUCT_DESIGN/RUNNING`；Driver 正确报告真实孤儿。四路 MCP 均 `CLOSED/0 failures`，Task 18 保持未完成。
+
+### 2026-10-25 完成协议修复
+
+- [x] `send_mail` 工具与 `content` 参数 schema 说明显式列出 `ACCEPTED/DEFECT_FOUND` 及角色用法
+- [x] 非法 `decision` 错误返回完整允许值，不再只回显 `No enum constant`
+- [x] 回合内记录未解决 completion rejection；成功重试清除，普通文本退出转为 `COMPLETION_PROTOCOL_REJECTED`
+- [x] 新故障类型复用 Runner incident 链，保持 stage/Owner 并执行一次恢复、同类再失败 BLOCKED
+- [x] 聚焦 50 项及完整默认回归 402 项通过
+- [x] 修复后只执行一次干净 `happy-path` 并保存脱敏启动失败证据
+- [ ] 四场景真实 E2E（最新一轮在显式模型 Function Calling 预检以 `transport_error` 失败，未进入 workflow）
+
+### 2026-10-25 模型预检分类与证据修复
+
+- [x] 细分 HTTP、DNS、连接、超时、TLS、重置、解析与 Function Calling 协议失败
+- [x] 仅对可恢复故障执行最多一次自动重试，并记录每次脱敏尝试证据
+- [x] Driver 启动失败摘要接入结构化模型预检证据
+- [x] 独立最小真实 Function Calling 探针通过：`qwen3.8-flash`、attempt 1、HTTP 200、4797ms
+- [x] 聚焦 67 项、`mvn verify` 409 项、零模型真实 Docker 契约 1 IT 通过
+- [ ] 四场景真实 E2E（本轮明确未运行）
+
+### 2026-10-25 模型预检修复后单次 E2E
+
+- [x] 仅执行一次干净 `happy-path`，模型预检 attempt 1、HTTP 200 通过
+- [x] checkpoint、产品设计、技术设计完成，RD 代码与测试文件落盘
+- [x] 保存脱敏失败证据并确认 MCP 全 CLOSED、shutdown 将未终态 execution 置为 CANCELLED
+- [ ] 修复父回合从未尝试完成工具便正常退出时的类型化失败与确定性 continuation
+- [ ] 四场景真实 E2E（本轮未重试，后三场景未运行）
+
+### 2026-10-25 Owner 回合未终态修复
+
+- [x] Owner 领取并启动任务后登记 completion obligation，成功 `task_done` 后解除
+- [x] 正常退出但 execution 仍为 RUNNING 时产生 `OWNER_EXITED_WITH_RUNNING_EXECUTION`
+- [x] 首次失败保持 stage/Owner/execution，自动投递原 Owner continuation 并将 attempt 增至 2
+- [x] 第二次同类失败进入 BLOCKED，禁止第三次自动唤醒，重复上报保持幂等
+- [x] 聚焦 63 项、默认回归 410 项、零模型真实 Docker 契约 1 IT 通过
+- [ ] 四场景真实 E2E（本轮按要求未运行）

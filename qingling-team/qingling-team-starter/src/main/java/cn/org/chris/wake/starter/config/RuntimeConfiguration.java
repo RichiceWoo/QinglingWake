@@ -37,6 +37,7 @@ import cn.org.chris.wake.domain.workflow.ReviewPolicy;
 import cn.org.chris.wake.domain.workflow.WorkflowProfile;
 import cn.org.chris.wake.domain.workflow.WorkflowCoordinationMode;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
+import cn.org.chris.wake.infra.agentscope.CompletionProtocolRegistry;
 import cn.org.chris.wake.infra.agentscope.McpSandboxConfiguration;
 import cn.org.chris.wake.infra.agentscope.ModelActivityRegistry;
 import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
@@ -459,13 +460,20 @@ public class RuntimeConfiguration {
             ImageAndSearchTools imageAndSearchTools,
             ObjectMapper objectMapper,
             WorkflowToolCoordinator workflowToolCoordinator,
-            ProjectTestExecutionRegistry projectTestExecutionRegistry
+            ProjectTestExecutionRegistry projectTestExecutionRegistry,
+            CompletionProtocolRegistry completionProtocolRegistry
     ) {
         return new RoleToolkitFactory(
                 mailboxService, workspaceRepository, wakeScheduler::scheduleMailWake,
                 eventService, senderGateway, imageAndSearchTools, objectMapper,
-                workflowToolCoordinator, projectTestExecutionRegistry
+                workflowToolCoordinator, projectTestExecutionRegistry, completionProtocolRegistry
         );
+    }
+
+    /** 创建由角色完成工具与 Agent Gateway 共享的回合内完成协议状态。 */
+    @Bean
+    public CompletionProtocolRegistry completionProtocolRegistry() {
+        return new CompletionProtocolRegistry();
     }
 
     /** 创建 RD/QA 真实 Test Runner 与完成协调器共享的进程内执行账本。 */
@@ -541,7 +549,9 @@ public class RuntimeConfiguration {
     /** 创建仅在显式开关开启时执行启动探测的 Provider 感知模型选择器。 */
     @Bean
     public ModelAvailabilitySelector modelAvailabilitySelector(ObjectMapper objectMapper) {
-        return new ModelAvailabilitySelector(HttpClient.newHttpClient(), objectMapper);
+        return new ModelAvailabilitySelector(
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build(), objectMapper
+        );
     }
 
     /** 按 Provider 与选择开关决定直接使用显式模型或按候选优先级探测。 */
@@ -612,7 +622,8 @@ public class RuntimeConfiguration {
             RoleToolkitFactory toolkitFactory,
             Model agentModel,
             McpSandboxConfiguration sandboxConfiguration,
-            PgVectorMemoryIndexer memoryIndexer
+            PgVectorMemoryIndexer memoryIndexer,
+            CompletionProtocolRegistry completionProtocolRegistry
     ) {
         ModelActivityRegistry modelActivityRegistry = new ModelActivityRegistry();
         TeamAgentFactory factory = new TeamAgentFactory(
@@ -629,7 +640,8 @@ public class RuntimeConfiguration {
                 settings.properties().workflow().defaultProfile()
         );
         return new AgentScopeAgentGateway(
-                factory.createAll(), memoryIndexer, sandboxConfiguration, modelActivityRegistry
+                factory.createAll(), memoryIndexer, sandboxConfiguration, modelActivityRegistry,
+                completionProtocolRegistry
         );
     }
 

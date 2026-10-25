@@ -206,6 +206,8 @@ project_id -> execution_id + status + exit_code + pytest_collected
 
 - **确定性编排改造的非 E2E 门禁（2026-10-25）**：已按 `agent-workflow-determinism-1.0.0` 完成 runtime v2 单一 WorkExecution/outbox、Java 完成协调、固定 profile/review、SIMPLE/STANDARD 父角色直做、固定 Todo acceptance 与 Driver v2 直接诊断。相关模块 165 项通过；最终 `mvn verify` 共 394 项通过（18.805s）；真实 Docker `RealSandboxToolContractIT` 首次因 QA fixture 未安装以 `exit_code=4` 失败，补齐公共只读 fixture 后重跑 1 IT 通过（37.157s）；`CoordinatedWorkflowContractIT` 1 IT 通过（27.483s）；`git diff --check` 与 orphan 复核通过。未 source E2E 凭据、未运行真实 E2E，Task 8 仍保持未完成并等待二次授权。
 
+- **确定性编排后的首次真实 E2E（2026-10-25）**：用户授权后严格只执行一次干净 `qwen3.8-flash happy-path`。预检确认 Docker healthy、模型配置非空且免费选择关闭；Failsafe 随后在 Spring startup 7.139 秒内报 `NullPointerException: repository 不能为空`。根因是 coordinated STANDARD 调用 `disableSubagents()` 后真实 HarnessAgent 不创建 TaskRepository，而 `AgentScopeAgentGateway.adaptAgents` 仍无条件创建 TaskSemanticsRegistry。未进入 checkpoint 或角色模型调用，Maven 26.359 秒失败；`summary.json`/`failure-summary.json` 已保存，未重试或启动后三个场景，清理后无孤儿进程。Task 8 继续未完成。
+
 - [ ] 完成
 
 ## Task 9: 最终回归、质量审计与父需求回写
@@ -239,3 +241,61 @@ project_id -> execution_id + status + exit_code + pytest_collected
 - **总文件数**：待填写
 - **Spec-Plan 偏差记录**：待填写
 - **遗留问题**：待填写
+
+- [x] 修复无 TaskRepository 时的空子任务诊断/取消/关闭适配
+- [x] 增加 coordinated STANDARD 真实 Spring + HarnessAgent 启动测试
+- [x] 运行定向测试与默认 `mvn verify`
+- [ ] 运行修复后的真实 E2E（已执行一次 `happy-path`，Driver 孤儿误判失败；未重试）
+- [x] 修复 Owner 完成到 Manager 状态迁移之间的孤儿 execution 诊断竞态
+- [x] 覆盖匹配、错配和宽限耗尽三类 Driver 断言
+- [ ] 修复后的真实 E2E（本轮未运行）
+
+## 2026-10-25 最新单次 E2E 状态
+
+- [x] 交接诊断修复后仅执行一次干净 `happy-path`
+- [x] Driver 正确识别 `PRODUCT_DESIGN/pm` 真实孤儿并由 finally 保存脱敏证据
+- [x] shutdown 将未终态 execution 持久化为 `CANCELLED`，宿主与容器无孤儿进程
+- [x] 让 `task_done.content.decision` 合法值对模型可发现，并对非法值返回允许枚举/结构化校验信息
+- [x] 防止 Agent 在 completion 工具持续失败后以普通文本退出并遗留 `RUNNING/in_progress`
+- [ ] 修复后重新执行 `happy-path`；通过前不启动后三场景
+
+真实结果：E2E 500.7 秒失败，Maven 8 分 40 秒；四路 MCP `CLOSED/0 failures`。本轮未重试，Task 8/Task 18 的四场景验收仍未完成。
+
+### 2026-10-25 完成协议可靠性修复
+
+- [x] schema 与参数说明公开唯一完成枚举和值域语义
+- [x] 非法枚举返回可操作错误，明确 PM/RD 与 QA 的选择规则
+- [x] 工具拒绝与父 dispatch 通过共享、无敏感内容的 session 注册表关联
+- [x] 未纠正拒绝时禁止父回合成功，形成 `COMPLETION_PROTOCOL_REJECTED` incident
+- [x] 同回合成功重试清除拒绝，避免误杀已纠错的合法完成
+- [x] 聚焦测试 50 项、`mvn verify` 402 项与 `git diff --check` 通过
+- [x] E2E 前零模型真实 Docker 契约通过（1 IT）
+- [x] 只执行一次干净 `happy-path` 并保存脱敏启动失败证据
+- [ ] 四场景真实 E2E（本轮因 `qwen3.8-flash` Function Calling 预检 `transport_error` 未进入 workflow，未重试）
+
+### 2026-10-25 下一轮 E2E 前模型预检修复
+
+- [x] 将笼统 `transport_error` 拆分为稳定 HTTP/网络/TLS/解析/协议分类
+- [x] 可恢复故障最多自动重试一次；不可恢复故障不重试
+- [x] 保存逐次、受限、脱敏证据并接入 Driver 启动失败 summary
+- [x] 独立真实最小 Function Calling 探针通过（`qwen3.8-flash`、attempt 1、HTTP 200、4797ms）
+- [x] 聚焦 67 项、完整默认回归 409 项、零模型真实 Docker 契约 1 IT 通过
+- [ ] 下一轮真实 E2E（本轮按用户要求不运行）
+
+### 2026-10-25 单次真实 E2E 新发现
+
+- [x] 只执行一次干净 `happy-path`；模型预检 attempt 1、HTTP 200
+- [x] checkpoint、产品设计、技术设计成功，RD 代码和测试落盘
+- [x] Driver 直接报告 `CODE_IMPLEMENTATION/RUNNING` 真孤儿，finally 保存脱敏证据
+- [ ] 父回合未调用完成工具便退出时，不得作为成功吞掉；应形成类型化 incident
+- [ ] 对仍为 RUNNING/in_progress 的原 Owner 安排有界、去重的确定性 continuation
+- [ ] 四场景真实 E2E（本轮没有重试或运行后三场景）
+
+### 2026-10-25 Owner 回合未终态修复
+
+- [x] 领取 RUNNING execution 后登记 completion obligation，成功完成后解除
+- [x] 正常退出但未终态时生成 `OWNER_EXITED_WITH_RUNNING_EXECUTION` incident
+- [x] 首次失败投递原 Owner、保持 stage/Owner/execution 并自动 wake，重新领取后 attempt=2
+- [x] 第二次同类失败进入 BLOCKED，禁止第三次自动恢复并保证重复报告幂等
+- [x] 聚焦 63 项、`mvn verify` 410 项、零模型 Docker 契约 1 IT 通过
+- [ ] Task 8 四场景真实 E2E（本轮未运行）

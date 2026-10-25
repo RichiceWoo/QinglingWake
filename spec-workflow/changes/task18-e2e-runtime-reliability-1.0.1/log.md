@@ -196,3 +196,75 @@
 - **真实发现**：首次 Docker 工具契约因 QA 固定验收 fixture 未安装而以 `exit_code=4` 失败；复用公共 `TodoAcceptanceFixture` 并为契约工作区安装只读验收和最小正确应用后才重跑通过。
 - **验证**：相关模块 165 项通过；最终 `mvn verify` 394 项通过（18.805s）；修复后 `RealSandboxToolContractIT` 1 IT 通过（37.157s）；`CoordinatedWorkflowContractIT` 1 IT 通过（27.483s）；`git diff --check` 与 orphan 复核通过。
 - **门禁**：未 source E2E 凭据、未调用真实模型、未运行真实 E2E。Task 8、Task 9 与父 Task 18 继续未完成，等待用户二次授权。
+
+## 2026-10-25 确定性编排后首次真实 E2E 启动失败
+
+- **执行**：用户二次授权后仅运行一次 `mvn -Pe2e -De2e.scenario=happy-path verify`；显式 `qwen3.8-flash`、免费选择关闭、Docker healthy，没有重试或启动后三个场景。
+- **直接原因**：coordinated STANDARD 禁用 Sub-Agent 后，真实 HarnessAgent 的 TaskRepository 为 null；`AgentScopeAgentGateway.adaptAgents` 仍无条件调用 `TaskSemanticsRegistry.forRepository`，Spring startup 报 `NullPointerException: repository 不能为空`。
+- **结果**：Failsafe 1 test、0 failures、1 error、0 skipped，E2E 7.139s，Maven 26.359s；未进入 checkpoint、workflow 或角色模型调用。
+- **证据与清理**：`target/e2e-evidence/happy-path/{summary.json,failure-summary.json}` 已保存脱敏 startup 证据；宿主和容器无 Maven/E2E/pytest/pip/tmux 残留。Task 8、Task 9 与父 Task 18 继续未完成。
+
+## 2026-10-25 空 TaskRepository 适配修复
+
+- **实现**：Gateway 只在真实 AgentScope 创建了 TaskRepository 时绑定任务语义表；无仓库角色使用空子任务诊断，并在取消时直接中断父 Agent。
+- **测试**：新增真实 Spring 启动覆盖；定向测试 26 项和默认回归 396 项全部通过。
+- **门禁**：未运行真实 E2E；四场景和父 Task 18 继续未完成。
+
+## 2026-10-25 修复后单次真实 E2E
+
+- **进度**：需求 checkpoint、PM 产品设计、RD 技术设计均成功，已进入代码实现；唯一入口正确，MCP 四路 CLOSED/0 failures。
+- **失败**：Driver 在 Manager 正处理 RD 完成消息时，仅检查原 Owner RD 是否仍有 dispatch/AgentScope，误报 `TECH_DESIGN/RUNNING` 孤儿 execution。
+- **证据**：`summary.json`/`failure-summary.json` 保存脱敏现场；最终 aggregate 中技术设计为 SUCCEEDED、代码 execution 为 shutdown CANCELLED，证明没有真实丢失状态。
+- **清理**：无 Maven/E2E/pytest/pip/tmux 残留；未重试或启动后三个场景。
+
+## 2026-10-25 孤儿诊断交接竞态修复
+
+- Driver 将 runtime execution 与 `in_progress task_assign` 按 execution/project/stage/Owner 精确关联。
+- 只有关联成功且 Manager dispatch 正活跃、未超过 5 分 30 秒才给予交接机会；不会让无关活动无限遮蔽孤儿。
+- 定向 36 项、默认回归 399 项通过；未运行真实 E2E。
+
+## 2026-10-25 交接诊断修复后单次 E2E
+
+- 命令：`mvn -Pe2e -De2e.scenario=happy-path verify`，仅执行一次。
+- 结果：E2E 500.7 秒失败，Maven 总耗时 8 分 40 秒；没有启动后三场景。
+- 根因：PM 已产出 `design/product_spec.md`，但 `task_done.content.decision` 与 Java `WorkCompletionDecision` 契约不透明；多次非法枚举仅收到 `No enum constant`，最终回合退出而状态未终态化。
+- 诊断：失败时 `PRODUCT_DESIGN/pm` 为 `RUNNING`，assignment 为 `in_progress`，PM/Manager dispatch 与 AgentScope 均不活跃，属于真实孤儿；Manager 交接宽限没有误杀。
+- 收尾：四路 MCP `CLOSED/0 failures`；证据已脱敏保存，execution 最终为 `CANCELLED`，未发现 Maven/pytest/pip/tmux 残留。
+
+## 2026-10-25 完成协议枚举与退出保护修复
+
+- 工具 schema、参数描述与非法枚举错误统一公开 `ACCEPTED/DEFECT_FOUND` 及角色规则。
+- 新增无敏感内容的 session 注册表，关联 completion rejection 与父 dispatch；成功重试清除，未纠正退出转为 `COMPLETION_PROTOCOL_REJECTED`。
+- Runner 既有 incident 链会保持 stage/Owner，并执行一次恢复、第二次失败 BLOCKED，不再留下无 incident 的真孤儿。
+- 聚焦测试 50 项、`mvn verify` 402 项通过，`git diff --check` 通过；本轮未运行 E2E。
+
+## 2026-10-25 完成协议修复后单次真实 E2E
+
+- 前置 `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` 通过：1 IT，0 failure/error/skip。
+- 仅执行一次干净 `happy-path`；显式 DashScope `qwen3.8-flash` Function Calling 启动预检返回 `transport_error`。
+- Failsafe 1 test、0 failures、1 error、0 skipped；E2E 6.025 秒、Maven 24.792 秒。
+- 本轮未进入 workflow、AgentScope 角色执行或 completion 工具，不能验证完成协议修复；未重试或启动后三场景。
+- `target/e2e-evidence/happy-path/{summary.json,failure-summary.json}` 已保存脱敏证据；Docker healthy，无 Maven/E2E/pytest/pip/tmux 残留。Task 8 保持未完成。
+
+## 2026-10-25 模型预检可靠性修复与非 E2E 门禁
+
+- 模型预检增加稳定失败分类、最多一次有限恢复、250ms 退避和逐次脱敏证据；HTTP 4xx、响应解析及缺少 Function Calling 等不可恢复结果不重试。
+- E2E Driver 启动失败证据新增 attempt、failure type、retryable、elapsed、endpoint host、HTTP status、exception class 和完整脱敏 attempts。
+- 独立真实最小探针通过：DashScope `qwen3.8-flash` attempt 1、HTTP 200、4797ms；未启动 workflow 或 E2E。
+- 聚焦 67 项、`mvn verify` 409 项、零模型真实 Docker 契约 1 IT 全部通过。
+- 本轮按要求未运行 E2E，Task 8 保持未完成。
+
+## 2026-10-25 模型预检修复后单次真实 E2E
+
+- 只运行一次干净 `happy-path`；`qwen3.8-flash` 预检 attempt 1、HTTP 200、2692ms，通过后进入真实 workflow。
+- checkpoint、产品设计、技术设计全部 SUCCEEDED；RD 已生成代码、前端与测试，入口唯一为 `code/main.py`。
+- RD 最终明确记录“尚未执行 `run_project_tests`，下次唤醒继续”，随后普通文本退出；Java 没有把“未尝试完成协议”提升为失败或安排 continuation。
+- Driver 以 execution、mailbox、dispatch、AgentScope 和 Test Runner 证据判定 `CODE_IMPLEMENTATION/RUNNING` 真孤儿；E2E 869.3s、Maven 14:49。
+- MCP 全 CLOSED/0 failures，shutdown 将未终态 execution 持久化为 CANCELLED；未重试或启动后三场景，Task 8 保持未完成。
+
+## 2026-10-25 Owner 回合未终态修复
+
+- Owner 领取并启动协调任务即产生 completion obligation；成功 `task_done` 解除，普通文本退出则生成 `OWNER_EXITED_WITH_RUNNING_EXECUTION`。
+- Runner 将该类型写入 incident；第一次保持原 stage/Owner/execution 并唤醒原 Owner，第二次同类失败 BLOCKED，重复上报幂等。
+- 恢复任务显式携带 `failure_type` 与 `protocol=agent_execution_failed`，不依赖模型自行请求 clarification。
+- 聚焦 63 项、默认回归 410 项、零模型真实 Docker 契约 1 IT 通过；未运行真实 E2E，Task 8 保持未完成。

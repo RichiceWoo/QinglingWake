@@ -46,6 +46,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -163,6 +164,20 @@ class TeamAgentFactoryTest {
             );
         } finally {
             agents.values().forEach(HarnessAgent::close);
+        }
+    }
+
+    /** coordinated STANDARD 的空任务仓库必须支持 Gateway 诊断、会话取消和关闭。 */
+    @Test
+    void shouldAdaptMissingTaskRepositoryAsEmptyChildTaskRuntime() {
+        TeamAgentFactory standardFactory = profileFactory(WorkflowProfile.STANDARD);
+        Map<String, HarnessAgent> agents = standardFactory.createAll();
+
+        assertThat(agents.values()).allSatisfy(agent -> assertThat(agent.getTaskRepository()).isNull());
+        try (AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(agents)) {
+            assertThat(gateway.activeExecutionDiagnostics()).isEmpty();
+            assertThatCode(() -> gateway.clearSession("rd", "team-rd", "session-no-subagent"))
+                    .doesNotThrowAnyException();
         }
     }
 

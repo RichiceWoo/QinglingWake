@@ -211,7 +211,9 @@ public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentG
                             "project_id", current.projectId(),
                             "execution_id", execution.executionId(),
                             "stage", execution.stage().name(),
-                            "subject", "恢复当前阶段工具执行"
+                            "failure_type", failureType,
+                            "protocol", "agent_execution_failed",
+                            "subject", "恢复当前阶段执行"
                     ), now
             ), now);
             changed = changed.enqueue(OutboxAction.pending(

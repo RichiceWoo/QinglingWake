@@ -406,7 +406,16 @@ public final class CoordinatedWorkflowToolCoordinator implements WorkflowToolCoo
     private static WorkCompletionDecision decision(Map<?, ?> values, WorkflowStage stage) {
         String raw = optionalText(findValue(values, "decision"));
         if (!raw.isBlank()) {
-            return WorkCompletionDecision.valueOf(raw.toUpperCase(Locale.ROOT));
+            try {
+                return WorkCompletionDecision.valueOf(raw.toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException invalidDecision) {
+                throw new IllegalArgumentException(
+                        "decision 非法；允许值仅为 ACCEPTED 或 DEFECT_FOUND。"
+                                + "PM/RD 正常完成必须使用 ACCEPTED；"
+                                + "DEFECT_FOUND 仅用于 QA 真实测试发现缺陷",
+                        invalidDecision
+                );
+            }
         }
         boolean qaDefect = stage == WorkflowStage.QA_TEST_EXECUTION
                 && (findValue(values, "defects") != null

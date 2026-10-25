@@ -5,6 +5,7 @@ import cn.org.chris.wake.domain.model.MailMessage;
 import cn.org.chris.wake.domain.model.MailStatus;
 import cn.org.chris.wake.infra.persistence.mailbox.FileMailboxRepository;
 import cn.org.chris.wake.infra.persistence.workspace.FileWorkspaceRepository;
+import cn.org.chris.wake.infra.agentscope.CompletionProtocolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
@@ -40,6 +41,9 @@ class CommonTeamToolsCoordinatedTest {
     /** 记录 runtime v2 窄端口调用的测试协调器。 */
     private RecordingCoordinator coordinator;
 
+    /** 与 Gateway 共享、用于断言领取和完成边界的协议注册表。 */
+    private CompletionProtocolRegistry completionProtocolRegistry;
+
     /** 待测 PM 公共工具。 */
     private CommonTeamTools tools;
 
@@ -50,9 +54,11 @@ class CommonTeamToolsCoordinatedTest {
         workspaceRepository.initializeProject(PROJECT_ID);
         mailboxService = new MailboxService(new FileMailboxRepository(workspaceRoot, objectMapper));
         coordinator = new RecordingCoordinator();
+        completionProtocolRegistry = new CompletionProtocolRegistry();
         tools = new CommonTeamTools(
                 "pm", mailboxService, workspaceRepository,
-                (role, projectId) -> "unused-wake", objectMapper, null, coordinator
+                (role, projectId) -> "unused-wake", objectMapper, null, coordinator,
+                completionProtocolRegistry
         );
     }
 
@@ -74,6 +80,9 @@ class CommonTeamToolsCoordinatedTest {
                 .build();
 
         JsonNode inbox = objectMapper.readTree(tools.readInbox(PROJECT_ID, context));
+        assertThat(completionProtocolRegistry.pending("pm", "session-product"))
+                .get().extracting(CompletionProtocolRegistry.Expectation::projectId)
+                .isEqualTo(PROJECT_ID);
         JsonNode completed = objectMapper.readTree(tools.sendMail(
                 "manager", "task_done", "产品设计完成",
                 Map.of(
@@ -95,6 +104,7 @@ class CommonTeamToolsCoordinatedTest {
         assertThat(completed.path("legacy_mail_sent").asBoolean()).isFalse();
         assertThat(assignment.status()).isEqualTo(MailStatus.DONE);
         assertThat(mailboxService.readInbox(PROJECT_ID, "manager")).isEmpty();
+        assertThat(completionProtocolRegistry.pending("pm", "session-product")).isEmpty();
     }
 
     /**
@@ -124,6 +134,44 @@ class CommonTeamToolsCoordinatedTest {
         assertThat(coordinator.completions.get(0)).isEqualTo(coordinator.completions.get(1));
     }
 
+    /** task_done 首次拒绝应登记在当前 session，成功纠错后必须立即清除。 */
+    @Test
+    void shouldTrackUnresolvedCompletionRejectionUntilSuccessfulRetry() throws Exception {
+        CompletionProtocolRegistry registry = new CompletionProtocolRegistry();
+        tools = new CommonTeamTools(
+                "pm", mailboxService, new FileWorkspaceRepository(workspaceRoot),
+                (role, projectId) -> "unused-wake", objectMapper, null, coordinator, registry
+        );
+        RuntimeContext context = RuntimeContext.builder()
+                .userId("pm")
+                .sessionId("session-retry")
+                .build();
+        Map<String, Object> content = Map.of(
+                "execution_id", "work-product",
+                "artifacts", List.of("design/product_spec.md"),
+                "decision", "ACCEPTED",
+                "rationale", "完成"
+        );
+        coordinator.rejectCompletion = true;
+
+        JsonNode rejected = objectMapper.readTree(tools.sendMail(
+                "manager", "task_done", "完成", content, PROJECT_ID, context
+        ));
+
+        assertThat(rejected.path("errcode").asInt()).isEqualTo(1);
+        assertThat(registry.unresolved("pm", "session-retry"))
+                .get().extracting(CompletionProtocolRegistry.Rejection::projectId)
+                .isEqualTo(PROJECT_ID);
+
+        coordinator.rejectCompletion = false;
+        JsonNode accepted = objectMapper.readTree(tools.sendMail(
+                "manager", "task_done", "完成", content, PROJECT_ID, context
+        ));
+
+        assertThat(accepted.path("errcode").asInt()).isZero();
+        assertThat(registry.unresolved("pm", "session-retry")).isEmpty();
+    }
+
     /** 记录工具调用并返回稳定有限结果的 runtime v2 测试协调器。 */
     private static final class RecordingCoordinator implements WorkflowToolCoordinator {
 
@@ -132,6 +180,9 @@ class CommonTeamToolsCoordinatedTest {
 
         /** 已收到的结构化完成正文。 */
         private final List<Map<?, ?>> completions = new ArrayList<>();
+
+        /** 控制测试协调器是否拒绝本次完成提交。 */
+        private boolean rejectCompletion;
 
         /** 测试协调器允许创建 runtime v2 项目。 */
         @Override
@@ -174,6 +225,9 @@ class CommonTeamToolsCoordinatedTest {
                 String subject,
                 Object content
         ) {
+            if (rejectCompletion) {
+                throw new IllegalArgumentException("模拟完成协议拒绝");
+            }
             completions.add((Map<?, ?>) content);
             return Map.of("execution_id", content instanceof Map<?, ?> values
                     ? values.get("execution_id") : "");

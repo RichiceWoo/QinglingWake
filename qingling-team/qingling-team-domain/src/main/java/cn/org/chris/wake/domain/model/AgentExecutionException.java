@@ -47,6 +47,12 @@ public final class AgentExecutionException extends IllegalStateException {
         /** 没有运行中子任务时父 Agent 自身会话日志超过租约窗口没有进展。 */
         PARENT_STALLED,
 
+        /** task_done 被权威协调器拒绝后，父 Agent 未修正调用却尝试正常结束回合。 */
+        COMPLETION_PROTOCOL_REJECTED,
+
+        /** Owner 已领取运行中 execution，但未尝试成功完成协议便正常结束父回合。 */
+        OWNER_EXITED_WITH_RUNNING_EXECUTION,
+
         /** MCP 调用结果不可判定，运行时已尝试受控重建且禁止重放原命令。 */
         MCP_CONNECTION_UNAVAILABLE
     }

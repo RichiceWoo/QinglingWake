@@ -7,14 +7,19 @@ import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.URI;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.net.ssl.SSLHandshakeException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -116,7 +121,7 @@ class ModelAvailabilitySelectorTest {
                 .hasMessageNotContaining("test-api-key");
     }
 
-    /** 探测传输抛出的异常即使携带密钥，也只能转换为脱敏失败状态。 */
+    /** 客户端运行时异常即使携带密钥，也只能转换为不可重试的脱敏失败状态。 */
     @Test
     void shouldNotLeakApiKeyFromProbeFailure() {
         ModelAvailabilitySelector selector = new ModelAvailabilitySelector((endpoint, apiKey, model, timeout) -> {
@@ -127,8 +132,136 @@ class ModelAvailabilitySelectorTest {
                 true, "qwen3.8-max", List.of("qwen3.8-27b")
         )))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("transport_error")
+                .hasMessageContaining("client_failure")
                 .hasMessageNotContaining("test-api-key");
+    }
+
+    /** 首次 5xx 后只允许额外探测一次，第二次成功时应保留两次结构化证据。 */
+    @Test
+    void shouldRetryRetryableProbeFailureOnceAndThenSucceed() {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicInteger sleeps = new AtomicInteger();
+        ModelAvailabilitySelector selector = new ModelAvailabilitySelector(
+                (endpoint, apiKey, model, timeout) -> calls.incrementAndGet() == 1
+                        ? new ModelAvailabilitySelector.ProbeResult(false, "http_5xx", true, 503, null)
+                        : new ModelAvailabilitySelector.ProbeResult(true, "available", false, 200, null),
+                ignored -> sleeps.incrementAndGet()
+        );
+
+        ModelAvailabilitySelector.Selection selection = selector.select(agent(false, "qwen3.8-flash", null));
+
+        assertThat(calls).hasValue(2);
+        assertThat(sleeps).hasValue(1);
+        assertThat(selection.attempts()).extracting(ModelAvailabilitySelector.Attempt::status)
+                .containsExactly("http_5xx", "available");
+        assertThat(selection.attempts()).extracting(ModelAvailabilitySelector.Attempt::attempt)
+                .containsExactly(1, 2);
+    }
+
+    /** 确定性 4xx 不得触发重试，避免重复发送无效请求。 */
+    @Test
+    void shouldNotRetryNonRetryableHttpFailure() {
+        AtomicInteger calls = new AtomicInteger();
+        ModelAvailabilitySelector selector = new ModelAvailabilitySelector((endpoint, apiKey, model, timeout) -> {
+            calls.incrementAndGet();
+            return new ModelAvailabilitySelector.ProbeResult(false, "http_4xx", false, 404, null);
+        });
+
+        assertThatThrownBy(() -> selector.select(agent(false, "missing-model", null)))
+                .isInstanceOf(ModelAvailabilitySelector.ModelProbeException.class)
+                .satisfies(failure -> assertThat(
+                        ((ModelAvailabilitySelector.ModelProbeException) failure).attempts()
+                ).hasSize(1));
+        assertThat(calls).hasValue(1);
+    }
+
+    /** 连续传输超时必须在第二次后停止，并保留可重试分类与异常类名。 */
+    @Test
+    void shouldStopAfterSecondRetryableTimeout() {
+        AtomicInteger calls = new AtomicInteger();
+        ModelAvailabilitySelector selector = new ModelAvailabilitySelector(
+                (endpoint, apiKey, model, timeout) -> {
+                    calls.incrementAndGet();
+                    throw new HttpTimeoutException("sensitive-timeout-detail");
+                },
+                ignored -> { }
+        );
+
+        assertThatThrownBy(() -> selector.select(agent(false, "qwen3.8-flash", null)))
+                .isInstanceOf(ModelAvailabilitySelector.ModelProbeException.class)
+                .satisfies(failure -> {
+                    List<ModelAvailabilitySelector.Attempt> attempts =
+                            ((ModelAvailabilitySelector.ModelProbeException) failure).attempts();
+                    assertThat(attempts).hasSize(2);
+                    assertThat(attempts).extracting(ModelAvailabilitySelector.Attempt::status)
+                            .containsOnly("request_timeout");
+                    assertThat(attempts).extracting(ModelAvailabilitySelector.Attempt::exceptionClass)
+                            .containsOnly("HttpTimeoutException");
+                })
+                .hasMessageNotContaining("sensitive-timeout-detail");
+        assertThat(calls).hasValue(2);
+    }
+
+    /** DNS 与连接拒绝必须使用不同稳定分类，且不得暴露底层异常正文。 */
+    @Test
+    void shouldClassifyDnsAndConnectFailuresSeparately() {
+        ModelAvailabilitySelector dnsSelector = new ModelAvailabilitySelector(
+                (endpoint, apiKey, model, timeout) -> {
+                    throw new UnknownHostException("secret-dns-detail");
+                },
+                ignored -> { }
+        );
+        ModelAvailabilitySelector connectSelector = new ModelAvailabilitySelector(
+                (endpoint, apiKey, model, timeout) -> {
+                    throw new ConnectException("secret-connect-detail");
+                },
+                ignored -> { }
+        );
+
+        assertProbeFailure(dnsSelector, "dns_failure", "UnknownHostException", "secret-dns-detail");
+        assertProbeFailure(connectSelector, "connect_failure", "ConnectException", "secret-connect-detail");
+    }
+
+    /** TLS 包装异常即使含有更深层 cause，也必须保持 TLS 分类。 */
+    @Test
+    void shouldPreserveTlsClassificationAcrossWrappedCause() {
+        ModelAvailabilitySelector selector = new ModelAvailabilitySelector(
+                (endpoint, apiKey, model, timeout) -> {
+                    SSLHandshakeException tlsFailure = new SSLHandshakeException("secret-tls-detail");
+                    tlsFailure.initCause(new IllegalArgumentException("certificate-detail"));
+                    throw tlsFailure;
+                },
+                ignored -> { }
+        );
+
+        assertProbeFailure(selector, "tls_failure", "SSLHandshakeException", "secret-tls-detail");
+    }
+
+    /** 未知客户端运行时错误必须归为不可重试故障，避免掩盖本地编程错误。 */
+    @Test
+    void shouldNotRetryUnexpectedClientFailure() {
+        AtomicInteger calls = new AtomicInteger();
+        ModelAvailabilitySelector selector = new ModelAvailabilitySelector(
+                (endpoint, apiKey, model, timeout) -> {
+                    calls.incrementAndGet();
+                    throw new IllegalStateException("secret-client-detail");
+                },
+                ignored -> { }
+        );
+
+        assertThatThrownBy(() -> selector.select(agent(false, "qwen3.8-flash", null)))
+                .isInstanceOf(ModelAvailabilitySelector.ModelProbeException.class)
+                .satisfies(failure -> {
+                    List<ModelAvailabilitySelector.Attempt> attempts =
+                            ((ModelAvailabilitySelector.ModelProbeException) failure).attempts();
+                    assertThat(attempts).singleElement().satisfies(attempt -> {
+                        assertThat(attempt.status()).isEqualTo("client_failure");
+                        assertThat(attempt.retryable()).isFalse();
+                        assertThat(attempt.exceptionClass()).isEqualTo("IllegalStateException");
+                    });
+                })
+                .hasMessageNotContaining("secret-client-detail");
+        assertThat(calls).hasValue(1);
     }
 
     /** 本地 Stub 应收到标准路径、Bearer Header 和不含 DashScope 专用字段的请求。 */
@@ -199,6 +332,34 @@ class ModelAvailabilitySelectorTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    /**
+     * 断言异常被转换为指定稳定分类，且原始敏感正文不会进入异常消息。
+     *
+     * @param selector 待验证选择器
+     * @param status 预期稳定状态
+     * @param exceptionClass 预期异常简单类名
+     * @param sensitiveText 不得泄露的原始正文
+     */
+    private static void assertProbeFailure(
+            ModelAvailabilitySelector selector,
+            String status,
+            String exceptionClass,
+            String sensitiveText
+    ) {
+        assertThatThrownBy(() -> selector.select(agent(false, "qwen3.8-flash", null)))
+                .isInstanceOf(ModelAvailabilitySelector.ModelProbeException.class)
+                .satisfies(failure -> {
+                    List<ModelAvailabilitySelector.Attempt> attempts =
+                            ((ModelAvailabilitySelector.ModelProbeException) failure).attempts();
+                    assertThat(attempts).hasSize(2);
+                    assertThat(attempts).extracting(ModelAvailabilitySelector.Attempt::status)
+                            .containsOnly(status);
+                    assertThat(attempts).extracting(ModelAvailabilitySelector.Attempt::exceptionClass)
+                            .containsOnly(exceptionClass);
+                })
+                .hasMessageNotContaining(sensitiveText);
     }
 
     /** 创建绑定随机本地端口的无外网 HTTP Stub。 */

@@ -137,6 +137,25 @@ class CoordinatedWorkflowToolCoordinatorTest {
         });
     }
 
+    /** 非法完成结论必须返回全部允许值和角色用法，禁止模型盲猜 Java 枚举。 */
+    @Test
+    void shouldDescribeAllowedCompletionDecisionsWhenDecisionIsInvalid() {
+        assertThatThrownBy(() -> toolCoordinator.complete(
+                PROJECT_ID,
+                "pm",
+                "产品设计完成",
+                Map.of(
+                        "execution_id", EXECUTION_ID,
+                        "artifacts", List.of("design/product_spec.md"),
+                        "decision", "SUCCESS",
+                        "rationale", "产品设计完成"
+                )
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("允许值仅为 ACCEPTED 或 DEFECT_FOUND")
+                .hasMessageContaining("PM/RD 正常完成必须使用 ACCEPTED")
+                .hasMessageContaining("QA 真实测试发现缺陷");
+    }
+
     /** 验证评审回包缺少 review_round_id 时在工具边界直接拒绝。 */
     @Test
     void shouldRequireReviewRoundIdForReviewDone() {

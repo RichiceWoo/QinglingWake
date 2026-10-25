@@ -1,0 +1,133 @@
+package cn.org.chris.wake.infra.agentscope;
+
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * 记录父 Agent 回合内已领取的完成义务与尚未解决的协议拒绝，禁止普通文本静默结束。
+ *
+ * <p>注册表仅保存角色、会话和项目标识，不保存提示词、工具参数、模型输出或异常正文。</p>
+ */
+public final class CompletionProtocolRegistry {
+
+    /** 按角色和 AgentScope session 隔离的本回合完成义务。 */
+    private final ConcurrentHashMap<InvocationKey, Expectation> expectations = new ConcurrentHashMap<>();
+
+    /** 按角色和 AgentScope session 隔离的未解决拒绝记录。 */
+    private final ConcurrentHashMap<InvocationKey, Rejection> rejections = new ConcurrentHashMap<>();
+
+    /**
+     * 开始新父回合时清除同 session 的历史义务与拒绝，避免恢复回合继承旧状态。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     */
+    public void begin(String role, String sessionId) {
+        InvocationKey invocationKey = key(role, sessionId);
+        expectations.remove(invocationKey);
+        rejections.remove(invocationKey);
+    }
+
+    /**
+     * 在 coordinated task_assign 成功绑定为 RUNNING 后登记本回合必须完成该项目。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     * @param projectId 当前项目标识
+     */
+    public void expect(String role, String sessionId, String projectId) {
+        if (blank(role) || blank(sessionId) || blank(projectId)) {
+            return;
+        }
+        expectations.put(key(role, sessionId), new Expectation(projectId));
+    }
+
+    /**
+     * 标记当前回合的 task_done 被 Java 完成协调器拒绝。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     * @param projectId 当前项目标识
+     */
+    public void reject(String role, String sessionId, String projectId) {
+        if (blank(role) || blank(sessionId) || blank(projectId)) {
+            return;
+        }
+        rejections.put(key(role, sessionId), new Rejection(projectId));
+    }
+
+    /**
+     * task_done 成功进入权威协调器后清除本回合义务与拒绝，允许模型正常结束。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     */
+    public void resolve(String role, String sessionId) {
+        InvocationKey invocationKey = key(role, sessionId);
+        expectations.remove(invocationKey);
+        rejections.remove(invocationKey);
+    }
+
+    /**
+     * 查询当前父回合是否仍有未解决的完成协议拒绝。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     * @return 仅包含项目标识的拒绝记录
+     */
+    public Optional<Rejection> unresolved(String role, String sessionId) {
+        return Optional.ofNullable(rejections.get(key(role, sessionId)));
+    }
+
+    /**
+     * 查询当前父回合是否领取了任务但尚未成功提交完成协议。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     * @return 仅包含项目标识的待完成记录
+     */
+    public Optional<Expectation> pending(String role, String sessionId) {
+        return Optional.ofNullable(expectations.get(key(role, sessionId)));
+    }
+
+    /**
+     * 父回合终止后释放注册表条目，避免长期 session 累积内存状态。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     */
+    public void end(String role, String sessionId) {
+        InvocationKey invocationKey = key(role, sessionId);
+        expectations.remove(invocationKey);
+        rejections.remove(invocationKey);
+    }
+
+    /** 判断文本是否缺少可用标识。 */
+    private static boolean blank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    /** 生成角色与 session 的隔离键。 */
+    private static InvocationKey key(String role, String sessionId) {
+        return new InvocationKey(role == null ? "" : role, sessionId == null ? "" : sessionId);
+    }
+
+    /** 表示一次父回合尚未修正的完成协议拒绝。 */
+    public record Rejection(
+            /** 发生拒绝的项目标识。 */ String projectId
+    ) {
+    }
+
+    /** 表示父回合已领取但尚未通过 task_done 完成的 coordinated 项目。 */
+    public record Expectation(
+            /** 等待当前 Owner 完成的项目标识。 */ String projectId
+    ) {
+    }
+
+    /** 表示不会跨角色或跨 session 传播的注册表键。 */
+    private record InvocationKey(
+            /** 当前团队角色。 */ String role,
+            /** AgentScope session 标识。 */ String sessionId
+    ) {
+    }
+}

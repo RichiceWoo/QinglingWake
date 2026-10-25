@@ -200,7 +200,7 @@
 - [x] Task 7：profile、模板和去子 Agent 测试。覆盖 SIMPLE/STANDARD/STRICT 固定迁移、运行中不可换档、真实项目入口初始化 v2、SIMPLE 角色裁剪、SIMPLE/STANDARD 无子 Agent 工具、STRICT 保留子 Agent，以及生命周期 heartbeat 角色集合。
 - [x] Task 8：固定验收契约、Driver 和 L0～L2。Harness fixture 8 项、Driver v2 直接诊断、QA 独立 runner 与零模型 STANDARD 全链均已覆盖。
 - [x] Task 9 非 E2E：完整非 E2E 门禁通过，已暂停等待用户二次授权。
-- [ ] Task 9 真实 E2E：尚未授权、尚未执行。
+- [ ] Task 9 真实 E2E：已授权并执行一次 `happy-path`，启动阶段失败，尚未完成。
 
 ## 7. 计划验证命令
 
@@ -245,3 +245,22 @@ git diff --check
 | 2026-10-25 | Task 9 | `mvn -Pcontract-it -pl qingling-team-starter -am -Dit.test=CoordinatedWorkflowContractIT -Dfailsafe.failIfNoSpecifiedTests=false verify` | 394 项单元回归及 coordinated IT 1 项通过，BUILD SUCCESS，27.483s；STANDARD 全链无模型/无网络并收敛 execution/outbox/mailbox/Cron |
 | 2026-10-25 | Task 9 | 最终 `mvn verify` | domain 72、app 61、infra 159、adapter 13、starter 89，共 394 项通过，0 failure/error/skip，BUILD SUCCESS，18.805s |
 | 2026-10-25 | Task 9 | `git diff --check` 与宿主/容器进程复核 | 通过；无 pending tool，未发现 pytest/pip/tmux/Maven/E2E 孤儿；未 source E2E 凭据、未调用真实模型、未运行真实 E2E |
+| 2026-10-25 | Task 9 | `mvn -Pe2e -De2e.scenario=happy-path verify`（仅一次） | 失败：Failsafe 1 test、0 failures、1 error、0 skipped，E2E 7.139s，Maven 26.359s。Spring 创建 Gateway 时对禁用 Sub-Agent 的 HarnessAgent 空 TaskRepository 调用 `TaskSemanticsRegistry.forRepository`，报 `NullPointerException: repository 不能为空`；phase=startup，显式模型 `qwen3.8-flash`。未进入业务 workflow 或角色模型调用，未重试；finally 保存脱敏 summary，宿主/容器无孤儿进程 |
+| 2026-10-25 | Task 9 启动缺陷修复 | `mvn -pl qingling-team-starter -am -Dtest=TeamAgentFactoryTest,RuntimeBootstrapTest -Dsurefire.failIfNoSpecifiedTests=false test` | `TeamAgentFactoryTest` 11 项、`RuntimeBootstrapTest` 15 项通过，BUILD SUCCESS，14.525s；覆盖无 TaskRepository 的空诊断/取消/关闭以及真实 Spring + HarnessAgent coordinated STANDARD 启动 |
+| 2026-10-25 | Task 9 启动缺陷修复 | `mvn verify` | domain 72、app 61、infra 160、adapter 13、starter 90，共 396 项通过，0 failure/error/skip，BUILD SUCCESS，27.491s；未运行真实 E2E |
+| 2026-10-25 | Task 9 修复后单次 E2E | `mvn -Pe2e -De2e.scenario=happy-path verify` | 失败：1 E2E、1 failure、0 errors、0 skipped，E2E 1054s，Maven 17:52。Driver 在 Manager 正处理 RD 完成消息时，仅因 RD dispatch/AgentScope 已空闲就把 `TECH_DESIGN/RUNNING` 判为孤儿；48 秒后真实状态已迁移为 `TECH_DESIGN/SUCCEEDED → CODE_IMPLEMENTATION/RD`。四路 MCP 均 CLOSED/0 failures；未重试、未启动后三场景 |
+| 2026-10-25 | Manager 完成交接诊断修复 | `mvn -pl qingling-team-starter -am -Dtest=RealTeamE2EDriverTest -Dsurefire.failIfNoSpecifiedTests=false test` | 36 项通过，BUILD SUCCESS，2.511s；覆盖完全匹配交接放行、execution 错配拒绝、5 分 30 秒宽限耗尽后恢复孤儿诊断 |
+| 2026-10-25 | Manager 完成交接诊断修复 | `mvn verify` | domain 72、app 61、infra 160、adapter 13、starter 93，共 399 项通过，0 failure/error/skip，BUILD SUCCESS，18.542s；未运行真实 E2E |
+| 2026-10-25 | 交接诊断修复后单次 E2E | `mvn -Pe2e -De2e.scenario=happy-path verify` | 失败：1 E2E、1 failure、0 errors、0 skipped，E2E 500.7s，Maven 8:40。PM 产物已生成，但 `task_done.content.decision` 连续使用非法 `WorkCompletionDecision` 值且错误未返回允许值，模型退出后留下 `PRODUCT_DESIGN/RUNNING` 真孤儿；四路 MCP CLOSED/0 failures。未重试、未启动后三场景，shutdown 后无孤儿进程 |
+| 2026-10-25 | 完成协议修复聚焦测试 | `mvn -pl qingling-team-starter -am -Dtest=RoleToolkitFactoryTest,CommonTeamToolsCoordinatedTest,AgentScopeAgentGatewayTest,CoordinatedWorkflowToolCoordinatorTest,RuntimeBootstrapTest -Dsurefire.failIfNoSpecifiedTests=false test` | infra 30、starter 20，共 50 项通过；覆盖 schema 值域、非法枚举诊断、拒绝登记/成功清除、静默退出类型化失败与 Spring 接线，BUILD SUCCESS，14.627s |
+| 2026-10-25 | 完成协议修复默认回归 | `mvn verify` | domain 72、app 61、infra 162、adapter 13、starter 94，共 402 项通过，0 failure/error/skip，BUILD SUCCESS，21.789s；未运行 E2E |
+| 2026-10-25 | E2E 前零模型门禁 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 通过：1 IT、0 failure/error/skip，真实 Docker 测试 18.13s，Maven 39.936s |
+| 2026-10-25 | 完成协议修复后单次 E2E | `mvn -Pe2e -De2e.scenario=happy-path verify` | 失败：1 E2E、0 failures、1 error、0 skipped，E2E 6.025s，Maven 24.792s；显式 DashScope `qwen3.8-flash` Function Calling 预检返回 `transport_error`，phase=startup，未进入 workflow/Agent/完成协议路径；未重试或启动后三场景，证据已脱敏保存且无孤儿进程 |
+| 2026-10-25 | 模型预检聚焦回归 | `mvn -pl qingling-team-starter -am -Dtest=ModelAvailabilitySelectorTest,RealTeamE2EDriverTest,RuntimeBootstrapTest -Dsurefire.failIfNoSpecifiedTests=false test` | 67 项通过，0 failure/error/skip，10.835s；覆盖分类、有限重试、未知客户端错误不重试、TLS cause chain、证据脱敏与 Driver 启动摘要 |
+| 2026-10-25 | 独立最小 Function Calling 探针 | `mvn -Pmodel-probe -Dtest=__NoUnitTests__ -Dsurefire.failIfNoSpecifiedTests=false -Dit.test=RealModelFunctionCallingProbeIT verify` | `qwen3.8-flash` attempt 1、HTTP 200、available，探针 5.012s、Maven 8.431s；未启动 E2E/workflow |
+| 2026-10-25 | 模型预检修复默认回归 | `mvn verify` | 409 项通过，0 failure/error/skip，18.601s |
+| 2026-10-25 | 模型预检修复零模型 Docker 契约 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 1 IT 通过，0 failure/error/skip；IT 18.31s、Maven 37.054s；NoCallModel，不调用百炼 |
+| 2026-10-25 | 模型预检修复后单次 E2E | `mvn -Pe2e -De2e.scenario=happy-path verify` | 失败：1 failure、0 errors、0 skipped；E2E 869.3s、Maven 14:49。模型预检 attempt 1/HTTP 200；checkpoint、产品、技术设计成功，RD 代码落盘后未调用 `run_project_tests` 或 `task_done`，以“下次唤醒继续”的普通文本退出，留下 `CODE_IMPLEMENTATION/RUNNING` 真孤儿；MCP 全 CLOSED，未重试或启动后三场景 |
+| 2026-10-25 | Owner 未终态类型化失败聚焦测试 | 定向 Maven 测试 | 通过 63 项，16.025s；覆盖登记/解除义务、`OWNER_EXITED_WITH_RUNNING_EXECUTION`、原 Owner attempt=2 continuation、第二次同类失败 BLOCKED 与 incident 幂等 |
+| 2026-10-25 | Owner 未终态修复默认回归 | `mvn verify` | 通过 410 项，23.491s；domain 72、app 61、infra 163、adapter 13、starter 101，0 failure/error/skip；未运行 E2E |
+| 2026-10-25 | Owner 未终态修复零模型 Docker 契约 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 410 unit + 1 IT 通过，36.849s；10 次 Shell、5 次 Test Runner、受控连接恢复和无 pytest/pip/tmux orphan；NoCallModel，未运行 E2E |

@@ -10,6 +10,7 @@ import cn.org.chris.wake.domain.model.AgentExecutionException;
 import cn.org.chris.wake.infra.agentscope.ProjectTestAgentTool;
 import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
 import cn.org.chris.wake.infra.agentscope.RegistryProjectTestEvidenceRepository;
+import cn.org.chris.wake.infra.agentscope.CompletionProtocolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.tool.Toolkit;
 
@@ -79,6 +80,9 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
     /** 将 coordinated 工具调用桥接到 app 层原子协调器的窄端口。 */
     private final WorkflowToolCoordinator workflowToolCoordinator;
 
+    /** 与 Agent Gateway 共享的未解决完成协议拒绝注册表。 */
+    private final CompletionProtocolRegistry completionProtocolRegistry;
+
     /**
      * 创建角色 Toolkit 工厂。
      *
@@ -130,7 +134,7 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
         this(
                 mailboxService, workspaceRepository, wakeScheduler, eventService,
                 senderGateway, imageAndSearchTools, objectMapper, workflowToolCoordinator,
-                new ProjectTestExecutionRegistry()
+                new ProjectTestExecutionRegistry(), new CompletionProtocolRegistry()
         );
     }
 
@@ -158,6 +162,39 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
             WorkflowToolCoordinator workflowToolCoordinator,
             ProjectTestExecutionRegistry projectTestExecutionRegistry
     ) {
+        this(
+                mailboxService, workspaceRepository, wakeScheduler, eventService,
+                senderGateway, imageAndSearchTools, objectMapper, workflowToolCoordinator,
+                projectTestExecutionRegistry, new CompletionProtocolRegistry()
+        );
+    }
+
+    /**
+     * 创建同时共享 Test Runner 与完成协议状态的生产 Toolkit 工厂。
+     *
+     * @param mailboxService 邮箱领域服务
+     * @param workspaceRepository 共享工作区端口
+     * @param wakeScheduler 邮件唤醒用例
+     * @param eventService 事件领域服务
+     * @param senderGateway 可为空的人类出站端口
+     * @param imageAndSearchTools 图片和搜索工具实例
+     * @param objectMapper JSON 编解码器
+     * @param workflowToolCoordinator runtime v2 工具协调端口
+     * @param projectTestExecutionRegistry 真实 Test Runner 共享执行账本
+     * @param completionProtocolRegistry 与 Gateway 共享的完成协议状态
+     */
+    public RoleToolkitFactory(
+            MailboxService mailboxService,
+            WorkspaceRepository workspaceRepository,
+            CommonTeamTools.MailWakeScheduler wakeScheduler,
+            EventService eventService,
+            SenderGateway senderGateway,
+            ImageAndSearchTools imageAndSearchTools,
+            ObjectMapper objectMapper,
+            WorkflowToolCoordinator workflowToolCoordinator,
+            ProjectTestExecutionRegistry projectTestExecutionRegistry,
+            CompletionProtocolRegistry completionProtocolRegistry
+    ) {
         this.mailboxService = Objects.requireNonNull(mailboxService, "mailboxService 不能为空");
         this.workspaceRepository = Objects.requireNonNull(workspaceRepository, "workspaceRepository 不能为空");
         this.wakeScheduler = Objects.requireNonNull(wakeScheduler, "wakeScheduler 不能为空");
@@ -170,6 +207,9 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
         );
         this.projectTestExecutionRegistry = Objects.requireNonNull(
                 projectTestExecutionRegistry, "projectTestExecutionRegistry 不能为空"
+        );
+        this.completionProtocolRegistry = Objects.requireNonNull(
+                completionProtocolRegistry, "completionProtocolRegistry 不能为空"
         );
         this.workflowTools = new DeterministicWorkflowTools(
                 eventService,
@@ -206,7 +246,7 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(new CommonTeamTools(
                 role, mailboxService, workspaceRepository, wakeScheduler, objectMapper,
-                workflowTools, workflowToolCoordinator
+                workflowTools, workflowToolCoordinator, completionProtocolRegistry
         ));
         if ("manager".equals(role)) {
             toolkit.registerTool(new ManagerTeamTools(

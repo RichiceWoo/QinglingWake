@@ -3,6 +3,7 @@ package cn.org.chris.wake.starter.e2e;
 import cn.org.chris.wake.app.runner.SerialDispatchRegistry;
 import cn.org.chris.wake.domain.model.CronJob;
 import cn.org.chris.wake.infra.agentscope.AgentScopeAgentGateway;
+import cn.org.chris.wake.starter.config.ModelAvailabilitySelector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -70,13 +71,95 @@ class RealTeamE2EDriverTest {
                 """);
 
         String reason = RealTeamE2EDriver.orphanExecutionReason(
-                runtime, Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(0, null)),
+                runtime, List.of(),
+                Map.of("team:rd", new SerialDispatchRegistry.DispatchSnapshot(0, null)),
                 List.of(), Instant.parse("2026-10-25T00:00:21Z"), Duration.ofSeconds(20)
         );
 
         assertThat(reason)
                 .contains("work-rd-3", "CODE_IMPLEMENTATION", "owner=rd", "status=RUNNING",
                         "dispatch_active=false", "agentscope_active=false");
+    }
+
+    /** 精确匹配同一 execution 的进行中 assignment 与活跃 Manager 时必须给予完成交接机会。 */
+    @Test
+    void shouldAllowMatchingManagerCompletionHandoff() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode runtime = objectMapper.readTree("""
+                {"project_id":"todo-mvp","executions":[{"execution_id":"work-tech-3",
+                 "project_id":"todo-mvp","stage":"TECH_DESIGN","owner":"rd",
+                 "status":"RUNNING","last_progress_at":"2026-10-25T00:00:00Z"}]}
+                """);
+        JsonNode assignment = objectMapper.readTree("""
+                {"id":"msg-tech","type":"task_assign","status":"in_progress","to":"rd",
+                 "project_id":"todo-mvp","content":{"execution_id":"work-tech-3",
+                 "stage":"TECH_DESIGN"}}
+                """);
+        Instant now = Instant.parse("2026-10-25T00:06:00Z");
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatch = Map.of(
+                "team:rd", new SerialDispatchRegistry.DispatchSnapshot(0, null),
+                "team:manager", new SerialDispatchRegistry.DispatchSnapshot(1, now.minusSeconds(48))
+        );
+
+        String reason = RealTeamE2EDriver.orphanExecutionReason(
+                runtime, List.of(assignment), dispatch, List.of(), now, Duration.ofSeconds(20)
+        );
+
+        assertThat(reason).isNull();
+    }
+
+    /** Manager 活跃但 assignment 指向其他 execution 时不得遮蔽真实孤儿。 */
+    @Test
+    void shouldRejectMismatchedManagerCompletionHandoff() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode runtime = objectMapper.readTree("""
+                {"project_id":"todo-mvp","executions":[{"execution_id":"work-tech-3",
+                 "project_id":"todo-mvp","stage":"TECH_DESIGN","owner":"rd",
+                 "status":"RUNNING","last_progress_at":"2026-10-25T00:00:00Z"}]}
+                """);
+        JsonNode assignment = objectMapper.readTree("""
+                {"id":"msg-other","type":"task_assign","status":"in_progress","to":"rd",
+                 "project_id":"todo-mvp","content":{"execution_id":"work-other",
+                 "stage":"TECH_DESIGN"}}
+                """);
+        Instant now = Instant.parse("2026-10-25T00:06:00Z");
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatch = Map.of(
+                "team:rd", new SerialDispatchRegistry.DispatchSnapshot(0, null),
+                "team:manager", new SerialDispatchRegistry.DispatchSnapshot(1, now.minusSeconds(48))
+        );
+
+        String reason = RealTeamE2EDriver.orphanExecutionReason(
+                runtime, List.of(assignment), dispatch, List.of(), now, Duration.ofSeconds(20)
+        );
+
+        assertThat(reason).contains("work-tech-3", "TECH_DESIGN", "owner=rd");
+    }
+
+    /** 精确匹配的 Manager 交接超过有限宽限后仍必须报告孤儿，不能无限续命。 */
+    @Test
+    void shouldExpireMatchingManagerCompletionHandoff() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode runtime = objectMapper.readTree("""
+                {"project_id":"todo-mvp","executions":[{"execution_id":"work-tech-3",
+                 "project_id":"todo-mvp","stage":"TECH_DESIGN","owner":"rd",
+                 "status":"RUNNING","last_progress_at":"2026-10-25T00:00:00Z"}]}
+                """);
+        JsonNode assignment = objectMapper.readTree("""
+                {"id":"msg-tech","type":"task_assign","status":"in_progress","to":"rd",
+                 "project_id":"todo-mvp","content":{"execution_id":"work-tech-3",
+                 "stage":"TECH_DESIGN"}}
+                """);
+        Instant now = Instant.parse("2026-10-25T00:10:00Z");
+        Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatch = Map.of(
+                "team:rd", new SerialDispatchRegistry.DispatchSnapshot(0, null),
+                "team:manager", new SerialDispatchRegistry.DispatchSnapshot(1, now.minus(Duration.ofMinutes(6)))
+        );
+
+        String reason = RealTeamE2EDriver.orphanExecutionReason(
+                runtime, List.of(assignment), dispatch, List.of(), now, Duration.ofSeconds(20)
+        );
+
+        assertThat(reason).contains("work-tech-3", "TECH_DESIGN", "owner=rd");
     }
 
     /** summary 的 workflow 证据必须包含 profile、policy、execution 计数与 pending outbox。 */
@@ -859,6 +942,34 @@ class RealTeamE2EDriverTest {
                 .contains("model unavailable", "[REDACTED]")
                 .doesNotContain("secret", "abc.def");
         assertThat(evidence.resolve("summary.json")).isRegularFile();
+    }
+
+    /** 启动模型预检失败时应保存尝试序号、分类、耗时和可重试性，不保存异常正文。 */
+    @Test
+    void shouldSaveStructuredModelProbeFailureEvidence() throws Exception {
+        Path evidence = projectRoot.resolve("target/e2e-evidence/happy-path");
+        ModelAvailabilitySelector.Attempt attempt = new ModelAvailabilitySelector.Attempt(
+                "qwen3.8-flash", 2, false, "request_timeout", true, 1234L,
+                "dashscope.aliyuncs.com", null, "HttpTimeoutException"
+        );
+        ModelAvailabilitySelector.ModelProbeException probeFailure =
+                new ModelAvailabilitySelector.ModelProbeException("显式模型探测失败", List.of(attempt));
+
+        RealTeamE2EDriver.saveStartupFailureEvidence(
+                evidence,
+                "happy-path",
+                Instant.parse("2026-10-25T12:00:00Z"),
+                new IllegalStateException("Spring wrapper", probeFailure)
+        );
+
+        JsonNode summary = new ObjectMapper().readTree(evidence.resolve("failure-summary.json").toFile());
+        assertThat(summary.path("probe_attempt").asInt()).isEqualTo(2);
+        assertThat(summary.path("probe_failure_type").asText()).isEqualTo("request_timeout");
+        assertThat(summary.path("probe_retryable").asBoolean()).isTrue();
+        assertThat(summary.path("probe_elapsed_ms").asLong()).isEqualTo(1234L);
+        assertThat(summary.path("probe_endpoint_host").asText()).isEqualTo("dashscope.aliyuncs.com");
+        assertThat(summary.path("probe_exception_class").asText()).isEqualTo("HttpTimeoutException");
+        assertThat(summary.path("model_probe_attempts")).hasSize(1);
     }
 
     /**

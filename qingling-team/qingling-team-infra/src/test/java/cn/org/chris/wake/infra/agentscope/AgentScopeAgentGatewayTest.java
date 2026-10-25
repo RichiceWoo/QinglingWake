@@ -68,6 +68,53 @@ class AgentScopeAgentGatewayTest {
         assertThat(reply.skillsCalled()).containsExactly("code_impl", "self_score");
     }
 
+    /** 未解决的 task_done 拒绝必须把普通父回复转成类型化失败，供 Runner 进入恢复链。 */
+    @Test
+    void shouldRejectSilentParentSuccessAfterCompletionProtocolFailure() {
+        CompletionProtocolRegistry completionRegistry = new CompletionProtocolRegistry();
+        ActivityRuntime runtime = new ActivityRuntime(context -> {
+            completionRegistry.reject("pm", context.getSessionId(), "todo-mvp");
+            return Mono.just(Msg.builder().textContent("产物已完成，但邮件发送失败").build());
+        });
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("pm", runtime), AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                McpSandboxConfiguration.disabled(), Duration.ofMillis(5), Duration.ofMillis(5),
+                Duration.ofSeconds(1), new ModelActivityRegistry(), completionRegistry
+        );
+
+        CompletableFuture<AgentReply> future = gateway.execute(request("pm", "session-completion-rejected"));
+
+        assertFailureType(future, AgentExecutionException.FailureType.COMPLETION_PROTOCOL_REJECTED);
+        assertThat(runtime.cancellations).hasValue(1);
+        assertThat(completionRegistry.unresolved("pm", "session-completion-rejected")).isEmpty();
+    }
+
+    /** 已领取 task_assign 的 Owner 未调用 task_done 就返回时必须形成可恢复的类型化失败。 */
+    @Test
+    void shouldRejectParentSuccessWhileOwnedExecutionRemainsRunning() {
+        CompletionProtocolRegistry completionRegistry = new CompletionProtocolRegistry();
+        ActivityRuntime runtime = new ActivityRuntime(context -> {
+            completionRegistry.expect("rd", context.getSessionId(), "todo-mvp");
+            return Mono.just(Msg.builder().textContent("本轮先结束，下次唤醒继续测试").build());
+        });
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime), AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                McpSandboxConfiguration.disabled(), Duration.ofMillis(5), Duration.ofMillis(5),
+                Duration.ofSeconds(1), new ModelActivityRegistry(), completionRegistry
+        );
+
+        CompletableFuture<AgentReply> future = gateway.execute(request("rd", "session-completion-missing"));
+
+        assertFailureType(
+                future,
+                AgentExecutionException.FailureType.OWNER_EXITED_WITH_RUNNING_EXECUTION
+        );
+        assertThat(runtime.cancellations).hasValue(1);
+        assertThat(completionRegistry.pending("rd", "session-completion-missing")).isEmpty();
+    }
+
     /**
      * 记忆索引调度应收到完整单轮数据，且同步失败不得改变 Agent 主回复。
      */

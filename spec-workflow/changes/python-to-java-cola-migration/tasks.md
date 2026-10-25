@@ -295,6 +295,7 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - [ ] 2026-10-15 仅执行一次上述修复后的显式 `qwen3.8-flash happy-path`，仍未通过：流程正确进入 `CODE_IMPLEMENTATION/RD`，单一 spawn、终态后 continuation、无主动取消和 watchdog lease 恢复均真实生效。首个 Test Runner execution 的容器终态实际为 `FINISHED/exit_code=1`，pytest 32 collected、11 passed、21 failed、coverage 72%，本应交给 RD 修复；Java 却返回 `INFRASTRUCTURE_FAILED/RESULT_UNAVAILABLE/exit_code=null`，并快速写入 RECOVERING、BLOCKED。Driver 直接报告该 incident，没有等待 QA 文件超时。Failsafe 1 failure、0 errors、0 skipped，Maven 29 分 55 秒；未重试或启动后三个场景，清理后无孤儿进程。父 Task 18 保持未完成。
 - [x] 2026-10-25 完成确定性编排专项的非 E2E 前置：runtime v2 单一 WorkExecution/outbox、Java 完成协调、固定 `STANDARD + REQUIRED_ONLY`、SIMPLE/STANDARD 父角色直做、只读 Todo acceptance 与 Driver v2 直接诊断均已接入。相关模块 165 项、最终 `mvn verify` 394 项、修复后真实 Docker/NoCallModel 工具契约 1 IT、coordinated IT 1 项及 `git diff --check` 全部通过；首次工具契约真实暴露并修复 QA fixture 未安装。未 source E2E 凭据、未运行新一轮真实 E2E。
 - [ ] 2026-10-25 真实 E2E 仍受二次授权门禁约束；`happy-path`、`checkpoint-revise`、`qa-defect-rd-fix`、`code-fail-recovery` 尚未在本版本全部通过，Task 18 不得标记完成。
+- [ ] 2026-10-25 用户二次授权后仅执行一次 `qwen3.8-flash happy-path`，在 Spring startup 失败：coordinated STANDARD 禁用 Sub-Agent 后 HarnessAgent 没有 TaskRepository，Gateway 仍无条件绑定 TaskSemanticsRegistry，报 `NullPointerException: repository 不能为空`。Failsafe 1 error、E2E 7.139s、Maven 26.359s；未进入业务 workflow 或角色模型调用，未重试，清理后无孤儿进程。需修复无子任务仓库适配并补真实启动测试，Task 18 保持未完成。
 - [ ] `checkpoint-revise`：等待 happy-path 通过后执行。
 - [ ] `qa-defect-rd-fix`：等待 happy-path 通过后执行。
 - [ ] `code-fail-recovery`：等待 happy-path 通过后执行。
@@ -326,3 +327,34 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - **测试证据**：
 - **Spec-Plan 偏差记录**：
 - **遗留问题**：
+
+- [x] Task 18：修复无 TaskRepository 的空子任务诊断/取消适配并增加真实 Spring 启动测试
+- [ ] Task 18：修复后四条真实 E2E（已执行一次 happy-path，因 Driver 孤儿误判竞态失败，Task 18 保持未完成）
+- [x] Task 18：修复 Manager 完成交接期间的孤儿 execution 误判并完成默认回归
+- [ ] Task 18：交接诊断修复后的真实 E2E（本轮未运行）
+
+- [x] Task 18：交接诊断修复后执行一次干净 `happy-path` 并保存失败证据
+- [x] Task 18：修复 `task_done` 的 `WorkCompletionDecision` 契约可发现性及完成工具失败后的确定性终态
+- [ ] Task 18：修复后四条真实 E2E（最新 happy-path 因 PM 完成协议非法枚举留下真孤儿而失败，未重试）
+
+- [x] Task 18：完成协议修复聚焦 50 项和默认回归 402 项通过
+- [x] Task 18：E2E 前零模型真实 Docker 契约通过，并只执行一次干净 `happy-path`
+- [ ] Task 18：四条真实 E2E（最新 `happy-path` 在模型 Function Calling 启动预检以 `transport_error` 失败，未进入 workflow）
+
+- [x] Task 18：修复模型预检稳定分类、最多一次有限重试和逐次脱敏证据
+- [x] Task 18：独立真实 `qwen3.8-flash` 最小 Function Calling 探针通过
+- [x] Task 18：聚焦 67 项、默认回归 409 项、零模型真实 Docker 契约 1 IT 通过
+- [ ] Task 18：四条真实 E2E（本轮按要求未运行）
+
+- [x] Task 18：模型预检修复后只执行一次干净 `happy-path` 并保存真实失败证据
+- [x] Task 18：确认预检、checkpoint、产品设计、技术设计及 MCP 链路正常
+- [ ] Task 18：修复未调用 Test Runner/完成工具便退出时的 incident 与确定性 continuation
+- [ ] Task 18：四条真实 E2E（最新 `happy-path` 在 CODE_IMPLEMENTATION 形成真孤儿，未重试）
+
+### 2026-10-25 Task 18 Owner 回合未终态修复
+
+- [x] 新增 `OWNER_EXITED_WITH_RUNNING_EXECUTION` 类型化失败并接入 Runner incident
+- [x] 首次失败保持原 stage/Owner/execution，向原 Owner 投递 continuation 并自动 wake
+- [x] 同一 execution 重领后 attempt=2，第二次同类失败 BLOCKED 且不再唤醒
+- [x] 聚焦 63 项、完整默认回归 410 项、零模型真实 Docker 契约 1 IT 通过
+- [ ] Task 18：四条真实 E2E（本轮按要求未运行，保持未完成）

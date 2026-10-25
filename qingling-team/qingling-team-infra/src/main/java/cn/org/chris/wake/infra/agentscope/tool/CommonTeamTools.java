@@ -3,6 +3,7 @@ package cn.org.chris.wake.infra.agentscope.tool;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.MailMessage;
+import cn.org.chris.wake.infra.agentscope.CompletionProtocolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.tool.Tool;
@@ -43,6 +44,9 @@ public final class CommonTeamTools {
     /** coordinated 项目完成、评审和运行时关联的窄协调端口。 */
     private final WorkflowToolCoordinator workflowToolCoordinator;
 
+    /** 与 Gateway 共享的完成义务及未解决协议拒绝注册表。 */
+    private final CompletionProtocolRegistry completionProtocolRegistry;
+
     /**
      * 创建绑定单个团队角色的五个公共工具。
      *
@@ -61,7 +65,7 @@ public final class CommonTeamTools {
     ) {
         this(
                 role, mailboxService, workspaceRepository, wakeScheduler, objectMapper,
-                null, WorkflowToolCoordinator.legacy()
+                null, WorkflowToolCoordinator.legacy(), new CompletionProtocolRegistry()
         );
     }
 
@@ -85,7 +89,7 @@ public final class CommonTeamTools {
     ) {
         this(
                 role, mailboxService, workspaceRepository, wakeScheduler, objectMapper,
-                workflowTools, WorkflowToolCoordinator.legacy()
+                workflowTools, WorkflowToolCoordinator.legacy(), new CompletionProtocolRegistry()
         );
     }
 
@@ -109,6 +113,34 @@ public final class CommonTeamTools {
             DeterministicWorkflowTools workflowTools,
             WorkflowToolCoordinator workflowToolCoordinator
     ) {
+        this(
+                role, mailboxService, workspaceRepository, wakeScheduler, objectMapper,
+                workflowTools, workflowToolCoordinator, new CompletionProtocolRegistry()
+        );
+    }
+
+    /**
+     * 创建同时共享完成义务及协议拒绝状态的 runtime v2 公共工具。
+     *
+     * @param role 当前角色
+     * @param mailboxService 邮箱领域服务
+     * @param workspaceRepository 共享工作区端口
+     * @param wakeScheduler 邮件唤醒调度端口
+     * @param objectMapper JSON 编解码器
+     * @param workflowTools legacy Java 状态机与完成证据门禁
+     * @param workflowToolCoordinator runtime v2 工具协调端口
+     * @param completionProtocolRegistry 与 Gateway 共享的完成协议状态
+     */
+    public CommonTeamTools(
+            String role,
+            MailboxService mailboxService,
+            WorkspaceRepository workspaceRepository,
+            MailWakeScheduler wakeScheduler,
+            ObjectMapper objectMapper,
+            DeterministicWorkflowTools workflowTools,
+            WorkflowToolCoordinator workflowToolCoordinator,
+            CompletionProtocolRegistry completionProtocolRegistry
+    ) {
         if (!MailboxService.TEAM_ROLES.contains(role)) {
             throw new IllegalArgumentException("未知团队角色: " + role);
         }
@@ -120,6 +152,9 @@ public final class CommonTeamTools {
         this.workflowTools = workflowTools;
         this.workflowToolCoordinator = Objects.requireNonNull(
                 workflowToolCoordinator, "workflowToolCoordinator 不能为空"
+        );
+        this.completionProtocolRegistry = Objects.requireNonNull(
+                completionProtocolRegistry, "completionProtocolRegistry 不能为空"
         );
     }
 
@@ -156,14 +191,19 @@ public final class CommonTeamTools {
      */
     @Tool(
             name = "send_mail",
-            description = "向 manager/pm/rd/qa 发送团队邮件并自动唤醒收件角色。",
+            description = "向 manager/pm/rd/qa 发送团队邮件并自动唤醒收件角色。"
+                    + "type=task_done 时 content.decision 只允许 ACCEPTED 或 DEFECT_FOUND："
+                    + "PM/RD 正常完成必须用 ACCEPTED，DEFECT_FOUND 仅用于 QA 真实测试发现缺陷。",
             concurrencySafe = true
     )
     public String sendMail(
             @ToolParam(name = "to", description = "收件角色：manager/pm/rd/qa") String to,
             @ToolParam(name = "type", description = "邮件类型，如 task_done/review_request/clarification_request；流水线分派和澄清答复必须走 advance_workflow") String type,
             @ToolParam(name = "subject", description = "一行邮件标题") String subject,
-            @ToolParam(name = "content", description = "字符串或结构化 JSON 正文") Object content,
+            @ToolParam(name = "content", description = "字符串或结构化 JSON 正文。task_done 必须包含"
+                    + " execution_id、artifacts、rationale、decision；decision 枚举仅为 ACCEPTED 或"
+                    + " DEFECT_FOUND，PM/RD 正常完成使用 ACCEPTED，QA 发现真实缺陷才使用 DEFECT_FOUND")
+            Object content,
             @ToolParam(name = "project_id", description = "小写项目 ID") String projectId,
             RuntimeContext runtimeContext
     ) {
@@ -172,9 +212,22 @@ public final class CommonTeamTools {
             Object normalizedContent = normalizeStructuredContent(type, content);
             if (workflowToolCoordinator.coordinated(checkedProjectId)
                     && ("task_done".equals(type) || "review_done".equals(type))) {
-                return completeCoordinatedMail(
-                        checkedProjectId, to, type, subject, normalizedContent, runtimeContext
-                );
+                try {
+                    String result = completeCoordinatedMail(
+                            checkedProjectId, to, type, subject, normalizedContent, runtimeContext
+                    );
+                    if ("task_done".equals(type)) {
+                        completionProtocolRegistry.resolve(role, sessionId(runtimeContext));
+                    }
+                    return result;
+                } catch (RuntimeException rejection) {
+                    if ("task_done".equals(type)) {
+                        completionProtocolRegistry.reject(
+                                role, sessionId(runtimeContext), checkedProjectId
+                        );
+                    }
+                    throw rejection;
+                }
             }
             if (workflowTools != null) {
                 workflowTools.validateOutgoingMail(checkedProjectId, role, type, normalizedContent);
@@ -212,6 +265,16 @@ public final class CommonTeamTools {
         } catch (RuntimeException exception) {
             return AgentToolSupport.error(objectMapper, exception);
         }
+    }
+
+    /**
+     * 从 AgentScope 上下文读取 session 标识；Java 直接调用没有上下文时返回空串。
+     *
+     * @param runtimeContext 当前工具调用上下文
+     * @return 可用于同回合关联的 session 标识
+     */
+    private static String sessionId(RuntimeContext runtimeContext) {
+        return runtimeContext == null ? "" : Objects.toString(runtimeContext.getSessionId(), "");
     }
 
     /**
@@ -349,6 +412,7 @@ public final class CommonTeamTools {
                 workflowToolCoordinator.claimAndStart(
                         projectId, role, message.id(), message.content(), dispatchId, sessionId
                 );
+                completionProtocolRegistry.expect(role, sessionId, projectId);
             }
         }
     }

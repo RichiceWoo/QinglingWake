@@ -70,6 +70,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
     /** 与角色模型装饰器共享且仅保存活动时间戳的注册表。 */
     private final ModelActivityRegistry modelActivityRegistry;
 
+    /** 与角色工具共享的完成义务及未解决协议拒绝注册表。 */
+    private final CompletionProtocolRegistry completionProtocolRegistry;
+
     /** 检查当前父 session 子任务状态的轮询间隔。 */
     private final Duration childTaskPollInterval;
 
@@ -158,6 +161,28 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
             ModelActivityRegistry modelActivityRegistry
     ) {
         this(
+                agents, memoryIndexer, sandboxConfiguration, modelActivityRegistry,
+                new CompletionProtocolRegistry()
+        );
+    }
+
+    /**
+     * 使用共享模型活动与完成协议注册表创建生产 Gateway。
+     *
+     * @param agents 四角色 HarnessAgent
+     * @param memoryIndexer 非阻塞记忆索引入口
+     * @param sandboxConfiguration AIO-Sandbox 熔断与连接恢复边界
+     * @param modelActivityRegistry 与角色模型装饰器共享的活动注册表
+     * @param completionProtocolRegistry 与角色工具共享的完成协议状态
+     */
+    public AgentScopeAgentGateway(
+            Map<String, HarnessAgent> agents,
+            TurnMemoryIndexer memoryIndexer,
+            McpSandboxConfiguration sandboxConfiguration,
+            ModelActivityRegistry modelActivityRegistry,
+            CompletionProtocolRegistry completionProtocolRegistry
+    ) {
+        this(
                 adaptAgents(agents),
                 RuntimeMode.PRODUCTION,
                 memoryIndexer,
@@ -165,7 +190,8 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 DEFAULT_CHILD_TASK_POLL_INTERVAL,
                 DEFAULT_CHILD_TASK_FAILURE_GRACE,
                 DEFAULT_CHILD_TASK_STALL_TIMEOUT,
-                modelActivityRegistry
+                modelActivityRegistry,
+                completionProtocolRegistry
         );
     }
 
@@ -263,7 +289,8 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 childTaskPollInterval,
                 childTaskFailureGrace,
                 childTaskStallTimeout,
-                new ModelActivityRegistry()
+                new ModelActivityRegistry(),
+                new CompletionProtocolRegistry()
         );
     }
 
@@ -295,7 +322,8 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 childTaskPollInterval,
                 childTaskFailureGrace,
                 childTaskStallTimeout,
-                new ModelActivityRegistry()
+                new ModelActivityRegistry(),
+                new CompletionProtocolRegistry()
         );
     }
 
@@ -321,6 +349,37 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
             Duration childTaskStallTimeout,
             ModelActivityRegistry modelActivityRegistry
     ) {
+        this(
+                runtimes, ignored, memoryIndexer, sandboxConfiguration,
+                childTaskPollInterval, childTaskFailureGrace, childTaskStallTimeout,
+                modelActivityRegistry, new CompletionProtocolRegistry()
+        );
+    }
+
+    /**
+     * 使用共享模型活动和完成协议注册表创建可观测测试适配器。
+     *
+     * @param runtimes 测试运行时
+     * @param ignored 区分生产构造器的内部标记
+     * @param memoryIndexer 非阻塞记忆索引入口
+     * @param sandboxConfiguration MCP 熔断与恢复边界
+     * @param childTaskPollInterval 子任务状态轮询间隔
+     * @param childTaskFailureGrace 异常终态宽限时间
+     * @param childTaskStallTimeout 父子任务真实进度租约
+     * @param modelActivityRegistry 角色模型活动注册表
+     * @param completionProtocolRegistry 与工具共享的完成协议状态
+     */
+    AgentScopeAgentGateway(
+            Map<String, AgentRuntime> runtimes,
+            RuntimeMode ignored,
+            TurnMemoryIndexer memoryIndexer,
+            McpSandboxConfiguration sandboxConfiguration,
+            Duration childTaskPollInterval,
+            Duration childTaskFailureGrace,
+            Duration childTaskStallTimeout,
+            ModelActivityRegistry modelActivityRegistry,
+            CompletionProtocolRegistry completionProtocolRegistry
+    ) {
         Objects.requireNonNull(ignored, "runtimeMode 不能为空");
         if (runtimes == null || runtimes.isEmpty()) {
             throw new IllegalArgumentException("Agent 运行时不能为空");
@@ -332,6 +391,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
         );
         this.modelActivityRegistry = Objects.requireNonNull(
                 modelActivityRegistry, "modelActivityRegistry 不能为空"
+        );
+        this.completionProtocolRegistry = Objects.requireNonNull(
+                completionProtocolRegistry, "completionProtocolRegistry 不能为空"
         );
         this.childTaskPollInterval = requirePositiveDuration(
                 childTaskPollInterval, "childTaskPollInterval"
@@ -363,6 +425,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 .put(ATTACHMENT_PATHS_ATTRIBUTE, request.attachmentPaths())
                 .build();
         InvocationKey invocationKey = new InvocationKey(request.role(), request.sessionId());
+        completionProtocolRegistry.begin(request.role(), request.sessionId());
         ActiveInvocation invocation = new ActiveInvocation(
                 runtime,
                 context,
@@ -375,6 +438,7 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 .map(AgentScopeAgentGateway::toReply)
                 .flatMap(reply -> awaitChildrenSettled(invocation)
                         .then(Mono.fromCallable(() -> ensureChildrenSucceeded(invocation, reply))))
+                .map(reply -> ensureCompletionProtocolResolved(invocation, reply))
                 .flatMap(reply -> terminateWhenMcpOutcomeUnknown(invocation).thenReturn(reply))
                 .doOnNext(reply -> scheduleMemoryIndex(request, reply, turnTimestampMs));
         return Mono.firstWithSignal(parentCall, failWhenExecutionCannotProgress(invocation))
@@ -391,7 +455,43 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 .doOnSuccess(ignored -> removeActiveInvocation(invocationKey, invocation))
                 .doOnError(ignored -> removeActiveInvocation(invocationKey, invocation))
                 .doOnCancel(() -> removeActiveInvocation(invocationKey, invocation))
+                .doFinally(ignored -> completionProtocolRegistry.end(
+                        request.role(), request.sessionId()
+                ))
                 .toFuture();
+    }
+
+    /**
+     * 父 Agent 返回前确认已领取任务成功提交完成协议，禁止普通文本掩盖拒绝或未完成状态。
+     *
+     * @param invocation 当前父回合
+     * @param reply 父 Agent 准备返回的回复
+     * @return 没有未解决拒绝或完成义务时返回原回复
+     */
+    private AgentReply ensureCompletionProtocolResolved(
+            ActiveInvocation invocation,
+            AgentReply reply
+    ) {
+        String role = Objects.toString(invocation.context().get(ROLE_ATTRIBUTE), "");
+        String sessionId = Objects.toString(invocation.context().getSessionId(), "");
+        completionProtocolRegistry.unresolved(role, sessionId).ifPresent(rejection -> {
+            throw new AgentExecutionException(
+                    AgentExecutionException.FailureType.COMPLETION_PROTOCOL_REJECTED,
+                    "task_done 被权威协调器拒绝后父回合尝试正常结束"
+                            + "[role=" + role
+                            + ",project_id=" + rejection.projectId()
+                            + ",allowed_decisions=ACCEPTED|DEFECT_FOUND]"
+            );
+        });
+        completionProtocolRegistry.pending(role, sessionId).ifPresent(expectation -> {
+            throw new AgentExecutionException(
+                    AgentExecutionException.FailureType.OWNER_EXITED_WITH_RUNNING_EXECUTION,
+                    "Owner 已领取 coordinated task_assign，但未成功调用 task_done 就结束父回合"
+                            + "[role=" + role
+                            + ",project_id=" + expectation.projectId() + "]"
+            );
+        });
+        return reply;
     }
 
     /**
@@ -937,13 +1037,14 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
             throw new IllegalArgumentException("HarnessAgent 映射不能为空");
         }
         Map<String, AgentRuntime> adapted = new LinkedHashMap<>();
-        agents.forEach((role, agent) -> adapted.put(
-                role,
-                new HarnessAgentRuntime(
-                        Objects.requireNonNull(agent, "HarnessAgent 不能为空"),
-                        TaskSemanticsRegistry.forRepository(agent.getTaskRepository())
-                )
-        ));
+        agents.forEach((role, agent) -> {
+            HarnessAgent safeAgent = Objects.requireNonNull(agent, "HarnessAgent 不能为空");
+            TaskRepository repository = safeAgent.getTaskRepository();
+            TaskSemanticsRegistry semanticsRegistry = repository == null
+                    ? null
+                    : TaskSemanticsRegistry.forRepository(repository);
+            adapted.put(role, new HarnessAgentRuntime(safeAgent, semanticsRegistry));
+        });
         return adapted;
     }
 
@@ -1125,13 +1226,17 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
      */
     private record HarnessAgentRuntime(
             /** 负责会话、模型、Skill 与工具调用的 AgentScope Agent。 */ HarnessAgent agent,
-            /** 保存子任务种类与取消来源的有界共享语义表。 */ TaskSemanticsRegistry semanticsRegistry
+            /** 保存子任务语义的共享表；禁用 Sub-Agent、没有任务仓库时允许为空。 */
+            TaskSemanticsRegistry semanticsRegistry
     ) implements AgentRuntime {
 
-        /** 校验真实 Agent 与任务语义表均已装配。 */
+        /** 校验任务语义表与 AgentScope 是否实际创建任务仓库保持一致。 */
         private HarnessAgentRuntime {
             Objects.requireNonNull(agent, "agent 不能为空");
-            Objects.requireNonNull(semanticsRegistry, "semanticsRegistry 不能为空");
+            boolean repositoryPresent = agent.getTaskRepository() != null;
+            if (repositoryPresent != (semanticsRegistry != null)) {
+                throw new IllegalArgumentException("任务语义表必须与 TaskRepository 同时存在或同时为空");
+            }
         }
 
         /**
@@ -1143,7 +1248,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
          */
         @Override
         public Mono<Msg> call(String content, RuntimeContext context) {
-            semanticsRegistry.observeContext(context);
+            if (semanticsRegistry != null) {
+                semanticsRegistry.observeContext(context);
+            }
             return agent.call(content, context);
         }
 
@@ -1158,23 +1265,25 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                 RuntimeContext context,
                 TaskSemanticsRegistry.CancelOrigin origin
         ) {
-            semanticsRegistry.observeContext(context);
             TaskRepository repository = agent.getTaskRepository();
-            String parentSessionId = context.getSessionId();
-            try {
-                for (BackgroundTask task : repository.listTasks(context, parentSessionId, null)) {
-                    if (!task.isCompleted()) {
-                        try {
-                            semanticsRegistry.recordCancellation(task.getTaskId(), origin);
-                            repository.cancelTask(context, parentSessionId, task.getTaskId());
-                        } catch (RuntimeException ignored) {
+            if (repository != null && semanticsRegistry != null) {
+                semanticsRegistry.observeContext(context);
+                String parentSessionId = context.getSessionId();
+                try {
+                    for (BackgroundTask task : repository.listTasks(context, parentSessionId, null)) {
+                        if (!task.isCompleted()) {
+                            try {
+                                semanticsRegistry.recordCancellation(task.getTaskId(), origin);
+                                repository.cancelTask(context, parentSessionId, task.getTaskId());
+                            } catch (RuntimeException ignored) {
+                                persistTerminalFallback(context, parentSessionId, task, origin);
+                            }
                             persistTerminalFallback(context, parentSessionId, task, origin);
                         }
-                        persistTerminalFallback(context, parentSessionId, task, origin);
                     }
+                } catch (RuntimeException ignored) {
+                    // 任务仓库查询失败时仍必须继续中断父 Agent。
                 }
-            } catch (RuntimeException ignored) {
-                // 任务仓库查询失败时仍必须继续中断父 Agent。
             }
             try {
                 agent.interrupt(context);
@@ -1190,6 +1299,9 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
          */
         @Override
         public void cancelAll(TaskSemanticsRegistry.CancelOrigin origin) {
+            if (semanticsRegistry == null) {
+                return;
+            }
             for (RuntimeContext context : semanticsRegistry.knownContexts()) {
                 cancel(context, origin);
             }
@@ -1203,8 +1315,12 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
          */
         @Override
         public List<ChildTaskDiagnostic> taskDiagnostics(RuntimeContext context) {
+            TaskRepository repository = agent.getTaskRepository();
+            if (repository == null || semanticsRegistry == null) {
+                return List.of();
+            }
             semanticsRegistry.observeContext(context);
-            return agent.getTaskRepository().listTasks(context, context.getSessionId(), null).stream()
+            return repository.listTasks(context, context.getSessionId(), null).stream()
                     .map(task -> {
                         TaskSemanticsRegistry.TaskSemantics semantics =
                                 semanticsRegistry.semantics(task.getTaskId());

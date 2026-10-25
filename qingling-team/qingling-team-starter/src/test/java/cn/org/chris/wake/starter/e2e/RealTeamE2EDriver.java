@@ -63,6 +63,10 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** Driver 在 Gateway 停滞租约之后额外留给 incident 恢复链启动的固定宽限。 */
     private static final Duration GATEWAY_RECOVERY_START_GRACE = Duration.ofSeconds(60);
 
+    /** Owner 完成到 Manager 提交状态迁移的交接宽限，超过 Gateway 诊断窗口后不再遮蔽真实孤儿。 */
+    private static final Duration COMPLETION_HANDOFF_GRACE =
+            AgentScopeAgentGateway.DEFAULT_CHILD_TASK_STALL_TIMEOUT.plus(GATEWAY_RECOVERY_START_GRACE);
+
     /** mailbox 租约到期后留给下一次 watchdog 扫描和恢复唤醒落盘的宽限。 */
     private static final Duration MAILBOX_RECOVERY_GRACE = MailboxLeaseWatchdog.DEFAULT_LEASE_TIMEOUT
             .plus(MailboxLeaseWatchdog.DEFAULT_SCAN_INTERVAL)
@@ -711,6 +715,19 @@ final class RealTeamE2EDriver implements AutoCloseable {
         summary.put("configured_model", sanitizeEvidenceText(System.getenv("QINGLING_AGENT_MODEL")));
         summary.put("failure_type", root.getClass().getSimpleName());
         summary.put("failure_message", sanitizeEvidenceText(root.getMessage()));
+        ModelAvailabilitySelector.ModelProbeException probeFailure = modelProbeFailure(failure);
+        if (probeFailure != null && !probeFailure.attempts().isEmpty()) {
+            ModelAvailabilitySelector.Attempt lastAttempt =
+                    probeFailure.attempts().get(probeFailure.attempts().size() - 1);
+            summary.put("probe_attempt", lastAttempt.attempt());
+            summary.put("probe_failure_type", lastAttempt.status());
+            summary.put("probe_retryable", lastAttempt.retryable());
+            summary.put("probe_elapsed_ms", lastAttempt.elapsedMs());
+            summary.put("probe_endpoint_host", lastAttempt.endpointHost());
+            summary.put("probe_http_status", lastAttempt.httpStatus());
+            summary.put("probe_exception_class", lastAttempt.exceptionClass());
+            summary.put("model_probe_attempts", probeFailure.attempts());
+        }
         ObjectMapper mapper = new ObjectMapper();
         mapper.writerWithDefaultPrettyPrinter().writeValue(
                 evidenceDirectory.resolve("summary.json").toFile(), summary
@@ -727,6 +744,26 @@ final class RealTeamE2EDriver implements AutoCloseable {
             current = current.getCause();
         }
         return current;
+    }
+
+    /**
+     * 从 Spring 包装异常链中查找模型预检异常，供启动失败摘要写入结构化证据。
+     *
+     * @param failure Spring 启动失败
+     * @return 找到的模型预检异常，不存在时为空
+     */
+    private static ModelAvailabilitySelector.ModelProbeException modelProbeFailure(Throwable failure) {
+        Throwable current = failure;
+        for (int depth = 0; depth < 32 && current != null; depth++) {
+            if (current instanceof ModelAvailabilitySelector.ModelProbeException probeFailure) {
+                return probeFailure;
+            }
+            if (current.getCause() == current) {
+                return null;
+            }
+            current = current.getCause();
+        }
+        return null;
     }
 
     /** 关闭 Spring、Cron 和四角色 AgentScope 资源；证据目录保留供审阅。 */
@@ -940,7 +977,12 @@ final class RealTeamE2EDriver implements AutoCloseable {
             List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics =
                     agentGateway.activeExecutionDiagnostics();
             String orphanExecution = orphanExecutionReason(
-                    workflowRuntime, dispatchStates, agentDiagnostics, now, IDLE_CRON_FAILURE_GRACE
+                    workflowRuntime,
+                    mailSnapshot,
+                    dispatchStates,
+                    agentDiagnostics,
+                    now,
+                    IDLE_CRON_FAILURE_GRACE
             );
             String hangingDispatch = hangingDispatchReason(
                     dispatchStates,
@@ -1128,6 +1170,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
      * 识别已是 RUNNING、超过宽限且既无 dispatch 也无 AgentScope 回合的孤儿 WorkExecution。
      *
      * @param runtime workflow-v2 JSON，可为空
+     * @param mailSnapshot 当前项目四角色 mailbox 快照
      * @param dispatchStates 当前 dispatch 快照
      * @param agentDiagnostics 当前 AgentScope 回合
      * @param now 当前时间
@@ -1136,6 +1179,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
      */
     static String orphanExecutionReason(
             JsonNode runtime,
+            List<JsonNode> mailSnapshot,
             Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates,
             List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics,
             Instant now,
@@ -1159,6 +1203,11 @@ final class RealTeamE2EDriver implements AutoCloseable {
             if (activeDispatch || activeAgent) {
                 continue;
             }
+            if (completionHandoffInProgress(
+                    execution, runtime, mailSnapshot, dispatchStates, now, COMPLETION_HANDOFF_GRACE
+            )) {
+                continue;
+            }
             String progressText = execution.path("last_progress_at").asText("");
             if (progressText.isBlank() || Duration.between(Instant.parse(progressText), now).compareTo(grace) < 0) {
                 continue;
@@ -1171,6 +1220,51 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     + ", dispatch_active=false, agentscope_active=false";
         }
         return null;
+    }
+
+    /**
+     * 判断原 Owner 回合结束后，Manager 是否正在为同一 execution 提交完成迁移。
+     *
+     * <p>必须同时命中 execution ID、项目、阶段、Owner、进行中 assignment 与有限时长的
+     * Manager dispatch，避免无关 Manager 活动给真正孤儿无限续命。</p>
+     *
+     * @param execution 待判断的 RUNNING execution
+     * @param runtime workflow-v2 聚合
+     * @param mailSnapshot 当前 mailbox 快照
+     * @param dispatchStates 当前 dispatch 快照
+     * @param now 当前时间
+     * @param grace Manager 完成交接最大持续时间
+     * @return 证据完整且仍在交接宽限内时为 true
+     */
+    private static boolean completionHandoffInProgress(
+            JsonNode execution,
+            JsonNode runtime,
+            List<JsonNode> mailSnapshot,
+            Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates,
+            Instant now,
+            Duration grace
+    ) {
+        SerialDispatchRegistry.DispatchSnapshot managerDispatch = dispatchStates.get("team:manager");
+        if (managerDispatch == null || !managerDispatch.active()
+                || managerDispatch.activeSince().isAfter(now)
+                || Duration.between(managerDispatch.activeSince(), now).compareTo(grace) > 0) {
+            return false;
+        }
+        String executionId = execution.path("execution_id").asText("");
+        String projectId = execution.path("project_id").asText(runtime.path("project_id").asText(""));
+        String stage = execution.path("stage").asText("");
+        String owner = execution.path("owner").asText("");
+        if (executionId.isBlank() || projectId.isBlank() || stage.isBlank() || owner.isBlank()) {
+            return false;
+        }
+        return mailSnapshot.stream().anyMatch(message ->
+                "task_assign".equals(message.path("type").asText())
+                        && "in_progress".equals(message.path("status").asText())
+                        && owner.equals(message.path("to").asText())
+                        && projectId.equals(message.path("project_id").asText())
+                        && executionId.equals(message.path("content").path("execution_id").asText())
+                        && stage.equals(message.path("content").path("stage").asText())
+        );
     }
 
     /**

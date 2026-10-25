@@ -365,6 +365,44 @@ class RuntimeBootstrapTest {
         }
     }
 
+    /**
+     * 验证 coordinated STANDARD 使用真实 Spring 与 HarnessAgent 启动时允许没有子任务仓库。
+     */
+    @Test
+    void shouldStartCoordinatedStandardWithoutSubagentTaskRepository() {
+        Path workspace = temporaryDirectory.resolve("coordinated-standard-workspace");
+        Path data = temporaryDirectory.resolve("coordinated-standard-data");
+
+        try (ConfigurableApplicationContext context = start(
+                "--qingling.agent.dashscope.api-key=test-only-key",
+                "--qingling.agent.free-model-selection-enabled=false",
+                "--qingling.agent.model=qwen3.8-flash",
+                "--qingling.agent.sub-agent-model=qwen3.8-flash",
+                "--qingling.workspace.root=" + workspace,
+                "--qingling.data-dir=" + data,
+                "--qingling.memory.context-dir=" + data.resolve("ctx"),
+                "--qingling.feishu.enabled=false",
+                "--qingling.sandbox.enabled=false",
+                "--qingling.cleanup.run-on-startup=false",
+                "--qingling.workflow.coordination-mode=coordinated",
+                "--qingling.workflow.default-profile=standard",
+                "--qingling.workflow.review-policy=required-only",
+                "--qingling.cron.heartbeat-stagger-seconds[0]=3600",
+                "--qingling.cron.heartbeat-stagger-seconds[1]=3607",
+                "--qingling.cron.heartbeat-stagger-seconds[2]=3614",
+                "--qingling.cron.heartbeat-stagger-seconds[3]=3621"
+        )) {
+            QinglingTeamProperties.Workflow workflow = context.getBean(QinglingTeamProperties.class).workflow();
+
+            assertThat(workflow.coordinationMode()).isEqualTo(WorkflowCoordinationMode.COORDINATED);
+            assertThat(workflow.defaultProfile()).isEqualTo(WorkflowProfile.STANDARD);
+            assertThat(workflow.reviewPolicy()).isEqualTo(ReviewPolicy.REQUIRED_ONLY);
+            assertThat(context.getBean(AgentScopeAgentGateway.class)).isNotNull();
+            assertThat(context.getBean(RuntimeLifecycle.class).isRunning()).isTrue();
+            assertThat(context.getBean(CronService.class).currentJobs()).hasSize(4);
+        }
+    }
+
     /** 验证严格评审不能与非严格 profile 混用，且失败发生在 workspace 初始化前。 */
     @Test
     void shouldRejectStrictReviewForStandardProfile() {

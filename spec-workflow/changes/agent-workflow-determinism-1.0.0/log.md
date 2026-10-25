@@ -31,6 +31,7 @@
 | 2026-10-25 | verify | Task 8 分层验证通过 | 聚焦 53 项通过；验收 Python AST 通过；contract profile 下 domain 72、app 61、infra 159、adapter 13、starter 89 单元测试及 `CoordinatedWorkflowContractIT` 1 项通过，BUILD SUCCESS（21.803s）；`git diff --check` 通过；未 source 凭据、未运行真实 E2E |
 | 2026-10-25 | Task 9 | 完成全部非 E2E 门禁 | 相关模块 165 项、最终默认回归 394 项、coordinated IT 1 项通过；首次 Docker 工具契约真实暴露 QA fixture 未安装并以 exit_code=4 失败，复用公共只读 Todo fixture 并补齐最小 FastAPI/SQLite 应用后重跑 1 IT 通过；`git diff --check` 和 orphan 复核通过 |
 | 2026-10-25 | hard-gate | 暂停等待真实 E2E 二次授权 | 未 source E2E 凭据、未调用真实模型、未运行四条真实场景；父 Task 18 保持未完成 |
+| 2026-10-25 | e2e/fail | 二次授权后的唯一一次 happy-path 在启动阶段失败 | `qwen3.8-flash` 配置校验和 Docker health 通过；coordinated STANDARD 禁用 Sub-Agent 后真实 HarnessAgent 的 TaskRepository 为 null，Gateway 仍无条件创建 TaskSemanticsRegistry，Spring 启动 7.139 秒内 NPE。业务流程/角色模型未开始，Maven 26.359 秒失败；未重试，证据已脱敏保存且无 orphan |
 
 ## 失败模式归类
 
@@ -102,3 +103,65 @@
 - 不使用无限重试、宽泛 catch、固定 sleep 或单纯扩大超时掩盖状态不收敛。
 - 当前工作区已有 Task 18 修改、`CompletableFutureDemo.java` 和 `tmp.txt`，必须保留且不得覆盖。
 - 每个 Task 完成后先记录真实验证，再勾选文档；不得提前宣称通过。
+
+## 2026-10-25 空 TaskRepository 启动缺陷修复
+
+- **根因**：coordinated STANDARD 关闭 Sub-Agent 后 `HarnessAgent.getTaskRepository()` 合法为空，Gateway 适配层却仍强制创建任务语义表。
+- **修复**：任务仓库与语义表改为成对可空；无仓库时子任务诊断为空、取消仍中断父 Agent、批量子任务取消直接结束。
+- **回归**：定向 26 项和完整 `mvn verify` 396 项通过；本轮未 source E2E 凭据、未运行真实 E2E。
+
+## 2026-10-25 修复后单次 happy-path 失败
+
+- **已验证**：空 TaskRepository 启动修复有效；checkpoint、产品设计、技术设计均完成，代码阶段已启动；MCP 无失败。
+- **直接原因**：Driver 孤儿判定没有把活跃的 Manager 完成协调 dispatch 视为 execution 的合法承载，在 RD 回合结束到 Manager 提交状态迁移之间误报孤儿。
+- **反证**：误报后持久化 aggregate 显示原技术设计 execution 已为 `SUCCEEDED`，新的代码 execution 已创建；finally 将代码 execution 终态化为 `CANCELLED`。
+- **结果**：只运行一次，未重试；证据完整，无 Maven/E2E/pytest/pip/tmux 残留。
+
+## 2026-10-25 Manager 完成交接诊断修复
+
+- **约束**：只在 Manager dispatch 活跃且 assignment 的 execution/project/stage/Owner 完全匹配时暂停孤儿判定。
+- **上限**：交接宽限从 Gateway 停滞租约推导并额外增加 60 秒，当前共 5 分 30 秒；超时继续失败。
+- **验证**：Driver 36 项和默认回归 399 项通过；未运行真实 E2E。
+
+## 2026-10-25 交接诊断修复后单次 happy-path 失败
+
+- **执行**：只执行一次 `mvn -Pe2e -De2e.scenario=happy-path verify`，E2E 500.7 秒、Maven 8 分 40 秒失败，未重试。
+- **直接原因**：PM 完成产品文档后无法构造合法 `task_done.content.decision`；Java 仅返回 `No enum constant WorkCompletionDecision...`，没有暴露允许枚举，模型多次猜测失败后正常结束。
+- **状态结果**：assignment 保持 `in_progress`，execution 保持 `PRODUCT_DESIGN/RUNNING`，PM/Manager dispatch 与 AgentScope 均已空闲，因此 Driver 的孤儿诊断属实；这不是上轮 Manager 交接误报。
+- **基础设施**：四路 MCP 均 `CLOSED/0 failures`；finally 保存脱敏证据，shutdown 把 execution 持久化为 `CANCELLED`，无 Maven/pytest/pip/tmux 残留。
+
+## 2026-10-25 完成协议修复
+
+- **可发现性**：`send_mail` schema 和 `content` 参数说明列出 `ACCEPTED/DEFECT_FOUND`；非法值错误同时返回完整允许值和 PM/RD/QA 选择规则。
+- **静默退出保护**：共享注册表只保存 role/session/project，拒绝未解决时父成功出口转换为 `COMPLETION_PROTOCOL_REJECTED`；成功重试立即清除。
+- **恢复语义**：新失败类型经 Runner 进入 runtime v2 incident，保持 stage/Owner，首次 RECOVERING、再次同类失败 BLOCKED。
+- **验证**：聚焦 50 项、默认回归 402 项和 `git diff --check` 通过；未运行 E2E。
+
+## 2026-10-25 完成协议修复后单次 E2E
+
+- **前置门禁**：零模型真实 Docker 契约 1 IT 通过，0 failure/error/skip。
+- **执行**：只执行一次干净 `mvn -Pe2e -De2e.scenario=happy-path verify`，未自动重试。
+- **结果**：显式 `qwen3.8-flash` Function Calling 启动预检返回 `transport_error`；E2E 6.025 秒、Maven 24.792 秒，Failsafe 1 error。
+- **边界**：未进入 workflow、角色 Agent 或 completion 工具，无法验证本轮完成协议修复；未启动后三场景。
+- **收尾**：脱敏 summary 已保存，Docker healthy，未发现 Maven/E2E/pytest/pip/tmux 残留；Task 18 保持未完成。
+
+## 2026-10-25 模型预检分类、重试与证据修复
+
+- **实现**：`ModelAvailabilitySelector` 增加稳定失败分类、最多两次尝试和逐次脱敏证据；`RuntimeConfiguration` 为预检客户端配置连接超时；`RealTeamE2EDriver` 将结构化预检证据写入启动失败摘要。
+- **独立探针**：新增 `model-probe` profile 与 `RealModelFunctionCallingProbeIT`；真实 `qwen3.8-flash` 第一次尝试 HTTP 200，通过耗时 4797ms，证据写入 `qingling-team-starter/target/model-probe-evidence/summary.json`。
+- **验证**：聚焦 67 项通过；`mvn verify` 409 项通过；零模型真实 Docker 契约 1 IT 通过（Maven 37.054s）。
+- **边界**：没有打印环境文件或密钥，没有运行 E2E；Task 18 保持未完成。
+
+## 2026-10-25 模型预检修复后单次真实 E2E
+
+- **执行**：只运行一次干净 `happy-path`；显式 DashScope `qwen3.8-flash` 预检 attempt 1、HTTP 200、2692ms。
+- **进展**：checkpoint、`PRODUCT_DESIGN`、`TECH_DESIGN` 均 SUCCEEDED；RD 生成代码和测试，唯一入口为 `code/main.py`。
+- **失败**：RD 未调用 `run_project_tests`/`task_done`，以普通文本声明“下次唤醒继续”后退出；`CODE_IMPLEMENTATION/RUNNING` 无 dispatch、AgentScope、Test Runner 或 incident，Driver 报真实孤儿。
+- **收尾**：四路 MCP `CLOSED/0 failures`；shutdown 将 execution 置为 `CANCELLED/RUNTIME_SHUTDOWN`；未重试、未运行后三场景，Task 18 未完成。
+
+## 2026-10-25 Owner 正常退出但 execution 未终态修复
+
+- 协调任务被 Owner 成功领取并启动后，会话必须通过成功 `task_done` 解除 completion obligation；普通文本退出不再被视为成功。
+- 新增类型化失败 `OWNER_EXITED_WITH_RUNNING_EXECUTION`，Runner 将其写入 incident，而不是等待 Driver 事后发现孤儿。
+- 首次 incident 保持原 stage/Owner/execution，投递给原 Owner 并自动唤醒；重新领取后 attempt=2，第二次同类失败直接 BLOCKED，重复报告幂等且不再唤醒。
+- 聚焦 63 项、默认回归 410 项、零模型真实 Docker 契约 1 IT 全部通过；本轮未运行 E2E，父 Task 18 继续未完成。

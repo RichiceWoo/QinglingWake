@@ -4,8 +4,9 @@ import cn.org.chris.wake.domain.gateway.RuntimeIncidentGateway;
 import cn.org.chris.wake.domain.gateway.WorkflowRuntimeRepository;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.model.AgentExecutionException;
-import cn.org.chris.wake.domain.workflow.ProcessedWorkflowCommand;
 import cn.org.chris.wake.domain.workflow.OutboxActionStatus;
+import cn.org.chris.wake.domain.workflow.OutboxActionType;
+import cn.org.chris.wake.domain.workflow.ProcessedWorkflowCommand;
 import cn.org.chris.wake.domain.workflow.ReviewPolicy;
 import cn.org.chris.wake.domain.workflow.WorkExecution;
 import cn.org.chris.wake.domain.workflow.WorkExecutionStatus;
@@ -34,9 +35,7 @@ class CoordinatedRuntimeIncidentGatewayTest {
     /** 固定 incident 时间。 */
     private static final Instant NOW = Instant.parse("2026-10-25T03:00:00Z");
 
-    /**
-     * 验证首次故障进入 RECOVERING 并唤醒原 Owner，第二次故障明确 BLOCKED 且禁止下游推进。
-     */
+    /** 验证 Owner 提前退出首次唤醒原角色续跑，恢复回合再次提前退出后明确 BLOCKED。 */
     @Test
     void shouldRecoverOnceThenBlockSameWorkExecution() {
         InMemoryRuntimeRepository runtime = new InMemoryRuntimeRepository(runningState());
@@ -54,14 +53,25 @@ class CoordinatedRuntimeIncidentGatewayTest {
         );
 
         gateway.reportAgentExecutionFailure(
-                "project-1", "rd", "dispatch-1", AgentExecutionException.FailureType.PARENT_STALLED
+                "project-1", "rd", "dispatch-1",
+                AgentExecutionException.FailureType.OWNER_EXITED_WITH_RUNNING_EXECUTION
         );
         WorkExecution recovering = runtime.state().findExecution("work-1").orElseThrow();
+        runtime.update("project-1", current -> {
+            Instant retryAt = NOW.plusSeconds(2);
+            WorkExecution continued = current.findExecution("work-1").orElseThrow()
+                    .retry(retryAt)
+                    .claim("assignment-2", retryAt)
+                    .start("dispatch-2", "session-1", retryAt);
+            return current.replaceExecution(continued, retryAt);
+        });
         gateway.reportAgentExecutionFailure(
-                "project-1", "rd", "dispatch-2", AgentExecutionException.FailureType.PARENT_STALLED
+                "project-1", "rd", "dispatch-2",
+                AgentExecutionException.FailureType.OWNER_EXITED_WITH_RUNNING_EXECUTION
         );
         gateway.reportAgentExecutionFailure(
-                "project-1", "rd", "dispatch-2", AgentExecutionException.FailureType.PARENT_STALLED
+                "project-1", "rd", "dispatch-2",
+                AgentExecutionException.FailureType.OWNER_EXITED_WITH_RUNNING_EXECUTION
         );
         WorkExecution blocked = runtime.state().findExecution("work-1").orElseThrow();
 
@@ -69,12 +79,26 @@ class CoordinatedRuntimeIncidentGatewayTest {
         assertThat(recovering.stage()).isEqualTo(WorkflowStage.CODE_IMPLEMENTATION);
         assertThat(recovering.owner()).isEqualTo("rd");
         assertThat(blocked.status()).isEqualTo(WorkExecutionStatus.BLOCKED);
+        assertThat(blocked.attempt()).isEqualTo(2);
+        assertThat(blocked.failureType()).isEqualTo("OWNER_EXITED_WITH_RUNNING_EXECUTION");
         assertThat(blocked.executionId()).isEqualTo(recovering.executionId());
         assertThat(blocked.stage()).isEqualTo(recovering.stage());
         assertThat(runtime.state().executions()).hasSize(1);
         assertThat(runtime.state().processedCommands()).hasSize(2);
         assertThat(runtime.state().outboxActions()).hasSize(4)
                 .allMatch(action -> action.status() == OutboxActionStatus.APPLIED);
+        assertThat(runtime.state().outboxActions()).anySatisfy(action -> {
+            assertThat(action.type()).isEqualTo(OutboxActionType.MAILBOX_MESSAGE);
+            assertThat(action.target()).isEqualTo("rd");
+            assertThat(action.attributes()).containsEntry(
+                    "failure_type", "OWNER_EXITED_WITH_RUNNING_EXECUTION"
+            );
+            assertThat(action.attributes()).containsEntry("protocol", "agent_execution_failed");
+        });
+        assertThat(runtime.state().outboxActions()).anySatisfy(action -> {
+            assertThat(action.type()).isEqualTo(OutboxActionType.CRON_WAKE);
+            assertThat(action.target()).isEqualTo("team:rd");
+        });
         assertThat(visibleActions).hasSize(4);
         assertThat(gateway.isRuntimeBlocked("project-1")).isTrue();
     }

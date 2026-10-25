@@ -148,6 +148,13 @@ class RoleToolkitFactoryTest {
         assertThat(required(sendMail)).containsExactlyInAnyOrder(
                 "to", "type", "subject", "content", "project_id"
         );
+        assertThat(sendMail.getDescription())
+                .contains("ACCEPTED", "DEFECT_FOUND", "PM/RD", "QA");
+        assertThat(properties(sendMail).get("content"))
+                .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                .extracting("description")
+                .asString()
+                .contains("ACCEPTED", "DEFECT_FOUND", "execution_id", "artifacts");
         assertThat(properties(sendToHuman)).containsOnlyKeys(
                 "routing_key", "message", "kind", "project_id", "checkpoint_id"
         );

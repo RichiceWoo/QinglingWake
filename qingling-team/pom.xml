@@ -246,6 +246,32 @@
             </build>
         </profile>
         <profile>
+            <id>model-probe</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+                            <includes>
+                                <include>**/RealModelFunctionCallingProbeIT.java</include>
+                            </includes>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>run-real-model-function-calling-probe</id>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
             <id>e2e</id>
             <build>
                 <plugins>

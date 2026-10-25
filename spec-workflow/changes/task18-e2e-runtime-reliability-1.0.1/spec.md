@@ -291,8 +291,70 @@ Failsafe 为 1 test、1 failure、0 errors、0 skipped，E2E 2584 秒，Maven �
 
 本轮没有 source E2E 凭据、没有调用百炼，也没有运行真实场景。上述结果只能证明确定性编排与工具边界已满足下一轮 E2E 的前置门禁，不能替代四条真实 E2E；Task 8、Task 9 与父 Task 18 继续保持未完成，等待用户二次明确授权。
 
+### 12.8 2026-10-25 确定性编排后的首次真实 E2E
+
+用户二次授权后严格只运行一次干净 `happy-path`，显式配置为 DashScope `qwen3.8-flash`，免费模型选择关闭，Docker AIO-Sandbox healthy。运行没有进入业务阶段：Spring 在创建 `AgentScopeAgentGateway` 时，调用 `TaskSemanticsRegistry.forRepository(agent.getTaskRepository())` 触发 `NullPointerException: repository 不能为空`。
+
+根因是最新 coordinated STANDARD 明确禁用 Sub-Agent，`TeamAgentFactory` 因此调用 AgentScope `disableSubagents()`；真实 HarnessAgent 在该模式下合法地没有 TaskRepository。Gateway 的生产适配仍继承旧假设，要求每个角色都有任务仓库。现有 `TeamAgentFactoryTest` 只断言子任务工具和 manager 关闭，没有把这些真实 Agent 装入 Gateway；`CoordinatedWorkflowContractIT` 使用零模型协调链，也没有覆盖真实 Spring + HarnessAgent 的启动组合，因此非 E2E 门禁未捕获该接线错误。
+
+Failsafe 1 test、0 failures、1 error、0 skipped，E2E 7.139 秒，Maven 26.359 秒。`summary.json` 与 `failure-summary.json` 记录 phase=startup、provider=dashscope、configured_model=qwen3.8-flash 和脱敏 NPE；未启动 checkpoint、业务 workflow 或角色模型调用。未重试或启动后三个场景；宿主和容器无 Maven/E2E/pytest/pip/tmux 残留。下一轮前需为无 TaskRepository 的父角色提供空子任务诊断/取消语义，并增加真实 Spring + HarnessAgent coordinated STANDARD 启动测试。Task 8、Task 9 和父 Task 18 继续未完成。
+
 ## 13. 确认记录（HARD-GATE）
 
 - **确认时间**：2026-10-07
 - **确认人**：用户
 - **确认说明**：用户要求按既有 E2E 根因分析建立独立 `1.0.1` 修复需求，并在新聊天窗口执行；当前聊天只生成 Spec 和交接话术，不实施源码修复。
+
+## 14. 2026-10-25 空 TaskRepository 修复结论
+
+已修复上一轮 `happy-path` 的 Spring startup 直接原因。无 Sub-Agent 的父角色现在以空子任务运行时适配：诊断返回空列表，取消跳过不存在的仓库但保留父 Agent interrupt，shutdown 不再强制访问任务语义表。真实 Spring 测试已证明 `COORDINATED + STANDARD` 可装配四角色 Agent、Gateway、RuntimeLifecycle 与 Cron。
+
+定向 26 项和完整默认回归 396 项通过；本轮未运行真实 E2E，因此 Task 8、Task 9 和父 Task 18 仍未完成。
+
+## 15. 2026-10-25 修复后单次 E2E 新发现
+
+启动缺陷已解除，真实流程推进到 `CODE_IMPLEMENTATION/RD`。Driver 在 Manager 正处理 RD 技术设计完成消息时，把原 Owner 已空闲的 `TECH_DESIGN/RUNNING` 误报为孤儿；当前算法没有识别“Owner 回合结束、Manager 完成协调器尚在提交迁移”的合法交接窗口。持久化终态证明技术设计随后已 `SUCCEEDED` 并创建代码 execution，因此这不是实际丢失的 execution。
+
+下一轮前需让孤儿诊断识别活跃的 Manager 完成协调，或为已存在对应 `task_done`/完成 outbox 的 execution 提供短交接宽限，并补并发竞态测试。本轮只执行一次、未重试，Task 18 继续未完成。
+
+## 16. 2026-10-25 孤儿 execution 交接竞态修复
+
+Driver 已增加精确匹配、有限时长的 Manager 完成交接判定。只有同 execution/project/stage/Owner 的 assignment 仍在处理中，且 Manager dispatch 活跃时间未超过 5 分 30 秒，才暂缓孤儿失败；错配、未来时间或宽限耗尽均不放行。定向 36 项与默认回归 399 项通过，本轮未运行 E2E。
+
+## 2026-10-25 交接诊断修复后真实 E2E 新发现
+
+本轮只执行一次干净 `qwen3.8-flash happy-path`。流程通过需求 checkpoint 并进入 PM 产品设计；PM 已写出产品规格，但其 `task_done` 完成协议未能被 Java 接受。`content.decision` 被依次解析为多个非法 `WorkCompletionDecision` 值，错误响应只包含非法值而未提供合法枚举或工具 schema，模型最终正常结束，权威状态仍为 `PRODUCT_DESIGN/RUNNING`。
+
+Driver 采样时 PM、Manager 均无活跃 dispatch，AgentScope 无活跃调用，因此这次是真实孤儿而非 Manager 交接竞态。四路 MCP circuit 均 `CLOSED/0 failures`。运行 500.7 秒失败，Maven 总耗时 8 分 40 秒；未重试、未执行后三个场景，Task 18 保持未完成。
+
+## 2026-10-25 完成协议可发现性与终态保护修复
+
+工具 schema、参数描述和非法值错误现在统一声明 `WorkCompletionDecision` 的完整值域：`ACCEPTED` 与 `DEFECT_FOUND`。PM/RD 正常完成只能使用 `ACCEPTED`，`DEFECT_FOUND` 仅用于 QA 有真实失败证据的缺陷结论。
+
+完成工具与 Agent Gateway 共享一个有界 session 注册表。任意 coordinated `task_done` 被拒绝时只记录 role/session/project；同回合纠错成功即清除。若拒绝未解决而模型尝试以普通文本结束，Gateway 发出 `COMPLETION_PROTOCOL_REJECTED`，Runner 会进入现有一次恢复/再次 BLOCKED 链，避免产生无 incident 的 `RUNNING/in_progress` 孤儿。聚焦 50 项和 `mvn verify` 402 项通过；未运行真实 E2E。
+
+## 2026-10-25 完成协议修复后真实 E2E 结果
+
+E2E 前零模型真实 Docker 契约通过。随后只执行一次干净 `happy-path`，但 Spring 启动阶段的显式 DashScope 模型预检对 `qwen3.8-flash` 返回 `transport_error`。场景在约 6 秒内失败，未进入 workflow、AgentScope 角色回合或 completion 工具，因此本轮没有验证到完成协议修复。
+
+Failsafe 为 1 test、0 failures、1 error、0 skipped；脱敏启动失败证据位于 `target/e2e-evidence/happy-path`。未重试或启动后三场景，Docker healthy 且无 Maven/E2E/pytest/pip/tmux 残留。Task 8 与 Task 18 继续未完成。
+
+## 2026-10-25 模型预检分类、有限重试与证据修复
+
+启动模型预检不再把全部异常压缩成 `transport_error`。运行时现稳定区分 HTTP 429/4xx/5xx、DNS、连接失败、连接超时、请求超时、TLS、连接重置、响应解析失败及 Function Calling 缺失；仅对可恢复传输故障和 HTTP 429/5xx 最多恢复一次，非幂等风险不适用于该无副作用预检。每次尝试只记录模型、序号、类型、retryable、耗时、endpoint host、HTTP 状态和异常类，明确排除 prompt、响应正文、鉴权头和密钥。
+
+Driver 已能把该证据写入启动失败摘要。独立最小 Function Calling 探针以真实 DashScope `qwen3.8-flash` 在 attempt 1、HTTP 200、4797ms 通过；聚焦 67 项、默认回归 409 项、零模型真实 Docker 契约 1 IT 均通过。本轮没有运行 E2E，Task 8 仍未完成。
+
+## 2026-10-25 模型预检修复后单次 E2E 结果
+
+唯一一次干净 `happy-path` 的模型预检在 attempt 1、HTTP 200、2692ms 通过，验证了新分类与证据路径。流程完成 checkpoint、产品设计和技术设计，进入 `CODE_IMPLEMENTATION/RD`；代码与 RD 测试已落盘，MCP 全程健康。
+
+失败根因是完成协议仍缺一条入口：RD 从未尝试 `run_project_tests` 或 `task_done`，却以“下次唤醒继续”的普通文本正常结束回合。由于现有 `CompletionProtocolRegistry` 只在完成工具已被拒绝时登记，Gateway 将该回合视为成功；Runner 没有基于仍为 RUNNING 的 execution/assignment 生成类型化 incident 或 continuation。Driver 在无 dispatch、无 AgentScope 活动、无 Test Runner execution 的证据下正确报告真实孤儿。shutdown 将其终态化为 `CANCELLED/RUNTIME_SHUTDOWN`。本轮未重试或启动后三场景，Task 8 仍未完成。
+
+## 2026-10-25 Owner 回合未终态可靠性修复
+
+Owner 成功领取并启动 `task_assign` 后，运行时按 role/session/project 登记 completion obligation。`task_done` 成功时解除；如果模型回合正常退出但 obligation 仍存在，Gateway 抛出 `OWNER_EXITED_WITH_RUNNING_EXECUTION`，Runner 以类型化 incident 接入 Java 状态机，不再留下无 incident 的 RUNNING 孤儿。
+
+首次失败保持当前 stage、Owner 和 execution，转为 `RECOVERING`，向原 Owner 投递 `agent_execution_failed` 恢复任务并安排一次性 wake；原 execution 再次领取后 attempt=2。第二次同类失败进入明确 `BLOCKED`，不创建第三次 wake；重复报告不重复投影。无 assignment 的 heartbeat 不登记义务，完成工具已被拒绝时继续使用更具体的 `COMPLETION_PROTOCOL_REJECTED`。
+
+聚焦 63 项、完整 `mvn verify` 410 项、零模型真实 Docker 契约 1 IT 均通过。本轮未执行真实 E2E，Task 8 和父 Task 18 均保持未完成。

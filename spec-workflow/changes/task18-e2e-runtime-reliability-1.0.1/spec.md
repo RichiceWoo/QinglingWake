@@ -358,3 +358,17 @@ Owner 成功领取并启动 `task_assign` 后，运行时按 role/session/projec
 首次失败保持当前 stage、Owner 和 execution，转为 `RECOVERING`，向原 Owner 投递 `agent_execution_failed` 恢复任务并安排一次性 wake；原 execution 再次领取后 attempt=2。第二次同类失败进入明确 `BLOCKED`，不创建第三次 wake；重复报告不重复投影。无 assignment 的 heartbeat 不登记义务，完成工具已被拒绝时继续使用更具体的 `COMPLETION_PROTOCOL_REJECTED`。
 
 聚焦 63 项、完整 `mvn verify` 410 项、零模型真实 Docker 契约 1 IT 均通过。本轮未执行真实 E2E，Task 8 和父 Task 18 均保持未完成。
+
+## 2026-10-25 Owner 未终态修复后真实 E2E 结论
+
+只执行一次干净 `qwen3.8-flash happy-path`。需求 checkpoint、产品设计和技术设计成功；PM 的完成协议拒绝经一次恢复后成功终态化。代码阶段 RD 首次正常退出但 execution 仍 RUNNING 时，Java 写入 `OWNER_EXITED_WITH_RUNNING_EXECUTION/RECOVERING`，保持原 stage、Owner、execution 并自动唤醒原 RD；恢复领取后 attempt=2。RD 第二次同类退出后同一 execution 转为 `BLOCKED`，没有第三次 wake，证明本轮目标机制在真实 E2E 中生效。
+
+新阻断位于 shutdown：主线程在 `CronService.stop()` 等待对象监视器，Cron 调度线程在同步 `tick()` 持有同一监视器，并在 `fire()` 对未完成 dispatch 调用无界 `CompletableFuture.join()`。这使 Driver 的 finally 无法完成证据保存；约 31 分钟后中断唯一 Maven 进程，exit 130。只保留真实 `model-selection.json` 和场景目录，不伪造 summary。清理后 AIO session=0、无孤儿进程；Task 8 未完成。
+
+## 2026-10-26 Cron、Driver 证据与代码完成硬门禁修复
+
+上一轮 Cron shutdown 死锁已修复。调度 tick 使用独立串行锁，start/stop 使用生命周期锁；dispatch 等待具有 30 分钟上限，stop 不再获取 tick 锁或无界等待业务 Future。Cron 只停止生产和自身等待，未终态 dispatch 仍由正式 shutdown 顺序中的 Registry 有限排空、超时取消和工作流终态化处理。
+
+Driver 的 finally 先保存运行中失败证据，再以 2 分钟独立看门狗执行 shutdown，最后始终保存关闭后的终态证据；场景本身受 2 小时全局看门狗约束。RD 在代码实现或缺陷修复阶段的恢复任务会明确携带 `required_action=run_project_tests_then_task_done`，Gateway 的 Owner 未终态诊断也透传该动作。代码阶段完成门禁继续以 execution registry 为唯一权威：没有真实 Test Runner execution 时，模型复制的成功指标不能通过门禁。
+
+定向 80 项通过；`mvn verify` 通过 415 项；`mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` 通过 415 项单元回归和 1 个真实 Docker IT。工具契约使用 NoCallModel，未调用百炼。本轮未运行 E2E，Task 8、Task 9 和父 Task 18 均保持未完成。

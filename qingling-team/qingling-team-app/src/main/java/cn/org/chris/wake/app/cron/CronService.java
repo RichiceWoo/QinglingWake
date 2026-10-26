@@ -21,11 +21,14 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 import static com.cronutils.model.CronType.UNIX;
@@ -38,6 +41,12 @@ public final class CronService implements AutoCloseable {
     /** UNIX 五段 cron 表达式解析器。 */
     private static final CronParser CRON_PARSER = new CronParser(CronDefinitionBuilder.instanceDefinitionFor(UNIX));
 
+    /** 单次 Cron dispatch 等待终态的默认上限，防止异常 Future 永久占用调度线程。 */
+    public static final Duration DEFAULT_DISPATCH_TIMEOUT = Duration.ofMinutes(30);
+
+    /** 停止后台调度器时等待线程退出的固定上限。 */
+    private static final Duration STOP_AWAIT_TIMEOUT = Duration.ofSeconds(5);
+
     /** 任务存储端口。 */
     private final CronJobRepository repository;
 
@@ -49,6 +58,15 @@ public final class CronService implements AutoCloseable {
 
     /** 可测试时钟。 */
     private final Clock clock;
+
+    /** 单次 dispatch 的最长等待时间。 */
+    private final Duration dispatchTimeout;
+
+    /** 串行化任务快照、投递和状态提交，但不阻塞 stop 获取生命周期状态。 */
+    private final Object tickLock = new Object();
+
+    /** 保护后台执行器的启动与停止切换。 */
+    private final Object lifecycleLock = new Object();
 
     /** 当前内存任务快照，访问受实例锁保护。 */
     private List<CronJob> jobs = new ArrayList<>();
@@ -83,10 +101,30 @@ public final class CronService implements AutoCloseable {
             Supplier<String> messageIdSupplier,
             Clock clock
     ) {
+        this(repository, dispatchGateway, messageIdSupplier, clock, DEFAULT_DISPATCH_TIMEOUT);
+    }
+
+    /**
+     * 创建可注入 dispatch 等待上限的 Cron 服务。
+     *
+     * @param repository 任务存储端口
+     * @param dispatchGateway Runner 投递端口
+     * @param messageIdSupplier cron 消息标识生成器
+     * @param clock 可测试时钟
+     * @param dispatchTimeout 单次 dispatch 最长等待时间
+     */
+    CronService(
+            CronJobRepository repository,
+            CronDispatchGateway dispatchGateway,
+            Supplier<String> messageIdSupplier,
+            Clock clock,
+            Duration dispatchTimeout
+    ) {
         this.repository = Objects.requireNonNull(repository, "repository 不能为空");
         this.dispatchGateway = Objects.requireNonNull(dispatchGateway, "dispatchGateway 不能为空");
         this.messageIdSupplier = Objects.requireNonNull(messageIdSupplier, "messageIdSupplier 不能为空");
         this.clock = Objects.requireNonNull(clock, "clock 不能为空");
+        this.dispatchTimeout = requirePositive(dispatchTimeout, "dispatchTimeout");
     }
 
     /**
@@ -94,27 +132,31 @@ public final class CronService implements AutoCloseable {
      *
      * @param tickInterval tick 间隔
      */
-    public synchronized void start(Duration tickInterval) {
+    public void start(Duration tickInterval) {
         Objects.requireNonNull(tickInterval, "tickInterval 不能为空");
         if (tickInterval.isZero() || tickInterval.isNegative() || tickInterval.toMillis() == 0L) {
             throw new IllegalArgumentException("tickInterval 必须至少为一毫秒");
         }
-        if (executor != null) {
-            return;
+        synchronized (lifecycleLock) {
+            if (executor != null) {
+                return;
+            }
+            synchronized (tickLock) {
+                reload(clock.millis());
+            }
+            executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "qingling-cron");
+                thread.setDaemon(true);
+                return thread;
+            });
+            executor.scheduleWithFixedDelay(this::safeTick, 0L, tickInterval.toMillis(), TimeUnit.MILLISECONDS);
         }
-        reload(clock.millis());
-        executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "qingling-cron");
-            thread.setDaemon(true);
-            return thread;
-        });
-        executor.scheduleWithFixedDelay(this::safeTick, 0L, tickInterval.toMillis(), TimeUnit.MILLISECONDS);
     }
 
     /**
      * 执行一次可测试 tick：必要时热重载，并同步等待全部到期任务投递结束。
      */
-    public synchronized void tick() {
+    public void tick() {
         tick(clock.millis());
     }
 
@@ -123,34 +165,37 @@ public final class CronService implements AutoCloseable {
      *
      * @param nowMs 当前毫秒时间
      */
-    public synchronized void tick(long nowMs) {
-        if (!repository.revision().equals(loadedRevision)) {
-            reload(nowMs);
-        }
-        Set<String> originalJobIds = jobs.stream().map(CronJob::id).collect(Collectors.toUnmodifiableSet());
-        List<CronJob> updated = new ArrayList<>(jobs.size());
-        boolean fired = false;
-        Set<String> routesWithBusinessWake = jobs.stream()
-                .filter(job -> isDue(job, nowMs))
-                .filter(job -> !isHeartbeat(job))
-                .map(job -> job.payload().routingKey())
-                .collect(Collectors.toUnmodifiableSet());
-        for (CronJob job : jobs) {
-            if (!isDue(job, nowMs)) {
-                updated.add(job);
-                continue;
+    public void tick(long nowMs) {
+        synchronized (tickLock) {
+            if (!repository.revision().equals(loadedRevision)) {
+                reload(nowMs);
             }
-            fired = true;
-            boolean shouldDispatch = !isHeartbeat(job) || !routesWithBusinessWake.contains(job.payload().routingKey());
-            CronJob afterFire = fire(job, nowMs, shouldDispatch);
-            if (afterFire != null) {
-                updated.add(afterFire);
+            Set<String> originalJobIds = jobs.stream().map(CronJob::id).collect(Collectors.toUnmodifiableSet());
+            List<CronJob> updated = new ArrayList<>(jobs.size());
+            boolean fired = false;
+            Set<String> routesWithBusinessWake = jobs.stream()
+                    .filter(job -> isDue(job, nowMs))
+                    .filter(job -> !isHeartbeat(job))
+                    .map(job -> job.payload().routingKey())
+                    .collect(Collectors.toUnmodifiableSet());
+            for (CronJob job : jobs) {
+                if (!isDue(job, nowMs)) {
+                    updated.add(job);
+                    continue;
+                }
+                fired = true;
+                boolean shouldDispatch = !isHeartbeat(job)
+                        || !routesWithBusinessWake.contains(job.payload().routingKey());
+                CronJob afterFire = fire(job, nowMs, shouldDispatch);
+                if (afterFire != null) {
+                    updated.add(afterFire);
+                }
             }
-        }
-        if (fired) {
-            boolean preservedNewJobs = repository.replaceAllPreservingNewJobs(updated, originalJobIds);
-            jobs = updated;
-            loadedRevision = preservedNewJobs ? CronJobRepository.Revision.missing() : repository.revision();
+            if (fired) {
+                boolean preservedNewJobs = repository.replaceAllPreservingNewJobs(updated, originalJobIds);
+                jobs = updated;
+                loadedRevision = preservedNewJobs ? CronJobRepository.Revision.missing() : repository.revision();
+            }
         }
     }
 
@@ -159,17 +204,29 @@ public final class CronService implements AutoCloseable {
      *
      * @return 不可变任务列表
      */
-    public synchronized List<CronJob> currentJobs() {
-        return List.copyOf(jobs);
+    public List<CronJob> currentJobs() {
+        synchronized (tickLock) {
+            return List.copyOf(jobs);
+        }
     }
 
     /**
      * 停止后台 tick；重复停止保持幂等。
      */
-    public synchronized void stop() {
-        if (executor != null) {
-            executor.shutdownNow();
+    public void stop() {
+        ScheduledExecutorService stoppingExecutor;
+        synchronized (lifecycleLock) {
+            stoppingExecutor = executor;
             executor = null;
+        }
+        if (stoppingExecutor == null) {
+            return;
+        }
+        stoppingExecutor.shutdownNow();
+        try {
+            stoppingExecutor.awaitTermination(STOP_AWAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -185,6 +242,11 @@ public final class CronService implements AutoCloseable {
      * 保护后台调度线程，避免单次异常终止后续 tick。
      */
     private void safeTick() {
+        synchronized (lifecycleLock) {
+            if (executor == null) {
+                return;
+            }
+        }
         try {
             tick();
         } catch (RuntimeException ignored) {
@@ -258,9 +320,26 @@ public final class CronService implements AutoCloseable {
         String status = "ok";
         String error = null;
         if (shouldDispatch) {
+            CompletableFuture<Void> dispatch = null;
             try {
-                dispatchGateway.dispatch(inbound).join();
-            } catch (CompletionException exception) {
+                dispatch = Objects.requireNonNull(
+                        dispatchGateway.dispatch(inbound), "Cron dispatch Future 不能为空"
+                );
+                dispatch.get(dispatchTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException timeout) {
+                status = "error";
+                error = "Cron dispatch 等待超时";
+                if (dispatch != null) {
+                    dispatch.cancel(true);
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                status = "error";
+                error = "Cron dispatch 被关闭流程中断";
+            } catch (CancellationException cancelled) {
+                status = "error";
+                error = "Cron dispatch 已取消";
+            } catch (ExecutionException exception) {
                 status = "error";
                 Throwable cause = exception.getCause() == null ? exception : exception.getCause();
                 error = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
@@ -342,5 +421,20 @@ public final class CronService implements AutoCloseable {
      */
     private static String randomMessageId() {
         return "cron_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+    }
+
+    /**
+     * 校验配置时长严格为正数。
+     *
+     * @param value 待校验时长
+     * @param name 配置名称
+     * @return 原时长
+     */
+    private static Duration requirePositive(Duration value, String name) {
+        Objects.requireNonNull(value, name + " 不能为空");
+        if (value.isZero() || value.isNegative()) {
+            throw new IllegalArgumentException(name + " 必须大于零");
+        }
+        return value;
     }
 }

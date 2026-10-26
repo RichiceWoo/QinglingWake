@@ -204,3 +204,17 @@
 - 第一次失败保持 stage/Owner/execution 并自动唤醒原 Owner；重领后 attempt=2，第二次同类失败明确 BLOCKED，重复上报不产生额外 wake。
 - 定向 63 项、默认回归 410 项、零模型真实 Docker 契约 1 IT 全部通过。
 - 本轮未执行真实 E2E；四场景未全部通过，父 Task 18 继续保持未完成。
+
+## 2026-10-25 Task 18 单次真实 E2E
+
+- `qwen3.8-flash happy-path` 只运行一次；需求 checkpoint、产品与技术设计成功。
+- Owner 未终态恢复链真实生效：RD 第一次恢复到原 Owner、重领 attempt=2，第二次同类失败 BLOCKED 且无第三次 wake。
+- shutdown 出现新死锁：Cron tick 持锁等待 dispatch future，主线程无法进入 `CronService.stop()`；约 31 分钟后中断唯一进程，exit 130，没有伪造 summary。
+- 清理后 AIO session=0 且无 Maven/E2E/pytest/pip/tmux 残留；父 Task 18 保持未完成。
+
+## 2026-10-26 Task 18 运行时收尾可靠性修复
+
+- Cron tick/lifecycle 锁解耦，dispatch 与 scheduler stop 均有限等待；Registry 保留业务任务排空/取消所有权。
+- Driver 在 shutdown 前后各保存证据，并增加 2 小时场景总看门狗及 2 分钟 shutdown 看门狗。
+- RD 代码/缺陷恢复携带 `run_project_tests_then_task_done`，代码完成必须存在 Java 记录的真实 Test Runner execution。
+- 定向 80 项、`mvn verify` 415 项、真实 Docker/NoCallModel 契约 1 IT 通过；本轮未运行 E2E，父 Task 18 未完成。

@@ -301,3 +301,17 @@ MCP 四路均健康；shutdown 正确将未终态 execution 持久化为 CANCELL
 Java 运行时现把“Owner 已领取并启动 execution，但模型正常返回时仍未调用成功的 `task_done`”识别为类型化 `OWNER_EXITED_WITH_RUNNING_EXECUTION`，不再等待 E2E Driver 把它事后归类为孤儿。登记仅发生在实际领取任务后，无任务 heartbeat 不受影响；成功完成会解除义务，完成工具拒绝则保留更具体的原失败类型。
 
 首次失败保持 stage、Owner 和 execution，投递给原 Owner 并安排一次 continuation；重新领取使 attempt=2。第二次同类失败直接 BLOCKED，禁止继续唤醒，重复 incident 不重复产生副作用。聚焦 63 项、默认回归 410 项和零模型真实 Docker 契约 1 IT 通过。本轮未运行 E2E，父 Task 18 继续未完成。
+
+## 2026-10-25 Task 18 Owner 未终态修复后 E2E
+
+单次真实 `qwen3.8-flash happy-path` 证明类型化恢复链生效：RD 代码 execution 第一次 `OWNER_EXITED_WITH_RUNNING_EXECUTION` 后保持 stage/Owner/execution，自动唤醒原 RD 并重领为 attempt=2；第二次同类失败转为 BLOCKED，没有第三次 wake。checkpoint、产品设计、技术设计均成功，PM 的一次完成协议拒绝也通过同一有限预算恢复成功。
+
+测试未通过。失败后的 finally 暴露 Cron shutdown 死锁：同步 `CronService.tick()` 持锁进入 `fire()` 并无界 join dispatch future，主线程因此永久阻塞在 `CronService.stop()`。约 31 分钟后中断唯一 Maven 进程，未生成或伪造 summary；清理后 session=0 且无孤儿进程。父 Task 18 继续未完成。
+
+## 2026-10-26 Task 18 Cron、收尾证据与代码完成门禁修复
+
+Cron shutdown 死锁已消除：tick 串行化与生命周期控制不再共享同一监视器，dispatch 采用有限等待，停止调度器不再无界等待业务 Future；正式 RuntimeLifecycle 继续负责 Registry 排空、超时取消和未终态工作流收敛。
+
+E2E Driver 先保存失败证据、再执行 2 分钟有界 shutdown、最后补存终态证据，并以 2 小时全局看门狗防止 Maven 永久悬挂。RD 代码/缺陷恢复明确要求先运行 Test Runner 再 `task_done`；完成门禁只认可 Java execution registry 中的真实测试执行，没有 execution 时不接受模型声明的成功结果。
+
+定向 80 项、默认回归 415 项、零模型真实 Docker 1 IT 全部通过。未运行真实 E2E，因此这些结果只证明运行时和工具契约回归通过，父 Task 18 仍未完成。

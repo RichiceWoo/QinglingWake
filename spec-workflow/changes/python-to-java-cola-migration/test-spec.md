@@ -283,3 +283,7 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 | 2026-10-25 | Task 18 Owner 未终态修复聚焦测试 | 通过（63 tests，16.025s） | 覆盖 `OWNER_EXITED_WITH_RUNNING_EXECUTION`、原 Owner 恢复、attempt=2、第二次同类失败 BLOCKED 与重复 incident 幂等 |
 | 2026-10-25 | Task 18 Owner 未终态修复 `mvn verify` | 通过（410 tests，23.491s） | domain 72、app 61、infra 163、adapter 13、starter 101；0 failure/error/skip，未运行 E2E |
 | 2026-10-25 | Task 18 零模型真实 Docker 契约 | 通过（410 unit + 1 IT，36.849s） | 10 次 Shell、5 次 Test Runner、受控连接恢复、NoCallModel 与无 pytest/pip/tmux orphan 全部通过；未运行 E2E |
+| 2026-10-25 | Task 18 Owner 未终态修复后单次 `happy-path` | 业务失败且 shutdown 死锁，人工中断（exit 130，约 31 分钟） | RD 首次 `OWNER_EXITED_WITH_RUNNING_EXECUTION` 恢复原 Owner，attempt=2 再次同类失败 BLOCKED、无第三次 wake；`CronService.fire()` 持锁无界 join 导致 `stop()` 阻塞，未生成 summary。未重试或运行后三场景，清理后无 session/orphan |
+| 2026-10-26 | Task 18 Cron/Driver/代码门禁定向回归 | 通过（80 tests） | 覆盖 Cron 有界等待与停止、RuntimeLifecycle 后续取消、Driver 证据保存顺序与双看门狗、RD required_action 和真实 Test Runner 硬门禁 |
+| 2026-10-26 | Task 18 完整默认回归 | 通过（415 tests，21.031s） | 六模块全部 SUCCESS，0 failure/error/skip；未运行 E2E |
+| 2026-10-26 | Task 18 零模型真实 Docker 契约 | 通过（415 unit + 1 IT，Maven 36.530s） | 真实 AgentScope/MCP/Docker、NoCallModel；未调用百炼或运行 E2E，父 Task 18 保持未完成 |

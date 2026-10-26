@@ -165,3 +165,17 @@
 - 新增类型化失败 `OWNER_EXITED_WITH_RUNNING_EXECUTION`，Runner 将其写入 incident，而不是等待 Driver 事后发现孤儿。
 - 首次 incident 保持原 stage/Owner/execution，投递给原 Owner 并自动唤醒；重新领取后 attempt=2，第二次同类失败直接 BLOCKED，重复报告幂等且不再唤醒。
 - 聚焦 63 项、默认回归 410 项、零模型真实 Docker 契约 1 IT 全部通过；本轮未运行 E2E，父 Task 18 继续未完成。
+
+## 2026-10-25 Owner 未终态修复后单次 E2E
+
+- 单次 `qwen3.8-flash happy-path` 真实验证原 Owner 自动续跑及 attempt=2 第二次失败 BLOCKED，未产生第三次 wake。
+- checkpoint、产品设计、技术设计成功；RD 生成唯一 `code/main.py`，但两次均未完成 `task_done`，最终 `CODE_IMPLEMENTATION/RD/BLOCKED/OWNER_EXITED_WITH_RUNNING_EXECUTION`。
+- finally 在 `CronService.stop()` 死锁：调度线程持锁并于 `fire()` 无界 join 未完成 dispatch；约 31 分钟后中断唯一进程，因此没有 summary，未伪造证据。
+- AIO session=0，宿主/容器无残留；未重试或执行后三场景，Task 18 未完成。
+
+## 2026-10-26 Cron、完成门禁与 E2E 收尾可靠性修复
+
+- `CronService` 分离 tick/lifecycle 锁，dispatch 改为 30 分钟有限等待，调度器停止最多等待 5 秒；Cron 不再替 RuntimeLifecycle 取消或完成业务 Future。
+- Driver 在关闭前保存现场，关闭放入 2 分钟看门狗，关闭后始终补存证据；场景整体由 2 小时全局看门狗约束。
+- RD 代码/缺陷恢复和 Owner 退出诊断明确要求 `run_project_tests_then_task_done`；真实 Test Runner execution 缺失时完成门禁拒绝通过。
+- 定向 80 项、`mvn verify` 415 项、真实 Docker/NoCallModel 契约 1 IT 全部通过；未运行 E2E，Task 18 保持未完成。

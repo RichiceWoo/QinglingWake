@@ -95,7 +95,9 @@ class AgentScopeAgentGatewayTest {
     void shouldRejectParentSuccessWhileOwnedExecutionRemainsRunning() {
         CompletionProtocolRegistry completionRegistry = new CompletionProtocolRegistry();
         ActivityRuntime runtime = new ActivityRuntime(context -> {
-            completionRegistry.expect("rd", context.getSessionId(), "todo-mvp");
+            completionRegistry.expect(
+                    "rd", context.getSessionId(), "todo-mvp", "run_project_tests_then_task_done"
+            );
             return Mono.just(Msg.builder().textContent("本轮先结束，下次唤醒继续测试").build());
         });
         AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
@@ -111,6 +113,9 @@ class AgentScopeAgentGatewayTest {
                 future,
                 AgentExecutionException.FailureType.OWNER_EXITED_WITH_RUNNING_EXECUTION
         );
+        assertThatThrownBy(future::join)
+                .hasRootCauseMessage("Owner 已领取 coordinated task_assign，但未成功调用 task_done 就结束父回合"
+                        + "[role=rd,project_id=todo-mvp,required_action=run_project_tests_then_task_done]");
         assertThat(runtime.cancellations).hasValue(1);
         assertThat(completionRegistry.pending("rd", "session-completion-missing")).isEmpty();
     }

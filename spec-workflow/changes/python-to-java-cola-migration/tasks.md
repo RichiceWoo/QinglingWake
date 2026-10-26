@@ -358,3 +358,18 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - [x] 同一 execution 重领后 attempt=2，第二次同类失败 BLOCKED 且不再唤醒
 - [x] 聚焦 63 项、完整默认回归 410 项、零模型真实 Docker 契约 1 IT 通过
 - [ ] Task 18：四条真实 E2E（本轮按要求未运行，保持未完成）
+
+### 2026-10-25 Task 18 单次 E2E
+
+- [x] 真实验证 Owner 首次未终态自动续跑、attempt=2 第二次同类失败 BLOCKED
+- [x] 清理 AIO session 和宿主/容器残留进程
+- [x] 修复 Cron 持锁无界 join 导致 shutdown/finally 永久阻塞
+- [ ] Task 18：四条真实 E2E（本轮 `happy-path` 失败且无成功 summary）
+
+### 2026-10-26 Task 18 运行时收尾可靠性修复
+
+- [x] Cron 锁、dispatch 有界等待和 RuntimeLifecycle 取消职责完成分层
+- [x] Driver 失败证据顺序、全局 E2E 与 shutdown 看门狗完成
+- [x] RD 恢复 required_action 与代码阶段真实 Test Runner 硬门禁完成
+- [x] 定向 80 项、`mvn verify` 415 项、零模型真实 Docker 契约 1 IT 通过
+- [ ] Task 18：四条真实 E2E 与最终验收（本轮未运行，继续未完成）

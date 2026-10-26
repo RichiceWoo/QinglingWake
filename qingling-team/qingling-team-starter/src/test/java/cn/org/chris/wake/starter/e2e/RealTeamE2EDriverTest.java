@@ -15,6 +15,7 @@ import java.time.Instant;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -970,6 +971,42 @@ class RealTeamE2EDriverTest {
         assertThat(summary.path("probe_endpoint_host").asText()).isEqualTo("dashscope.aliyuncs.com");
         assertThat(summary.path("probe_exception_class").asText()).isEqualTo("HttpTimeoutException");
         assertThat(summary.path("model_probe_attempts")).hasSize(1);
+    }
+
+    /** 关闭永久阻塞时也必须先后保存事故快照和带 SHUTDOWN_TIMEOUT 的最终摘要。 */
+    @Test
+    void shouldSaveEvidenceBeforeAndAfterShutdownTimeout() {
+        List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        CountDownLatch neverReleased = new CountDownLatch(1);
+
+        assertThatThrownBy(() -> RealTeamE2EDriver.shutdownAndSaveEvidence(
+                null,
+                failure -> events.add(failure == null ? "save:initial" : "save:" + failure.getMessage()),
+                () -> {
+                    events.add("close:start");
+                    neverReleased.await();
+                },
+                Duration.ofMillis(20)
+        )).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("SHUTDOWN_TIMEOUT");
+
+        assertThat(events).hasSize(3);
+        assertThat(events.get(0)).isEqualTo("save:initial");
+        assertThat(events.get(1)).isEqualTo("close:start");
+        assertThat(events.get(2)).contains("save:SHUTDOWN_TIMEOUT");
+    }
+
+    /** 全局场景看门狗必须中断超时动作并返回稳定 E2E_RUNTIME_TIMEOUT。 */
+    @Test
+    void shouldFailGlobalWatchdogWithStableReason() {
+        CountDownLatch neverReleased = new CountDownLatch(1);
+
+        assertThatThrownBy(() -> RealTeamE2EDriver.runBounded(
+                "E2E_RUNTIME_TIMEOUT",
+                Duration.ofMillis(20),
+                neverReleased::await
+        )).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("E2E_RUNTIME_TIMEOUT");
     }
 
     /**

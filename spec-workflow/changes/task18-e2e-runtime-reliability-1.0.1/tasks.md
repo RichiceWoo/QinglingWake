@@ -299,3 +299,21 @@ project_id -> execution_id + status + exit_code + pytest_collected
 - [x] 第二次同类失败进入 BLOCKED，禁止第三次自动恢复并保证重复报告幂等
 - [x] 聚焦 63 项、`mvn verify` 410 项、零模型 Docker 契约 1 IT 通过
 - [ ] Task 8 四场景真实 E2E（本轮未运行）
+
+### 2026-10-25 Owner 未终态修复后单次 E2E
+
+- [x] 仅运行一次干净 `happy-path`，显式 `qwen3.8-flash`，真实 DashScope/AgentScope/Docker
+- [x] 首次 Owner 未终态失败自动恢复原 Owner；重领为 attempt=2；第二次同类失败 BLOCKED 且无第三次 wake
+- [x] 中断 shutdown 死锁后清理 AIO session 与宿主/容器进程
+- [x] 修复 Cron 同步锁内无界等待 dispatch，保证 `stop()` 与 finally 有界完成
+- [ ] Task 8 四场景真实 E2E（本轮无成功 summary，未运行后三场景）
+
+### 2026-10-26 E2E 收尾与代码阶段硬门禁修复
+
+- [x] Cron tick 与生命周期锁解耦，dispatch、scheduler stop 均有限等待
+- [x] Driver 按“关闭前证据 → 有界 shutdown → 关闭后证据”顺序收尾
+- [x] 增加 2 小时全局 E2E 看门狗和 2 分钟 shutdown 看门狗
+- [x] RD 代码/缺陷恢复邮件携带 `required_action=run_project_tests_then_task_done`
+- [x] 缺少 Java 记录的 Test Runner execution 时禁止代码阶段完成
+- [x] 定向 80 项、默认回归 415 项、零模型真实 Docker 契约 1 IT 通过
+- [ ] Task 8/Task 9 与四场景真实 E2E（本轮未运行）

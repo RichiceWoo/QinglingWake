@@ -6,14 +6,18 @@ import cn.org.chris.wake.domain.model.InboundMessage;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /**
  * 验证 at/every/cron、热重载和一次性去重执行。
@@ -181,6 +185,34 @@ class CronServiceTest {
         assertThat(messages).extracting(InboundMessage::routingKey)
                 .containsExactly("team:pm", "team:manager");
         assertThat(repository.findAll()).isEmpty();
+    }
+
+    /**
+     * 未完成的 dispatch 不得持有生命周期锁，stop 应中断 Cron 等待并把业务取消留给 dispatch registry。
+     */
+    @Test
+    void shouldStopWithoutWaitingForNeverCompletingDispatch() throws Exception {
+        MemoryCronRepository repository = new MemoryCronRepository(List.of(atJob("stuck", NOW_MS)));
+        CompletableFuture<Void> neverCompletes = new CompletableFuture<>();
+        CountDownLatch dispatchStarted = new CountDownLatch(1);
+        CronService service = new CronService(
+                repository,
+                message -> {
+                    dispatchStarted.countDown();
+                    return neverCompletes;
+                },
+                () -> "cron_stuck",
+                CLOCK,
+                Duration.ofMinutes(10)
+        );
+
+        service.start(Duration.ofMillis(10));
+        assertThat(dispatchStarted.await(2, TimeUnit.SECONDS)).isTrue();
+
+        assertTimeoutPreemptively(Duration.ofSeconds(2), service::stop);
+
+        assertThat(neverCompletes).isNotDone();
+        neverCompletes.cancel(true);
     }
 
     /**

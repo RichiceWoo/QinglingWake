@@ -276,3 +276,21 @@
 - [x] 第二次同类失败进入 BLOCKED，禁止第三次自动唤醒，重复上报保持幂等
 - [x] 聚焦 63 项、默认回归 410 项、零模型真实 Docker 契约 1 IT 通过
 - [ ] 四场景真实 E2E（本轮按要求未运行）
+
+### 2026-10-25 Owner 未终态修复后单次 E2E
+
+- [x] 只执行一次干净 `qwen3.8-flash happy-path`，未重试或启动后三场景
+- [x] 真实验证首次 `OWNER_EXITED_WITH_RUNNING_EXECUTION` 恢复原 RD、attempt=2、第二次同类失败 BLOCKED 且无第三次 wake
+- [x] 清理 AIO session 与宿主/容器孤儿进程
+- [x] 修复 `CronService.tick/fire` 持锁执行无界 `join()` 导致 `stop()` 永久阻塞
+- [ ] 四场景真实 E2E（本轮未生成成功 summary，Task 18 未完成）
+
+### 2026-10-26 Cron、完成门禁与 E2E 收尾可靠性修复
+
+- [x] 拆分 Cron tick/lifecycle 锁，并为 dispatch 等待、调度器停止增加有限上限
+- [x] 保持取消职责分层：Cron 停止只终止调度等待，未终态业务任务由 RuntimeLifecycle/SerialDispatchRegistry 排空或取消
+- [x] Driver 在 shutdown 前先保存失败证据，shutdown 超时后仍补存证据，并增加全局 E2E 与 shutdown 看门狗
+- [x] RD 代码/缺陷恢复任务明确携带 `required_action=run_project_tests_then_task_done`
+- [x] 代码阶段 completion obligation 与真实 Test Runner execution 形成硬门禁，缺少 execution 时拒绝完成
+- [x] 定向 80 项、默认 `mvn verify` 415 项、零模型真实 Docker 契约 1 IT 全部通过
+- [ ] 四场景真实 E2E（本轮按要求未运行，Task 18 保持未完成）

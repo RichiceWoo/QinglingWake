@@ -488,7 +488,8 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
                     AgentExecutionException.FailureType.OWNER_EXITED_WITH_RUNNING_EXECUTION,
                     "Owner 已领取 coordinated task_assign，但未成功调用 task_done 就结束父回合"
                             + "[role=" + role
-                            + ",project_id=" + expectation.projectId() + "]"
+                            + ",project_id=" + expectation.projectId()
+                            + ",required_action=" + expectation.requiredAction() + "]"
             );
         });
         return reply;

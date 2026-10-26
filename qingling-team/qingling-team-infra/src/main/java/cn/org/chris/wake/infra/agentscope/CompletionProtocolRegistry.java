@@ -36,10 +36,23 @@ public final class CompletionProtocolRegistry {
      * @param projectId 当前项目标识
      */
     public void expect(String role, String sessionId, String projectId) {
+        expect(role, sessionId, projectId, "send_task_done");
+    }
+
+    /**
+     * 登记带确定性下一步的完成义务，供父回合退出和恢复 assignment 直接提示缺失动作。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     * @param projectId 当前项目标识
+     * @param requiredAction 当前阶段必须完成的稳定动作名
+     */
+    public void expect(String role, String sessionId, String projectId, String requiredAction) {
         if (blank(role) || blank(sessionId) || blank(projectId)) {
             return;
         }
-        expectations.put(key(role, sessionId), new Expectation(projectId));
+        String checkedAction = blank(requiredAction) ? "send_task_done" : requiredAction.trim();
+        expectations.put(key(role, sessionId), new Expectation(projectId, checkedAction));
     }
 
     /**
@@ -120,7 +133,8 @@ public final class CompletionProtocolRegistry {
 
     /** 表示父回合已领取但尚未通过 task_done 完成的 coordinated 项目。 */
     public record Expectation(
-            /** 等待当前 Owner 完成的项目标识。 */ String projectId
+            /** 等待当前 Owner 完成的项目标识。 */ String projectId,
+            /** 父回合退出前必须完成的确定性动作。 */ String requiredAction
     ) {
     }
 

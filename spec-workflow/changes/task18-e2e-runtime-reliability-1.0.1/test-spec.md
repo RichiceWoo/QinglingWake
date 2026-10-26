@@ -286,3 +286,7 @@ git diff --check
 | 2026-10-25 | Owner 回合未终态聚焦回归 | 定向 Maven 测试 | 63 项通过，16.025s；覆盖类型化失败、原 Owner continuation、attempt=2、第二次同类失败 BLOCKED、无任务 heartbeat 与完成拒绝优先级 |
 | 2026-10-25 | Owner 回合未终态完整回归 | `mvn verify` | 410 项通过，23.491s；0 failure/error/skip；未运行 E2E |
 | 2026-10-25 | Owner 回合未终态零模型工具契约 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 410 unit + 1 IT 通过，36.849s；真实 Docker/AgentScope/MCP、NoCallModel、10 次 Shell、5 次 Test Runner、受控恢复与无孤儿进程；未运行 E2E |
+| 2026-10-25 | Owner 回合未终态修复后单次 `happy-path` | `mvn -Pe2e -De2e.scenario=happy-path verify` | `qwen3.8-flash` 预检 attempt 1 可用；checkpoint、产品和技术设计成功。RD 第一次未终态退出进入 RECOVERING 并由原 RD attempt=2 续跑，第二次同类失败转为 BLOCKED、无第三次 wake。finally 因 `CronService.tick/fire` 持锁无界 join 与 `stop()` 形成死锁，约 31 分钟后人工中断，exit 130；无 summary、未重试，清理后无 session/orphan |
+| 2026-10-26 | Cron/RuntimeLifecycle/Driver/门禁定向回归 | 指定 7 个测试类的 Maven 定向命令 | app 8、infra 29、starter 43，共 80 项通过；验证 stop 不等待业务 Future、Registry 继续取消、证据先存、全局/shutdown 看门狗、required_action 与缺失 Test Runner 拒绝 |
+| 2026-10-26 | 完整默认回归 | `mvn verify` | 415 项通过，0 failure/error/skip，BUILD SUCCESS，21.031s；未加载 E2E profile |
+| 2026-10-26 | 零模型真实 Docker 契约 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 415 unit + 1 IT 通过；IT 17.81s、Maven 36.530s，NoCallModel，未调用百炼或运行 E2E |

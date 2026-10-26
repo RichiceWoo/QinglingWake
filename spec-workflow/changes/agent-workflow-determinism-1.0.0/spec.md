@@ -439,3 +439,17 @@ E2E 在 869.3 秒时失败：RD 明确以普通文本说明尚未调用 `run_pro
 首次失败保持原 stage、Owner 和 execution，进入 `RECOVERING`，向原 Owner 投递带失败类型及 `agent_execution_failed` 协议的恢复任务，并安排 `team:<owner>` 一次性唤醒；同一 execution 被重新领取后 attempt 增至 2。第二次同类失败直接进入 `BLOCKED`，不再创建第三次唤醒，重复 incident 保持幂等。无任务 heartbeat 不会被误判，既有 completion rejection 仍优先保留原类型。
 
 聚焦 63 项、默认 `mvn verify` 410 项以及零模型真实 Docker 契约 1 IT 全部通过；Docker 契约覆盖 10 次 Shell、5 次 Test Runner、受控连接恢复与无孤儿进程。本轮没有运行真实 E2E，四场景与父 Task 18 仍未完成。
+
+## 25. 2026-10-25 Owner 未终态修复后单次真实 E2E
+
+按用户授权只运行一次干净 `qwen3.8-flash happy-path`。模型预检 attempt 1 可用；需求 checkpoint、产品设计和技术设计成功，代码唯一入口为 `code/main.py`。本轮真实验证了新机制：PM 的 `COMPLETION_PROTOCOL_REJECTED` 首次恢复后成功完成；RD 代码 execution 首次 `OWNER_EXITED_WITH_RUNNING_EXECUTION` 保持原 stage/Owner/execution 并唤醒原 RD，重领后 attempt=2，第二次同类失败明确转为 `BLOCKED`，没有第三次 wake。
+
+场景随后暴露 shutdown 死锁：测试主线程在 `RuntimeLifecycle → CronService.stop()` 等待 CronService 监视器，Cron 调度线程持有该监视器并在 `CronService.fire()` 无界 `CompletableFuture.join()` 等待 dispatch，导致 finally 无法完成。约 31 分钟后人工中断唯一 Maven 进程；没有重试或启动后三场景，也没有伪造 `summary.json`。清理后 AIO session=0，宿主与容器无 Maven/E2E/pytest/pip/tmux 残留。Task 18 继续未完成。
+
+## 26. 2026-10-26 Cron、完成门禁与收尾看门狗修复
+
+Cron 的 tick 串行锁与生命周期锁现已分离，dispatch 等待从无界 `join()` 改为 30 分钟有限等待；`stop()` 先停止新调度并在 5 秒内完成线程池收尾，不再等待业务 Future。业务任务的有限排空和超时取消仍由 `RuntimeLifecycle` 与 `SerialDispatchRegistry` 统一负责，避免 Cron 提前完成 Future、而 AgentScope 清理仍在后台写场景目录的竞态。
+
+Driver 现在先保存失败现场，再在独立守护线程中执行最长 2 分钟 shutdown，最后无论关闭成功或失败都补存一次证据；完整场景另有 2 小时硬看门狗。代码/缺陷阶段的 RD 恢复动作携带 `required_action=run_project_tests_then_task_done`，Owner 正常退出的类型化失败同步暴露该动作。完成证据门禁只接受 Java 记录的真实 Test Runner execution，缺少 execution 时即使模型提供看似成功的字段也拒绝完成。
+
+定向 80 项、完整 `mvn verify` 415 项及零模型真实 Docker `RealSandboxToolContractIT` 1 IT 全部通过。Docker 契约使用 NoCallModel，未调用百炼；本轮未运行真实 E2E，四场景和父 Task 18 继续未完成。

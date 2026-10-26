@@ -268,3 +268,18 @@
 - Runner 将该类型写入 incident；第一次保持原 stage/Owner/execution 并唤醒原 Owner，第二次同类失败 BLOCKED，重复上报幂等。
 - 恢复任务显式携带 `failure_type` 与 `protocol=agent_execution_failed`，不依赖模型自行请求 clarification。
 - 聚焦 63 项、默认回归 410 项、零模型真实 Docker 契约 1 IT 通过；未运行真实 E2E，Task 8 保持未完成。
+
+## 2026-10-25 Owner 未终态修复后单次真实 E2E
+
+- 只运行一次干净 `qwen3.8-flash happy-path`；未自动重试或启动后三场景。
+- PM attempt=2 后成功；RD 代码 execution 首次 `OWNER_EXITED_WITH_RUNNING_EXECUTION` 自动恢复原 Owner，第二次同类失败在 attempt=2 明确 BLOCKED，恢复预算正确收敛。
+- Driver 已进入失败清理，但主线程阻塞于 `CronService.stop()`；线程转储显示 Cron 调度线程持有同一锁，并在 `CronService.fire()` 无界 join dispatch future。
+- 约 31 分钟后中断唯一 Maven 进程，exit 130；未伪造 summary。随后删除 1 个 AIO shell session，复核 session=0 且宿主/容器无 pytest/pip/tmux/Maven/E2E 残留。
+- Task 8 与父 Task 18 继续未完成；下一轮前必须修复 Cron shutdown 死锁。
+
+## 2026-10-26 Cron、Driver 收尾与 Test Runner 完成门禁修复
+
+- **Cron/关闭**：tick 与 lifecycle 锁分离，dispatch 最长等待 30 分钟，scheduler stop 最长等待 5 秒；业务 Future 由 RuntimeLifecycle/Registry 负责有限排空和取消。
+- **证据/看门狗**：Driver 关闭前先取证，shutdown 受 2 分钟看门狗约束，关闭后总会补存证据；场景总预算为 2 小时。
+- **恢复/门禁**：RD 代码或缺陷恢复要求 `run_project_tests_then_task_done`；没有 Java 记录的真实 Test Runner execution 时拒绝完成。
+- **验证**：定向 80 项、默认 415 项、真实 Docker + NoCallModel 1 IT 通过；本轮未运行 E2E，Task 8、Task 9 和父 Task 18 保持未完成。

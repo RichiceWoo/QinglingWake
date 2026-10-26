@@ -191,6 +191,7 @@ public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentG
         WorkExecution changedExecution = retryable
                 ? execution.recover(failureType, now)
                 : execution.block(failureType, now);
+        String requiredAction = requiredAction(execution);
         WorkflowRuntimeState changed = current.replaceExecution(changedExecution, now);
         changed = changed.enqueue(OutboxAction.pending(
                 actionId(commandId, "event"), OutboxActionType.WORKFLOW_EVENT,
@@ -199,6 +200,7 @@ public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentG
                         "execution_id", execution.executionId(),
                         "failure_type", failureType,
                         "owner", role,
+                        "required_action", requiredAction,
                         "runtime_status", changedExecution.status().name(),
                         "stage", execution.stage().name()
                 ), now
@@ -213,6 +215,7 @@ public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentG
                             "stage", execution.stage().name(),
                             "failure_type", failureType,
                             "protocol", "agent_execution_failed",
+                            "required_action", requiredAction,
                             "subject", "恢复当前阶段执行"
                     ), now
             ), now);
@@ -243,6 +246,25 @@ public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentG
                 .filter(execution -> execution.owner().equals(role))
                 .filter(execution -> !execution.status().terminal())
                 .toList();
+    }
+
+    /**
+     * 根据权威 stage 与 Owner 生成恢复回合必须执行的有限动作。
+     *
+     * @param execution 当前开放执行
+     * @return 不包含业务正文、模型输出或凭据的稳定动作名
+     */
+    private static String requiredAction(WorkExecution execution) {
+        if ("rd".equals(execution.owner())
+                && (execution.stage() == cn.org.chris.wake.domain.workflow.WorkflowStage.CODE_IMPLEMENTATION
+                || execution.stage() == cn.org.chris.wake.domain.workflow.WorkflowStage.DEFECT_FIX)) {
+            return "run_project_tests_then_task_done";
+        }
+        if ("qa".equals(execution.owner())
+                && execution.stage() == cn.org.chris.wake.domain.workflow.WorkflowStage.QA_TEST_EXECUTION) {
+            return "run_project_tests_then_task_done";
+        }
+        return "send_task_done";
     }
 
     /**

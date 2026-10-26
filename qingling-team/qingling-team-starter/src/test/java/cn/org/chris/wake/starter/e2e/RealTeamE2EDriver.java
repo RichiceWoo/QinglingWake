@@ -38,7 +38,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -53,6 +58,12 @@ final class RealTeamE2EDriver implements AutoCloseable {
 
     /** 单个流水线阶段的硬总预算，防止健康但较慢的真实模型被固定半小时误杀。 */
     private static final Duration STAGE_TIMEOUT = Duration.ofMinutes(90);
+
+    /** 单个真实场景从首条消息到契约断言结束的全局硬预算。 */
+    static final Duration GLOBAL_E2E_TIMEOUT = Duration.ofHours(2);
+
+    /** Spring 运行时关闭与任务终态化允许占用的最长时间。 */
+    static final Duration SHUTDOWN_TIMEOUT = Duration.ofMinutes(2);
 
     /** 等待文件和事件时的轮询间隔。 */
     private static final Duration POLL_INTERVAL = Duration.ofSeconds(2);
@@ -468,15 +479,43 @@ final class RealTeamE2EDriver implements AutoCloseable {
     }
 
     /**
-     * 先执行有界运行时关闭和任务终态化，再保存失败证据，确保晚到的熔断状态不会丢失。
+     * 先保存事故快照，再有界关闭运行时，最后无条件尝试覆盖最终证据。
      *
      * @param scenarioFailure 场景主失败，可为空
      * @throws Exception 仅在场景本身成功但关闭或证据保存失败时抛出
      */
     void shutdownAndSaveEvidence(Throwable scenarioFailure) throws Exception {
+        shutdownAndSaveEvidence(
+                scenarioFailure,
+                this::saveEvidence,
+                this::close,
+                SHUTDOWN_TIMEOUT
+        );
+    }
+
+    /**
+     * 以可注入动作执行两阶段证据保存和有界关闭，供阻塞关闭路径做确定性测试。
+     *
+     * @param scenarioFailure 场景主失败，可为空
+     * @param evidenceAction 每次写入脱敏证据的动作
+     * @param shutdownAction 运行时关闭动作
+     * @param shutdownTimeout 关闭硬上限
+     * @throws Exception 成功场景中的关闭或证据写入失败
+     */
+    static void shutdownAndSaveEvidence(
+            Throwable scenarioFailure,
+            EvidenceAction evidenceAction,
+            ScenarioAction shutdownAction,
+            Duration shutdownTimeout
+    ) throws Exception {
+        Exception initialEvidenceFailure = trySaveEvidence(evidenceAction, scenarioFailure);
         RuntimeException shutdownFailure = null;
         try {
-            close();
+            runBounded(
+                    "SHUTDOWN_TIMEOUT",
+                    shutdownTimeout,
+                    shutdownAction
+            );
         } catch (RuntimeException failure) {
             shutdownFailure = failure;
             if (scenarioFailure != null) {
@@ -484,17 +523,101 @@ final class RealTeamE2EDriver implements AutoCloseable {
             }
         }
         Throwable effectiveFailure = scenarioFailure == null ? shutdownFailure : scenarioFailure;
-        try {
-            saveEvidence(effectiveFailure);
-        } catch (Exception evidenceFailure) {
-            if (effectiveFailure != null) {
-                effectiveFailure.addSuppressed(evidenceFailure);
-            } else {
-                throw evidenceFailure;
-            }
+        Exception finalEvidenceFailure = trySaveEvidence(evidenceAction, effectiveFailure);
+        if (effectiveFailure != null && finalEvidenceFailure != null) {
+            effectiveFailure.addSuppressed(finalEvidenceFailure);
+        }
+        if (effectiveFailure != null && initialEvidenceFailure != null) {
+            effectiveFailure.addSuppressed(initialEvidenceFailure);
         }
         if (scenarioFailure == null && shutdownFailure != null) {
             throw shutdownFailure;
+        }
+        if (scenarioFailure == null && finalEvidenceFailure != null) {
+            throw finalEvidenceFailure;
+        }
+        if (scenarioFailure == null && initialEvidenceFailure != null) {
+            throw initialEvidenceFailure;
+        }
+    }
+
+    /**
+     * 在全局预算内执行完整场景，超时后中断场景线程并返回明确 E2E_RUNTIME_TIMEOUT。
+     *
+     * @param action 单个场景的用户消息、等待与断言动作
+     * @throws Exception 场景动作抛出的原始异常
+     */
+    void runWithGlobalWatchdog(ScenarioAction action) throws Exception {
+        try {
+            runBounded("E2E_RUNTIME_TIMEOUT", GLOBAL_E2E_TIMEOUT, action);
+        } catch (BoundedActionException failure) {
+            throw failure.checkedCause();
+        }
+    }
+
+    /**
+     * 尝试保存一次证据但不阻断后续 shutdown 或最终证据写入。
+     *
+     * @param failure 本次摘要关联的场景或关闭失败
+     * @return 保存失败；成功时为空
+     */
+    private static Exception trySaveEvidence(EvidenceAction evidenceAction, Throwable failure) {
+        try {
+            evidenceAction.save(failure);
+            return null;
+        } catch (Exception evidenceFailure) {
+            return evidenceFailure;
+        }
+    }
+
+    /**
+     * 在独立守护线程中有界执行可能阻塞的 E2E 动作。
+     *
+     * @param failureType 超时后的稳定失败分类
+     * @param timeout 最长等待时间
+     * @param action 待执行动作
+     */
+    static void runBounded(String failureType, Duration timeout, ScenarioAction action) {
+        if (failureType == null || failureType.isBlank()) {
+            throw new IllegalArgumentException("failureType 不能为空");
+        }
+        if (timeout == null || timeout.isZero() || timeout.isNegative()) {
+            throw new IllegalArgumentException("timeout 必须大于零");
+        }
+        ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "qingling-e2e-" + failureType.toLowerCase(Locale.ROOT));
+            thread.setDaemon(true);
+            return thread;
+        });
+        Future<?> future = executor.submit(() -> {
+            action.run();
+            return null;
+        });
+        try {
+            future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException timeoutFailure) {
+            future.cancel(true);
+            throw new IllegalStateException(
+                    failureType + ": operation exceeded " + timeout,
+                    timeoutFailure
+            );
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            future.cancel(true);
+            throw new IllegalStateException(failureType + ": interrupted while waiting", interrupted);
+        } catch (ExecutionException executionFailure) {
+            Throwable cause = executionFailure.getCause() == null
+                    ? executionFailure
+                    : executionFailure.getCause();
+            if (cause instanceof RuntimeException runtimeFailure) {
+                throw runtimeFailure;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new BoundedActionException((Exception) cause);
+        } finally {
+            executor.shutdownNow();
         }
     }
 
@@ -770,6 +893,45 @@ final class RealTeamE2EDriver implements AutoCloseable {
     @Override
     public void close() {
         applicationContext.close();
+    }
+
+    /** 允许真实场景动作抛出受检异常的最小函数接口。 */
+    @FunctionalInterface
+    interface ScenarioAction {
+
+        /** 执行单个真实场景的完整业务步骤。 */
+        void run() throws Exception;
+    }
+
+    /** 接收当前失败并写出脱敏摘要的可测试证据动作。 */
+    @FunctionalInterface
+    interface EvidenceAction {
+
+        /**
+         * 写入一次场景证据。
+         *
+         * @param failure 当前场景或关闭失败，可为空
+         * @throws Exception 证据复制或序列化失败
+         */
+        void save(Throwable failure) throws Exception;
+    }
+
+    /** 仅包装场景动作自身的受检异常，避免把 watchdog 超时误解包成普通 TimeoutException。 */
+    private static final class BoundedActionException extends RuntimeException {
+
+        /**
+         * 保存待由场景入口重新抛出的受检异常。
+         *
+         * @param cause 场景动作抛出的受检异常
+         */
+        private BoundedActionException(Exception cause) {
+            super(cause);
+        }
+
+        /** 返回原始受检异常。 */
+        private Exception checkedCause() {
+            return (Exception) getCause();
+        }
     }
 
     /** 验证 QA 确实生成缺陷，并由 Java 状态机通过 Manager 分派 RD 修复及接收后续完成邮件。 */

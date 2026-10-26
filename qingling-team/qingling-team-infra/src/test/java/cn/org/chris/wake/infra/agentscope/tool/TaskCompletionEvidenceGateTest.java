@@ -92,6 +92,25 @@ class TaskCompletionEvidenceGateTest {
                 .hasMessageContaining("coverage_percent");
     }
 
+    /** 代码阶段即使正文自称成功，未经过真实 Test Runner 也必须被硬门禁拒绝。 */
+    @Test
+    void shouldRejectRdCompletionWithoutRecordedTestRunnerExecution() {
+        assertThatThrownBy(() -> gate.validate(
+                "gate-project", WorkflowStage.CODE_IMPLEMENTATION, "rd",
+                Map.of(
+                        "execution_id", "fabricated-execution",
+                        "status", "SUCCEEDED",
+                        "exit_code", 0,
+                        "pytest_collected", 8,
+                        "pytest_passed", 8,
+                        "coverage_percent", 100,
+                        "failure_type", "NONE",
+                        "retryable", false
+                )
+        )).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("不属于当前项目、角色和阶段");
+    }
+
     /**
      * RD 提供完整结构化证据时允许成功回报。
      */

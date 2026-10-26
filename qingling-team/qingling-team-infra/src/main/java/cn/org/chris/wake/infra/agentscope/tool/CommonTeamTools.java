@@ -3,6 +3,7 @@ package cn.org.chris.wake.infra.agentscope.tool;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.MailMessage;
+import cn.org.chris.wake.domain.workflow.WorkflowStage;
 import cn.org.chris.wake.infra.agentscope.CompletionProtocolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
@@ -412,9 +413,35 @@ public final class CommonTeamTools {
                 workflowToolCoordinator.claimAndStart(
                         projectId, role, message.id(), message.content(), dispatchId, sessionId
                 );
-                completionProtocolRegistry.expect(role, sessionId, projectId);
+                completionProtocolRegistry.expect(
+                        role,
+                        sessionId,
+                        projectId,
+                        completionRequiredAction(
+                                workflowTools == null ? null : workflowTools.currentStage(projectId),
+                                role
+                        )
+                );
             }
         }
+    }
+
+    /**
+     * 把当前阶段映射为模型可直接执行的稳定完成动作。
+     *
+     * @param stage Java 权威工作流阶段
+     * @param owner 当前阶段 Owner
+     * @return 不包含提示词或业务正文的动作名
+     */
+    private static String completionRequiredAction(WorkflowStage stage, String owner) {
+        if ("rd".equals(owner)
+                && (stage == WorkflowStage.CODE_IMPLEMENTATION || stage == WorkflowStage.DEFECT_FIX)) {
+            return "run_project_tests_then_task_done";
+        }
+        if ("qa".equals(owner) && stage == WorkflowStage.QA_TEST_EXECUTION) {
+            return "run_project_tests_then_task_done";
+        }
+        return "send_task_done";
     }
 
     /**

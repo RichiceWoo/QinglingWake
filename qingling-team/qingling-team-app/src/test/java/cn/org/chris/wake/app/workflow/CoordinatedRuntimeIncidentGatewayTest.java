@@ -94,6 +94,9 @@ class CoordinatedRuntimeIncidentGatewayTest {
                     "failure_type", "OWNER_EXITED_WITH_RUNNING_EXECUTION"
             );
             assertThat(action.attributes()).containsEntry("protocol", "agent_execution_failed");
+            assertThat(action.attributes()).containsEntry(
+                    "required_action", "run_project_tests_then_task_done"
+            );
         });
         assertThat(runtime.state().outboxActions()).anySatisfy(action -> {
             assertThat(action.type()).isEqualTo(OutboxActionType.CRON_WAKE);

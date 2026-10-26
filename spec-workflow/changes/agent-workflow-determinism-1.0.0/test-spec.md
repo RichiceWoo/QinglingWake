@@ -264,3 +264,7 @@ git diff --check
 | 2026-10-25 | Owner 未终态类型化失败聚焦测试 | 定向 Maven 测试 | 通过 63 项，16.025s；覆盖登记/解除义务、`OWNER_EXITED_WITH_RUNNING_EXECUTION`、原 Owner attempt=2 continuation、第二次同类失败 BLOCKED 与 incident 幂等 |
 | 2026-10-25 | Owner 未终态修复默认回归 | `mvn verify` | 通过 410 项，23.491s；domain 72、app 61、infra 163、adapter 13、starter 101，0 failure/error/skip；未运行 E2E |
 | 2026-10-25 | Owner 未终态修复零模型 Docker 契约 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 410 unit + 1 IT 通过，36.849s；10 次 Shell、5 次 Test Runner、受控连接恢复和无 pytest/pip/tmux orphan；NoCallModel，未运行 E2E |
+| 2026-10-25 | Owner 未终态修复后单次真实 E2E | `mvn -Pe2e -De2e.scenario=happy-path verify` | 业务失败且 shutdown 死锁后人工中断（exit 130，约 31 分钟）；PM 首次恢复成功，RD 首次 `OWNER_EXITED_WITH_RUNNING_EXECUTION` 自动续跑到 attempt=2，第二次同类失败 BLOCKED、无第三次 wake。`CronService.fire()` 持监视器无界 join，主线程阻塞于 `CronService.stop()`；无 summary，未重试，清理后无 session/orphan |
+| 2026-10-26 | Cron/RuntimeLifecycle/Driver 与完成门禁定向测试 | 指定 7 个测试类的 Maven 定向命令 | app 8、infra 29、starter 43，共 80 项通过；覆盖 Cron 有限等待与停止、RuntimeLifecycle 继续取消、Driver 证据先存与双看门狗、required_action 和真实 Test Runner 硬门禁 |
+| 2026-10-26 | 修复后默认回归 | `mvn verify` | domain 72、app 62、infra 164、adapter 13、starter 104，共 415 项通过，0 failure/error/skip，BUILD SUCCESS，21.031s；未运行 E2E |
+| 2026-10-26 | 修复后零模型真实 Docker 契约 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 415 项单元回归及 1 IT 通过，IT 17.81s、Maven 36.530s；真实 AgentScope/MCP/Docker + NoCallModel，不调用百炼，未运行 E2E |

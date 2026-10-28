@@ -31,18 +31,20 @@ type: task
     **导入根唯一**：pytest 固定从 `code/` 运行，测试必须 `from main import app`，业务模块必须按根目录真实路径直接导入（例如 `from services.todo_service import ...`）。禁止 `from app ...` 或 `import app`；即使存在 `code/app/` 业务目录，也不得把它作为测试导入根。
 13. **测试必须引用真实公开符号**：创建或修改测试前先用 `read_shared` 回读被测实现，确认模块路径、类名、常量名和函数签名真实存在。禁止凭空引入 `TEXT_MAX_LEN`、`metadata`、`TodoService` 等未在实现中声明的符号。
 14. **收集失败优先收敛**：`run_project_tests` 会先执行受控 `pytest --collect-only`。若返回 `exit_code=2` 或 stdout/stderr 显示 collection/import error，本轮只修复已有导入、fixture 和公开契约，不得继续新增测试文件或扩大用例数量；收集通过后才处理业务断言失败。
+15. **首个 Test Runner 必须前置**：先完成可导入、可启动的最小垂直切片和非空 `requirements.txt`，随后立即调用 `run_project_tests`。RD Runner 会同时执行项目测试与 Harness 固定验收契约，因此不得等到自写测试、前端美化或所有可选分层完成后才首次运行。第一次结构化失败是后续实现清单，不是交付失败。
+16. **恢复回合测试优先**：收到 `required_action=run_project_tests_now_then_fix_or_task_done` 时，领取邮件后的首次状态变更必须是 `run_project_tests(project_id)`；在取得结果前继续写 `code/` 会被 Java 工具门禁拒绝。取得失败结果后才按 stderr/契约修复并重跑。
 
 ## 步骤
 
 ### Step 1 — 读技术方案
 `sandbox_execute_bash cmd="cat /workspace/shared/projects/{pid}/tech/tech_design.md"`
 
-### Step 2 — 规划五层目录
-列出 `routers/`、`services/`、`models/`、`schemas/`、`tests/` 下的全部目标文件；目录由下一步的 `write_shared` 自动创建，不调用 shell 建目录。
+### Step 2 — 规划最小垂直切片
+先列出第一次 Test Runner 所必需的文件：非空 `requirements.txt`、唯一 `main.py`、持久化与 4 个 REST 端点、可内联返回的单文件 HTML。分层目录和自写测试可以在第一次结构化结果之后补齐；目录由 `write_shared` 自动创建，不调用 shell 建目录。
 
-### Step 3 — 按 tech_design 写代码
-对每个模块调用 `write_shared(project_id={pid}, rel_path="code/...", content="...")`。每次调用只写一个完整文件，禁止让 shell 解释源码内容。
-必需文件：
+### Step 3 — 先写可测试的最小实现
+对每个模块调用 `write_shared(project_id={pid}, rel_path="code/...", content="...")`。每次调用只写一个完整文件，禁止让 shell 解释源码内容。首次测试前只实现固定验收契约需要的最小闭环，不做前端样式美化、额外抽象或大规模自写测试。
+最终必需文件：
 - `code/main.py`（app + router 挂载）
 - `code/database.py`（engine + SessionLocal + get_db）
 - `code/models/*.py`（ORM）
@@ -54,7 +56,7 @@ type: task
 
 编写 `tests/conftest.py` 时优先采用 `tmp_path` 创建数据库文件，并确保应用的 `get_db` 与测试请求共用该文件/engine。每个测试结束后关闭 session 和 engine；不得让 API 测试与 service 测试各自创建互不可见的 `:memory:` 数据库。
 
-### Step 4 — 安装依赖并执行结构化测试
+### Step 4 — 立即安装依赖并执行首个结构化测试
 调用 Shell 工具时只传 `cmd` 即可；不要自行添加字符串形式的 `timeout`。
 
 先把 `{pid}` 替换为当前邮件中的真实 `project_id`，验证目录后再安装和测试。若 `test -d` 失败，停止本任务并向 Manager 报告沙盒挂载异常；禁止 `ls /workspace` 后选择角色私有目录作为回退。
@@ -66,10 +68,11 @@ test -d /workspace/shared/projects/{pid}/code && \
   pip install -r requirements.txt -q
 ```
 
-安装成功后调用 `run_project_tests(project_id={pid})`。Java Test Runner 会先做收集预检；收集失败时不会继续正式 pytest，并返回相同 execution ID 下的结构化终态。
+安装成功后立即调用 `run_project_tests(project_id={pid})`，不要先继续补可选文件。Java Test Runner 会同时执行当前项目测试和只读的 `../acceptance/test_todo_contract.py`，并先做收集预检；即使项目测试尚未建立，固定验收也会给出可操作的业务差距。收集失败时不会继续正式 pytest，并返回相同 execution ID 下的结构化终态。
 
 ### Step 5 — 失败修复（≤ 3 轮）
 - 读 stderr 最后 30 行
+- 首次运行后再按失败证据补齐 `code/tests/test_*.py`、必要分层与非关键前端实现，禁止脱离结构化结果继续扩张范围
 - `exit_code=2` 时先定位 collection/import error，回读对应实现与测试，修复不存在的模块或符号引用；收集未通过前禁止新增测试
 - 收集成功后再定位是哪个测试哪个断言失败
 - 回读三份需求文档确定唯一期望；改代码（而非改测试）。只有断言与三份文档冲突时才允许修测试，并在 `task_done` 中说明文档依据

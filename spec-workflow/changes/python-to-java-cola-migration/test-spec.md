@@ -287,3 +287,8 @@ mvn -Pe2e -De2e.scenario=code-fail-recovery verify
 | 2026-10-26 | Task 18 Cron/Driver/代码门禁定向回归 | 通过（80 tests） | 覆盖 Cron 有界等待与停止、RuntimeLifecycle 后续取消、Driver 证据保存顺序与双看门狗、RD required_action 和真实 Test Runner 硬门禁 |
 | 2026-10-26 | Task 18 完整默认回归 | 通过（415 tests，21.031s） | 六模块全部 SUCCESS，0 failure/error/skip；未运行 E2E |
 | 2026-10-26 | Task 18 零模型真实 Docker 契约 | 通过（415 unit + 1 IT，Maven 36.530s） | 真实 AgentScope/MCP/Docker、NoCallModel；未调用百炼或运行 E2E，父 Task 18 保持未完成 |
+| 2026-10-26 | Task 18 单次 `happy-path` | 无效环境运行，主动中止 exit 130 | 预检恢复成功且宿主进入 PRODUCT_DESIGN/PM，但容器 bind mount 仍读取归档前旧 workflow；哈希不一致。未重试，重启容器后 mount probe/healthy/session=0/无 orphan 通过；父 Task 18 未完成 |
+| 2026-10-27 | Task 18 单次有效 `happy-path` | 失败（1 failure、0 errors、0 skipped；E2E 1297s、Maven 21:57） | `qwen3.8-flash` 预检 attempt 1 可用；checkpoint、产品、技术设计成功，PM 首次完成协议拒绝后恢复成功。RD 代码阶段两回合均未调用真实 Test Runner/`task_done`，首次自动续跑、第二次 `BLOCKED/OWNER_EXITED_WITH_RUNNING_EXECUTION`，QA 被硬门禁阻止。MCP 全 CLOSED；finally 证据完整，shutdown 后 pending/active/session/orphan 清零；父 Task 18 未完成。 |
+| 2026-10-27 | Task 18 代码阶段确定性推进定向回归 | 通过（72 tests，6.098s） | 覆盖 Test Runner 前写入门禁、调用登记、两类 incident、测试后有限 continuation 与最终 BLOCKED。 |
+| 2026-10-27 | Task 18 代码阶段确定性推进 `mvn verify` | 通过（420 tests；最终复跑 20.137s） | 六模块全部 SUCCESS，0 failure/error/skip；未运行 E2E。 |
+| 2026-10-27 | Task 18 零模型真实 Docker 契约 | 首次因失败夹具缺少 acceptance 失败；补齐后通过（420 unit + 1 IT，39.362s） | 真实 Docker/AgentScope/MCP + NoCallModel；固定双目标 Test Runner、受控连接恢复与无 orphan 通过，未调用百炼或运行 E2E。 |

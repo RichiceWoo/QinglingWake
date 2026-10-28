@@ -294,3 +294,28 @@
 - [x] 代码阶段 completion obligation 与真实 Test Runner execution 形成硬门禁，缺少 execution 时拒绝完成
 - [x] 定向 80 项、默认 `mvn verify` 415 项、零模型真实 Docker 契约 1 IT 全部通过
 - [ ] 四场景真实 E2E（本轮按要求未运行，Task 18 保持未完成）
+
+### 2026-10-26 单次 E2E 环境失配
+
+- [x] 只启动一次 `happy-path`；模型预检第二次尝试成功
+- [x] 发现宿主新 workspace 与容器旧 bind mount 哈希不一致后立即中止，未把污染运行记为业务失败
+- [x] 归档证据、清理 1 个 shell session、重启容器并验证 mount probe、healthy、session=0
+- [ ] 重新执行真实 E2E（本轮未重试，Task 18 保持未完成）
+
+### 2026-10-27 修复后单次有效 E2E
+
+- [x] 只执行一次干净 `qwen3.8-flash happy-path`；预检 attempt 1、HTTP 200 通过
+- [x] checkpoint、产品设计、技术设计完成，PM 完成协议拒绝后由原 Owner 恢复成功
+- [x] RD 首次未终态退出自动续跑，第二次同类失败按预算进入 BLOCKED，未进入 QA
+- [x] finally 保存脱敏证据；shutdown 后 dispatch/AgentScope/AIO session 与孤儿进程均清零
+- [x] 让代码阶段在有限恢复预算内确定性进入真实 `run_project_tests`，并为测试后修复/`task_done` 提供一次有证据的收尾 continuation
+- [ ] 四场景真实 E2E（本轮未重试、后三场景未运行，Task 18 保持未完成）
+
+### 2026-10-27 代码阶段有限回合确定性推进修复
+
+- [x] 把 RD 首次 Test Runner 前移到最小可运行纵切面，并固定同时执行项目测试与 Harness acceptance
+- [x] 新增 `TEST_RUNNER_NOT_INVOKED`、`TEST_RUNNER_COMPLETION_PENDING` 类型化失败
+- [x] 恢复 assignment 领取后由 Java 强制“先 Test Runner、后继续写 code”
+- [x] attempt 2 已有真实 Test Runner 进度时只增加一次 attempt 3 收尾机会，之后明确 BLOCKED
+- [x] 定向 72 项、默认回归 420 项、零模型真实 Docker 契约 1 IT 通过
+- [ ] 四场景真实 E2E（本轮未运行，Task 18 保持未完成）

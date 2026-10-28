@@ -484,12 +484,19 @@ public final class AgentScopeAgentGateway implements AgentGateway, AutoCloseable
             );
         });
         completionProtocolRegistry.pending(role, sessionId).ifPresent(expectation -> {
+            boolean testRequired = expectation.requiredAction().contains("run_project_tests");
+            AgentExecutionException.FailureType failureType = testRequired
+                    ? expectation.testInvoked()
+                            ? AgentExecutionException.FailureType.TEST_RUNNER_COMPLETION_PENDING
+                            : AgentExecutionException.FailureType.TEST_RUNNER_NOT_INVOKED
+                    : AgentExecutionException.FailureType.OWNER_EXITED_WITH_RUNNING_EXECUTION;
             throw new AgentExecutionException(
-                    AgentExecutionException.FailureType.OWNER_EXITED_WITH_RUNNING_EXECUTION,
+                    failureType,
                     "Owner 已领取 coordinated task_assign，但未成功调用 task_done 就结束父回合"
                             + "[role=" + role
                             + ",project_id=" + expectation.projectId()
-                            + ",required_action=" + expectation.requiredAction() + "]"
+                            + ",required_action=" + expectation.requiredAction()
+                            + ",test_invoked=" + expectation.testInvoked() + "]"
             );
         });
         return reply;

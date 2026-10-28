@@ -24,9 +24,7 @@ class McpProjectTestRunnerTest {
     /** 稳定测试 execution ID。 */
     private static final String EXECUTION_ID = "123e4567-e89b-12d3-a456-426614174000";
 
-    /**
-     * 启动命令必须固定项目目录、内部超时和 execution 状态目录，且不得创建持久 tmux 会话。
-     */
+    /** 启动命令必须固定目录、同时覆盖 RD 自测与验收契约，并且不得创建持久 tmux 会话。 */
     @Test
     void shouldLaunchIdempotentControlledDockerExecution() {
         AtomicReference<Map<String, Object>> input = new AtomicReference<>();
@@ -39,8 +37,7 @@ class McpProjectTestRunnerTest {
         assertThat(input.get().get("cmd").toString())
                 .contains("mkdir '/workspace/.qingling-test-runs/" + EXECUTION_ID + "'")
                 .contains("cd '/workspace/shared/projects/demo-project/code'")
-                .contains("test_targets='.'")
-                .doesNotContain("../acceptance/test_todo_contract.py")
+                .contains("test_targets='. ../acceptance/test_todo_contract.py'")
                 .contains("timeout --signal=TERM --kill-after=5s 30s")
                 .contains("python -m pytest --collect-only -q --disable-warnings --import-mode=importlib")
                 .contains("timeout --signal=TERM --kill-after=5s 240s")

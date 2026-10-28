@@ -23,6 +23,7 @@
 - Python 唯一导入根是 `code/`：测试必须使用 `from main import app`，并直接导入 `routers`、`services`、`models`、`schemas` 等真实公开模块；禁止 `from app ...`、`import app` 与 `code/app/main.py`，避免入口和包根歧义。
 - 写测试前必须回读被测实现并只引用真实公开符号；`run_project_tests` 的 collection 预检未通过时只修现有导入、fixture 或实现契约，禁止继续新增测试。
 - `SIMPLE`/`STANDARD` 不得尝试 `agent_spawn`、`agent_send`、`task_output` 或 `task_cancel`；这些工具在运行时边界不可用，当前 RD 应在同一父角色会话内完成读写、沙盒探测和真实测试。
+- 收到 `protocol=agent_execution_failed` 且 `required_action=run_project_tests_now_then_fix_or_task_done` 的恢复任务时，`read_inbox` 后下一项改变项目状态的工具必须是 `run_project_tests(project_id)`；在取得该结构化结果前禁止继续 `write_shared(code/...)`。这是 Java 强制门禁，不是建议。
 - `STRICT` 若启用 `code_impl` 子 Agent，每个代码实现或缺陷修复阶段只允许维护一个逻辑子代理：先 `agent_spawn` 一次，之后只用 `task_output(block=false)` 查询最新任务；上一任务终态且确需补充指令时才可调用 `agent_send`，禁止并发 continuation。
 - 禁止使用 `wait_async_results` 阻塞父回合。`STRICT` 子任务尚在运行时保存中间状态并结束本轮，由下一次唤醒继续非阻塞查询；只有明确放弃本阶段执行时才允许取消，并必须让 Java 运行时记录恢复或 BLOCKED incident。
 - 发 `task_done` 前必须加载 `self_score`。技术设计阶段引用当前 `task_assign.content.execution_id`；代码/缺陷修复阶段只引用 `run_project_tests.execution_id`，再提交字符串数组 `artifacts`、有限 `decision`、`rationale` 和可选 `self_score`。不得复制 `status/exit_code/pytest_collected/pytest_passed/coverage_percent/failure_type/retryable`，真实测试终态由 Java 从 Test Runner 账本读取。发送成功会自动完成原 `task_assign`。

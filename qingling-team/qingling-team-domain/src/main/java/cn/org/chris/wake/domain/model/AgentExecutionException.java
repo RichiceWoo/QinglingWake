@@ -53,6 +53,12 @@ public final class AgentExecutionException extends IllegalStateException {
         /** Owner 已领取运行中 execution，但未尝试成功完成协议便正常结束父回合。 */
         OWNER_EXITED_WITH_RUNNING_EXECUTION,
 
+        /** 代码或测试恢复回合在调用真实 Test Runner 前结束，未形成可诊断测试证据。 */
+        TEST_RUNNER_NOT_INVOKED,
+
+        /** 当前回合已产生真实测试执行，但尚未修复到可提交 task_done，需要有限续跑。 */
+        TEST_RUNNER_COMPLETION_PENDING,
+
         /** MCP 调用结果不可判定，运行时已尝试受控重建且禁止重放原命令。 */
         MCP_CONNECTION_UNAVAILABLE
     }

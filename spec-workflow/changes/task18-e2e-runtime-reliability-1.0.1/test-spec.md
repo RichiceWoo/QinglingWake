@@ -290,3 +290,9 @@ git diff --check
 | 2026-10-26 | Cron/RuntimeLifecycle/Driver/门禁定向回归 | 指定 7 个测试类的 Maven 定向命令 | app 8、infra 29、starter 43，共 80 项通过；验证 stop 不等待业务 Future、Registry 继续取消、证据先存、全局/shutdown 看门狗、required_action 与缺失 Test Runner 拒绝 |
 | 2026-10-26 | 完整默认回归 | `mvn verify` | 415 项通过，0 failure/error/skip，BUILD SUCCESS，21.031s；未加载 E2E profile |
 | 2026-10-26 | 零模型真实 Docker 契约 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 415 unit + 1 IT 通过；IT 17.81s、Maven 36.530s，NoCallModel，未调用百炼或运行 E2E |
+| 2026-10-26 | 单次 `qwen3.8-flash happy-path` | `mvn -Pe2e -De2e.scenario=happy-path verify` | 环境前置无效并主动中止，exit 130；宿主新 workflow 与容器旧 bind mount execution/哈希不一致。未重试；清理 1 session 后重启容器，mount probe、healthy、session=0、无 orphan 均通过 |
+| 2026-10-27 | 单次有效 `qwen3.8-flash happy-path` | `mvn -Pe2e -De2e.scenario=happy-path verify` | 失败：1 failure、0 errors、0 skipped；E2E 1297s、Maven 21:57。预检 attempt 1/HTTP 200；checkpoint、产品和技术设计成功，PM 首次拒绝后恢复成功。RD 代码 execution 首次未终态退出后原 Owner attempt=2 续跑，第二次仍无 Test Runner execution/`task_done`，转为 `BLOCKED/OWNER_EXITED_WITH_RUNNING_EXECUTION` 并阻止 QA。四路 MCP CLOSED/0 failures；summary/failure-summary 完整，shutdown 后 pending/active/session/orphan 为 0；未重试。 |
+| 2026-10-27 | Test Runner 确定性推进定向测试 | 指定 7 个测试类的 Maven 定向命令 | 72 项通过，6.098s；验证测试前代码写入被拒绝、调用后解锁、失败类型区分、恢复动作、attempt 2 测试进度续跑与 attempt 3 BLOCKED。 |
+| 2026-10-27 | 完整默认回归 | `mvn verify` | 420 项通过，0 failure/error/skip；生产改动后首次 23.400s，Docker 夹具补齐后最终复跑 20.137s；未运行 E2E。 |
+| 2026-10-27 | 首次零模型真实 Docker 契约 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 失败：失败项目夹具缺少固定 acceptance，双目标收集 exit_code=4；作为真实契约缺口修复。 |
+| 2026-10-27 | 修复后零模型真实 Docker 契约 | `mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` | 420 unit + 1 IT 通过；IT 17.86s、Maven 39.362s，真实 Docker/MCP/AgentScope + NoCallModel，未调用百炼或运行 E2E。 |

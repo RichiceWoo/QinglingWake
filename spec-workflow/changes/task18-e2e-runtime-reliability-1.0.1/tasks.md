@@ -317,3 +317,29 @@ project_id -> execution_id + status + exit_code + pytest_collected
 - [x] 缺少 Java 记录的 Test Runner execution 时禁止代码阶段完成
 - [x] 定向 80 项、默认回归 415 项、零模型真实 Docker 契约 1 IT 通过
 - [ ] Task 8/Task 9 与四场景真实 E2E（本轮未运行）
+
+### 2026-10-26 单次 E2E bind mount 前置失败
+
+- [x] 仅启动一次 `happy-path`，未自动重试
+- [x] 以 execution 和文件哈希确认容器仍读取归档前旧 workspace
+- [x] 主动中止污染运行并归档脱敏证据
+- [x] 清理 session、重启容器并验证新挂载可见和无孤儿进程
+- [ ] Task 8/Task 9 与四场景真实 E2E（本轮无有效场景结果）
+
+### 2026-10-27 单次有效 `happy-path`
+
+- [x] 预检、挂载、Docker/session/orphan 前置检查通过后仅启动一次场景
+- [x] 验证 PM 完成协议恢复、RD 原 Owner 自动续跑及第二次同类失败 BLOCKED
+- [x] 验证缺少真实 Test Runner execution 时禁止进入 QA
+- [x] 验证失败证据与 shutdown 后 final snapshot 保存成功，所有 dispatch/session/orphan 清零
+- [x] 修复 RD 在有限回合内未执行真实 Test Runner 的确定性推进问题，并为已有测试证据的收尾提供一次有限 continuation
+- [ ] Task 8/Task 9 与四场景真实 E2E（本轮失败且未重试）
+
+### 2026-10-27 代码阶段 Test Runner 确定性推进
+
+- [x] RD 首回合在最小纵切面后立即调用 Test Runner，固定覆盖项目测试与 Harness acceptance
+- [x] completion obligation 记录真实 Test Runner 调用并产生两类可审计失败
+- [x] 首次未测试恢复采用 Java 强制测试优先写入门禁
+- [x] 仅对 attempt 2 已测试未完成提供一次 attempt 3 收尾机会，之后 BLOCKED
+- [x] 定向 72 项、`mvn verify` 420 项、零模型真实 Docker 1 IT 通过
+- [ ] Task 8/Task 9 与四场景真实 E2E（本轮未运行）

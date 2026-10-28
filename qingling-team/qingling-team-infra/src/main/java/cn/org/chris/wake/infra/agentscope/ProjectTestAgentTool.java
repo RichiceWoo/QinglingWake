@@ -63,6 +63,9 @@ public final class ProjectTestAgentTool implements AgentTool {
     /** 在工具启动瞬间解析 Java 工作流阶段，避免异步完成后发生阶段漂移。 */
     private final ExecutionStageResolver executionStageResolver;
 
+    /** 与父 Gateway 共享的完成协议状态，用于证明当前恢复回合已进入真实测试。 */
+    private final CompletionProtocolRegistry completionProtocolRegistry;
+
     /**
      * 创建固定目录的项目测试包装器。
      *
@@ -127,6 +130,37 @@ public final class ProjectTestAgentTool implements AgentTool {
             ProjectTestExecutionObserver executionObserver
     ) {
         this(
+                toolkit,
+                objectMapper,
+                role,
+                failureReporter,
+                executionStageResolver,
+                executionObserver,
+                new CompletionProtocolRegistry()
+        );
+    }
+
+    /**
+     * 创建同时接入 incident、执行证据和父回合测试顺序门禁的生产测试工具。
+     *
+     * @param toolkit 已包含可恢复 sandbox_execute_bash 的父 Toolkit
+     * @param objectMapper JSON 编解码器
+     * @param role rd 或 qa 当前 Owner
+     * @param failureReporter 工具故障确定性上报器
+     * @param executionStageResolver 调用开始时的 Java 阶段解析器
+     * @param executionObserver 测试终态观察器
+     * @param completionProtocolRegistry 与父 Gateway 共享的完成协议状态
+     */
+    public ProjectTestAgentTool(
+            Toolkit toolkit,
+            ObjectMapper objectMapper,
+            String role,
+            ToolFailureReporter failureReporter,
+            ExecutionStageResolver executionStageResolver,
+            ProjectTestExecutionObserver executionObserver,
+            CompletionProtocolRegistry completionProtocolRegistry
+    ) {
+        this(
                 new McpProjectTestRunner(toolkit, objectMapper, role),
                 objectMapper,
                 DEFAULT_POLL_INTERVAL,
@@ -134,7 +168,8 @@ public final class ProjectTestAgentTool implements AgentTool {
                 role,
                 failureReporter,
                 executionStageResolver,
-                executionObserver
+                executionObserver,
+                completionProtocolRegistry
         );
     }
 
@@ -248,6 +283,43 @@ public final class ProjectTestAgentTool implements AgentTool {
             ExecutionStageResolver executionStageResolver,
             ProjectTestExecutionObserver executionObserver
     ) {
+        this(
+                testRunner,
+                objectMapper,
+                pollInterval,
+                completionTimeout,
+                role,
+                failureReporter,
+                executionStageResolver,
+                executionObserver,
+                new CompletionProtocolRegistry()
+        );
+    }
+
+    /**
+     * 创建可完全注入恢复、incident、证据登记和测试顺序门禁的包装器。
+     *
+     * @param testRunner 可查询 Test Runner
+     * @param objectMapper JSON 编解码器
+     * @param pollInterval 轮询间隔
+     * @param completionTimeout 完成上限
+     * @param role 当前工作流 Owner
+     * @param failureReporter 故障上报器
+     * @param executionStageResolver 调用开始时的阶段解析器
+     * @param executionObserver 测试终态观察器
+     * @param completionProtocolRegistry 与父 Gateway 共享的完成协议状态
+     */
+    ProjectTestAgentTool(
+            ProjectTestRunner testRunner,
+            ObjectMapper objectMapper,
+            Duration pollInterval,
+            Duration completionTimeout,
+            String role,
+            ToolFailureReporter failureReporter,
+            ExecutionStageResolver executionStageResolver,
+            ProjectTestExecutionObserver executionObserver,
+            CompletionProtocolRegistry completionProtocolRegistry
+    ) {
         this.testRunner = Objects.requireNonNull(testRunner, "testRunner 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
         this.pollInterval = requirePositive(pollInterval, "pollInterval");
@@ -258,6 +330,9 @@ public final class ProjectTestAgentTool implements AgentTool {
                 executionStageResolver, "executionStageResolver 不能为空"
         );
         this.executionObserver = Objects.requireNonNull(executionObserver, "executionObserver 不能为空");
+        this.completionProtocolRegistry = Objects.requireNonNull(
+                completionProtocolRegistry, "completionProtocolRegistry 不能为空"
+        );
     }
 
     /** 返回结构化工具名。 */
@@ -297,6 +372,7 @@ public final class ProjectTestAgentTool implements AgentTool {
         try {
             String projectId = WorkspacePolicy.validateProjectId(text(param.getInput().get("project_id")));
             validateInheritedContext(param, projectId);
+            recordTestInvocation(param, projectId);
             WorkflowStage executionStage = executionStageResolver.resolve(projectId, role);
             Semaphore permit = PROJECT_PERMITS.computeIfAbsent(projectId, ignored -> new Semaphore(1));
             return acquire(permit).flatMap(acquired -> executeWithSingleRecovery(executionId, projectId)
@@ -311,6 +387,20 @@ public final class ProjectTestAgentTool implements AgentTool {
         } catch (RuntimeException exception) {
             return Mono.just(structuredResult(infrastructureFailure(executionId, false)));
         }
+    }
+
+    /**
+     * 在 Test Runner 真正启动前登记本回合已经跨过测试边界，允许随后按失败结果修代码。
+     *
+     * @param param AgentScope 工具调用上下文
+     * @param projectId 已校验项目标识
+     */
+    private void recordTestInvocation(ToolCallParam param, String projectId) {
+        if (param.getRuntimeContext() == null) {
+            return;
+        }
+        String sessionId = Objects.toString(param.getRuntimeContext().getSessionId(), "").trim();
+        completionProtocolRegistry.recordTestInvocation(role, sessionId, projectId);
     }
 
     /**

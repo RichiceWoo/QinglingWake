@@ -106,6 +106,113 @@ class CoordinatedRuntimeIncidentGatewayTest {
         assertThat(gateway.isRuntimeBlocked("project-1")).isTrue();
     }
 
+    /** 测试前退出只恢复一次；取得真实测试进度后可再续跑一轮，但第三轮仍必须 BLOCKED。 */
+    @Test
+    void shouldGrantOneAdditionalContinuationOnlyAfterVerifiedTestProgress() {
+        InMemoryRuntimeRepository runtime = new InMemoryRuntimeRepository(runningState());
+        WorkspaceRepository workspace = mock(WorkspaceRepository.class);
+        when(workspace.listProjectIds()).thenReturn(List.of("project-1"));
+        WorkflowOutboxProjector projector = new WorkflowOutboxProjector(
+                runtime, workspace, action -> { },
+                Clock.fixed(NOW.plusSeconds(1), ZoneOffset.UTC), 3
+        );
+        CoordinatedRuntimeIncidentGateway gateway = new CoordinatedRuntimeIncidentGateway(
+                runtime, workspace, projector, RuntimeIncidentGateway.noop(),
+                Clock.fixed(NOW, ZoneOffset.UTC)
+        );
+
+        gateway.reportAgentExecutionFailure(
+                "project-1", "rd", "dispatch-pretest",
+                AgentExecutionException.FailureType.TEST_RUNNER_NOT_INVOKED
+        );
+        continueExecution(runtime, 2, "assignment-2", "dispatch-test", NOW.plusSeconds(2));
+        gateway.reportAgentExecutionFailure(
+                "project-1", "rd", "dispatch-test",
+                AgentExecutionException.FailureType.TEST_RUNNER_COMPLETION_PENDING
+        );
+        WorkExecution secondRecovery = runtime.state().findExecution("work-1").orElseThrow();
+        continueExecution(runtime, 3, "assignment-3", "dispatch-final", NOW.plusSeconds(3));
+        gateway.reportAgentExecutionFailure(
+                "project-1", "rd", "dispatch-final",
+                AgentExecutionException.FailureType.TEST_RUNNER_COMPLETION_PENDING
+        );
+        WorkExecution blocked = runtime.state().findExecution("work-1").orElseThrow();
+
+        assertThat(secondRecovery.status()).isEqualTo(WorkExecutionStatus.RECOVERING);
+        assertThat(secondRecovery.attempt()).isEqualTo(2);
+        assertThat(blocked.status()).isEqualTo(WorkExecutionStatus.BLOCKED);
+        assertThat(blocked.attempt()).isEqualTo(3);
+        assertThat(runtime.state().outboxActions()).anySatisfy(action ->
+                assertThat(action.attributes()).containsEntry(
+                        "required_action", "run_project_tests_now_then_fix_or_task_done"
+                )
+        );
+        assertThat(runtime.state().outboxActions()).anySatisfy(action ->
+                assertThat(action.attributes()).containsEntry(
+                        "required_action", "fix_from_test_result_then_rerun_and_task_done"
+                )
+        );
+    }
+
+    /** 测试优先恢复回合若仍未调用 Test Runner，第二次同类失败必须直接 BLOCKED。 */
+    @Test
+    void shouldBlockSecondPretestExitWithoutGrantingThirdTurn() {
+        InMemoryRuntimeRepository runtime = new InMemoryRuntimeRepository(runningState());
+        WorkspaceRepository workspace = mock(WorkspaceRepository.class);
+        when(workspace.listProjectIds()).thenReturn(List.of("project-1"));
+        CoordinatedRuntimeIncidentGateway gateway = new CoordinatedRuntimeIncidentGateway(
+                runtime,
+                workspace,
+                new WorkflowOutboxProjector(
+                        runtime, workspace, action -> { },
+                        Clock.fixed(NOW.plusSeconds(1), ZoneOffset.UTC), 3
+                ),
+                RuntimeIncidentGateway.noop(),
+                Clock.fixed(NOW, ZoneOffset.UTC)
+        );
+
+        gateway.reportAgentExecutionFailure(
+                "project-1", "rd", "dispatch-pretest-1",
+                AgentExecutionException.FailureType.TEST_RUNNER_NOT_INVOKED
+        );
+        continueExecution(runtime, 2, "assignment-2", "dispatch-pretest-2", NOW.plusSeconds(2));
+        gateway.reportAgentExecutionFailure(
+                "project-1", "rd", "dispatch-pretest-2",
+                AgentExecutionException.FailureType.TEST_RUNNER_NOT_INVOKED
+        );
+
+        WorkExecution blocked = runtime.state().findExecution("work-1").orElseThrow();
+        assertThat(blocked.status()).isEqualTo(WorkExecutionStatus.BLOCKED);
+        assertThat(blocked.attempt()).isEqualTo(2);
+        assertThat(blocked.failureType()).isEqualTo("TEST_RUNNER_NOT_INVOKED");
+    }
+
+    /**
+     * 将恢复中的 execution 重新领取并启动，断言 attempt 与预期一致。
+     *
+     * @param runtime 内存 runtime 仓储
+     * @param expectedAttempt 续跑后的预期尝试序号
+     * @param assignmentId 新 assignment 标识
+     * @param dispatchId 新 dispatch 标识
+     * @param retryAt 续跑时间
+     */
+    private static void continueExecution(
+            InMemoryRuntimeRepository runtime,
+            int expectedAttempt,
+            String assignmentId,
+            String dispatchId,
+            Instant retryAt
+    ) {
+        runtime.update("project-1", current -> {
+            WorkExecution continued = current.findExecution("work-1").orElseThrow()
+                    .retry(retryAt)
+                    .claim(assignmentId, retryAt)
+                    .start(dispatchId, "session-1", retryAt);
+            assertThat(continued.attempt()).isEqualTo(expectedAttempt);
+            return current.replaceExecution(continued, retryAt);
+        });
+    }
+
     /**
      * 创建 CODE_IMPLEMENTATION 阶段的唯一运行中 RD 执行。
      *

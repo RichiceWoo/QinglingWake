@@ -218,3 +218,26 @@
 - Driver 在 shutdown 前后各保存证据，并增加 2 小时场景总看门狗及 2 分钟 shutdown 看门狗。
 - RD 代码/缺陷恢复携带 `run_project_tests_then_task_done`，代码完成必须存在 Java 记录的真实 Test Runner execution。
 - 定向 80 项、`mvn verify` 415 项、真实 Docker/NoCallModel 契约 1 IT 通过；本轮未运行 E2E，父 Task 18 未完成。
+
+## 2026-10-26 Task 18 单次 E2E bind mount 前置失败
+
+- 唯一一次 `happy-path` 预检恢复成功并推进宿主 workflow，但 Docker `/workspace` 仍绑定归档前旧目录。
+- execution 与 `workflow-v2.json` 哈希交叉证明宿主/容器不一致，故主动中止 exit 130，不计业务失败且不重试。
+- 无效证据已归档；清理 1 session 并重启容器后 mount probe、healthy、session=0、无孤儿均通过。
+- 四场景没有有效结果，父 Task 18 保持未完成。
+
+## 2026-10-27 Task 18 单次有效 E2E
+
+- 唯一一次 `qwen3.8-flash happy-path` 预检与环境前置通过；checkpoint、产品和技术设计成功。
+- PM 完成协议首次失败后恢复成功；MCP 全 CLOSED/0 failures。
+- RD 代码阶段首次未终态退出自动续跑，第二次仍未执行 Test Runner/`task_done`，execution 按预算进入 BLOCKED，QA 未启动。
+- Maven 21:57，证据完整；shutdown 后 dispatch、AgentScope、AIO session 和孤儿进程清零。
+- 未重试或执行后三场景，父 Task 18 保持未完成。
+
+## 2026-10-27 Task 18 代码阶段确定性推进修复
+
+- RD 首次 Test Runner 前移到最小纵切面，固定执行项目测试和 Harness acceptance。
+- 完成协议新增未测试/已测试未完成两类 incident；首次未测试恢复由 Java 强制先调用 Test Runner，禁止继续盲写代码。
+- attempt 2 已有真实测试证据时可进行唯一一次 attempt 3 收尾，之后仍未完成则 BLOCKED。
+- 定向 72 项、默认 420 项通过；零模型 Docker 契约首次发现失败夹具缺少 acceptance，补齐后 420 unit + 1 IT 通过。
+- 本轮没有运行 E2E，四场景尚未通过，父 Task 18 继续未完成。

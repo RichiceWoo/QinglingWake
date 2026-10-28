@@ -179,3 +179,26 @@
 - Driver 在关闭前保存现场，关闭放入 2 分钟看门狗，关闭后始终补存证据；场景整体由 2 小时全局看门狗约束。
 - RD 代码/缺陷恢复和 Owner 退出诊断明确要求 `run_project_tests_then_task_done`；真实 Test Runner execution 缺失时完成门禁拒绝通过。
 - 定向 80 项、`mvn verify` 415 项、真实 Docker/NoCallModel 契约 1 IT 全部通过；未运行 E2E，Task 18 保持未完成。
+
+## 2026-10-26 单次 E2E 因 bind mount 旧 inode 中止
+
+- 唯一一次 `happy-path` 的模型预检 attempt 2 成功，宿主状态推进到 PRODUCT_DESIGN/PM。
+- 容器 `/workspace` 仍指向归档前目录，读取旧 execution；宿主与容器 `workflow-v2.json` 哈希不同，运行不具备有效性。
+- 主动中止为 exit 130，不计业务失败且不重试；证据归档为 `invalid-bind-mount-20261026-attempt1`。
+- 清理 1 个 shell session，重启容器并通过 mount probe；healthy、session=0、无孤儿进程。Task 18 未完成。
+
+## 2026-10-27 单次真实 E2E
+
+- 唯一一次 `happy-path` 的 `qwen3.8-flash` 预检 attempt 1 可用；checkpoint、产品设计、技术设计完成。
+- PM 的 `COMPLETION_PROTOCOL_REJECTED` 首次恢复成功；MCP 四路均为 CLOSED/0 failures。
+- RD 代码阶段两回合均未调用真实 Test Runner 或 `task_done`：首次自动续跑，第二次按预算进入 `BLOCKED/OWNER_EXITED_WITH_RUNNING_EXECUTION`，没有进入 QA。
+- Maven 21:57、E2E 1297 秒；脱敏 summary/failure-summary 完整，shutdown 后 pending dispatch、active AgentScope、AIO session 与孤儿进程均为 0。
+- 未重试或启动后三场景，Task 18 未完成。
+
+## 2026-10-27 代码阶段确定性进入 Test Runner
+
+- RD 模板改为最小纵切面后立即执行 Test Runner，固定纳入 Harness acceptance，不再把全部分层代码和自有测试都堆在首次测试之前。
+- 完成协议记录 Test Runner 是否真实调用；退出时区分 `TEST_RUNNER_NOT_INVOKED` 和 `TEST_RUNNER_COMPLETION_PENDING`。
+- 首次未测试恢复任务领取后，Java 禁止继续写 `code/`，直到同 session 的真实 Test Runner 调用；已有测试证据的 attempt 2 只获一次 attempt 3 收尾机会。
+- 定向 72 项、`mvn verify` 420 项通过。Docker 契约第一次暴露失败夹具缺少 acceptance，补齐后 420 unit + 1 IT 通过；NoCallModel，未运行 E2E。
+- 四场景仍无新的真实结果，Task 18 保持未完成。

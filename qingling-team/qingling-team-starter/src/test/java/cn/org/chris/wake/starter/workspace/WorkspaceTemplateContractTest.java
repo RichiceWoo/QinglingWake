@@ -176,6 +176,7 @@ class WorkspaceTemplateContractTest {
     @Test
     void shouldRequireStructuredProjectTestTool() throws Exception {
         Path templateRoot = templateRoot();
+        String rdAgents = Files.readString(templateRoot.resolve("rd/AGENTS.md"));
         String rdSkill = Files.readString(templateRoot.resolve("rd/skills/code_impl/SKILL.md"));
         String rdSubagent = Files.readString(templateRoot.resolve("rd/subagents/code_impl.md"));
         String qaSkill = Files.readString(templateRoot.resolve("qa/skills/test_run/SKILL.md"));
@@ -183,11 +184,17 @@ class WorkspaceTemplateContractTest {
 
         assertThat(rdSkill).contains("timeout=300", "禁止传字符串");
         assertThat(rdSkill)
+                .contains("首个 Test Runner 必须前置")
+                .contains("../acceptance/test_todo_contract.py")
+                .contains("run_project_tests_now_then_fix_or_task_done")
                 .contains("\"execution_id\": \"<run_project_tests.execution_id>\"")
                 .contains("不得复制 `status`、`exit_code`、`pytest_collected`")
                 .doesNotContain("\"pytest_collected\": \"<run_project_tests.pytest_collected>\"")
                 .contains("Java 会自动把对应 `task_assign` 标记为 `done`")
                 .doesNotContain("mark_done(pid, <task_assign_msg_id>)");
+        assertThat(rdAgents)
+                .contains("required_action=run_project_tests_now_then_fix_or_task_done")
+                .contains("Java 强制门禁");
         assertThat(rdSubagent)
                 .contains("run_project_tests(project_id)")
                 .contains("原始 `sandbox_execute_bash` 只可用于首次无副作用");

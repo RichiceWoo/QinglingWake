@@ -413,17 +413,40 @@ public final class CommonTeamTools {
                 workflowToolCoordinator.claimAndStart(
                         projectId, role, message.id(), message.content(), dispatchId, sessionId
                 );
+                WorkflowStage stage = workflowTools == null
+                        ? null : workflowTools.currentStage(projectId);
+                String requiredAction = assignmentRequiredAction(message, stage, role);
                 completionProtocolRegistry.expect(
                         role,
                         sessionId,
                         projectId,
-                        completionRequiredAction(
-                                workflowTools == null ? null : workflowTools.currentStage(projectId),
-                                role
-                        )
+                        requiredAction,
+                        "run_project_tests_now_then_fix_or_task_done".equals(requiredAction)
                 );
             }
         }
+    }
+
+    /**
+     * 优先采用 Java incident 写入的恢复动作，普通 assignment 才按权威阶段推导默认动作。
+     *
+     * @param message 当前 task_assign 邮件
+     * @param stage Java 权威工作流阶段
+     * @param owner 当前阶段 Owner
+     * @return 受限且不包含业务正文的完成动作名
+     */
+    private static String assignmentRequiredAction(
+            MailMessage message,
+            WorkflowStage stage,
+            String owner
+    ) {
+        if (message.content() instanceof Map<?, ?> values) {
+            Object raw = values.get("required_action");
+            if (raw != null && !raw.toString().isBlank()) {
+                return raw.toString().trim();
+            }
+        }
+        return completionRequiredAction(stage, owner);
     }
 
     /**
@@ -526,25 +549,71 @@ public final class CommonTeamTools {
      * @param content UTF-8 文件正文
      * @return 写入路径 JSON
      */
+    public String writeShared(
+            String projectId,
+            String relativePath,
+            String content
+    ) {
+        return writeShared(projectId, relativePath, content, null);
+    }
+
+    /**
+     * 按当前角色 Owner 权限写入项目共享文本文件，并执行恢复回合的测试优先门禁。
+     *
+     * @param projectId 项目标识
+     * @param relativePath 项目内相对路径
+     * @param content UTF-8 文件正文
+     * @param runtimeContext AgentScope 注入的当前执行上下文，不进入工具 schema
+     * @return 写入路径 JSON
+     */
     @Tool(
             name = "write_shared",
-            description = "按角色 Owner 权限写入共享项目文件；邮箱与事件必须使用专用工具。",
+            description = "按角色 Owner 权限写入共享项目文件；恢复回合可能要求先调用 run_project_tests。",
             concurrencySafe = true
     )
     public String writeShared(
             @ToolParam(name = "project_id", description = "项目 ID") String projectId,
             @ToolParam(name = "rel_path", description = "受 Owner 权限约束的相对路径") String relativePath,
-            @ToolParam(name = "content", description = "文件正文") String content
+            @ToolParam(name = "content", description = "文件正文") String content,
+            RuntimeContext runtimeContext
     ) {
         try {
+            String checkedProjectId = AgentToolSupport.requireProjectId(projectId);
+            validateTestFirstRecoveryWrite(checkedProjectId, relativePath, runtimeContext);
             validateCanonicalEntrypoint(relativePath);
             workspaceRepository.write(
-                    AgentToolSupport.requireProjectId(projectId), role, relativePath,
+                    checkedProjectId, role, relativePath,
                     Objects.requireNonNullElse(content, "")
             );
             return AgentToolSupport.success(objectMapper, Map.of("rel_path", relativePath));
         } catch (RuntimeException exception) {
             return AgentToolSupport.error(objectMapper, exception);
+        }
+    }
+
+    /**
+     * 阻止测试优先恢复回合继续盲写代码，直到本 session 已真实调用 Test Runner。
+     *
+     * @param projectId 已校验项目标识
+     * @param relativePath 待写入相对路径
+     * @param runtimeContext 当前 AgentScope 上下文
+     */
+    private void validateTestFirstRecoveryWrite(
+            String projectId,
+            String relativePath,
+            RuntimeContext runtimeContext
+    ) {
+        if (!"rd".equals(role) || runtimeContext == null || relativePath == null) {
+            return;
+        }
+        String normalized = Path.of(relativePath).normalize().toString().replace('\\', '/');
+        String sessionId = Objects.toString(runtimeContext.getSessionId(), "").trim();
+        if (normalized.startsWith("code/")
+                && completionProtocolRegistry.codeWriteBlockedUntilTest(role, sessionId, projectId)) {
+            throw new IllegalStateException(
+                    "当前是测试优先恢复回合：必须先调用 run_project_tests(project_id="
+                            + projectId + ")，取得结构化结果后才允许继续修改 code/"
+            );
         }
     }
 

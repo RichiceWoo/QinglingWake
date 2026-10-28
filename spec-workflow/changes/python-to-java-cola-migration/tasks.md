@@ -373,3 +373,27 @@ public final class AgentScopeAgentGateway implements AgentGateway {
 - [x] RD 恢复 required_action 与代码阶段真实 Test Runner 硬门禁完成
 - [x] 定向 80 项、`mvn verify` 415 项、零模型真实 Docker 契约 1 IT 通过
 - [ ] Task 18：四条真实 E2E 与最终验收（本轮未运行，继续未完成）
+
+### 2026-10-26 Task 18 单次 E2E 环境失配
+
+- [x] 仅启动一次 `happy-path` 并保存预检与宿主 workflow 证据
+- [x] 发现容器旧 bind mount 后中止，未将无效运行误记为业务失败
+- [x] 清理 session、重启容器并验证挂载、健康与无孤儿
+- [ ] Task 18：四条真实 E2E 与最终验收（本轮未产生有效结果）
+
+### 2026-10-27 Task 18 单次有效 E2E
+
+- [x] 仅执行一次真实 `qwen3.8-flash happy-path`，模型与 Docker 前置验证通过
+- [x] 验证 checkpoint、PM、RD 技术设计及 PM 完成协议恢复链
+- [x] 验证 RD 未终态自动续跑、第二次 BLOCKED、Test Runner 硬门禁与可靠 shutdown
+- [ ] 修复 RD 在两次有限回合内仍未调用 Test Runner/完成协议的问题
+- [ ] Task 18：四条真实 E2E 与最终验收（happy-path 失败，后三场景未运行）
+
+### 2026-10-27 Task 18 代码阶段确定性推进修复
+
+- [x] RD 最小纵切面后立即执行真实 Test Runner，并固定纳入 Harness acceptance
+- [x] 类型化区分未调用测试与测试后未完成
+- [x] 首次未测试恢复由 Java 强制先 Test Runner、后写代码
+- [x] 已有测试证据时仅增加一次有限收尾 continuation
+- [x] 定向 72 项、默认回归 420 项、零模型 Docker 契约 1 IT 通过
+- [ ] Task 18：四条真实 E2E 与最终验收（本轮未运行，继续未完成）

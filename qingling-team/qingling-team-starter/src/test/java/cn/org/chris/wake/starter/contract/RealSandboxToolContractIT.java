@@ -88,8 +88,12 @@ class RealSandboxToolContractIT {
                 "# 验证 RD 受控回归测试能够在真实沙盒执行。\n"
                         + "def test_contract():\n    assert 2 + 2 == 4\n");
         workspaceRepository.initializeProject("tool-contract-failure");
+        // 失败夹具同样安装真实 Harness 验收契约，覆盖 RD Test Runner 的固定双目标门禁。
+        Path failureProjectDirectory = workspaceRoot.resolve("shared/projects/tool-contract-failure");
+        TodoAcceptanceFixture.install(failureProjectDirectory, objectMapper);
         Path failureCodeDirectory = workspaceRoot.resolve("shared/projects/tool-contract-failure/code");
         Files.createDirectories(failureCodeDirectory);
+        Files.writeString(failureCodeDirectory.resolve("main.py"), todoApplicationSource());
         Files.writeString(failureCodeDirectory.resolve("test_large_failure.py"),
                 "# 生成超过 MCP 响应上限的失败输出，验证终态元数据不会随正文一起被截断。\n"
                         + "def test_large_failure():\n"
@@ -383,7 +387,7 @@ class RealSandboxToolContractIT {
                                 "TEST_FAILED",
                                 "PYTEST_FAILURE",
                                 "\"exit_code\":1",
-                                "\"pytest_collected\":1",
+                                "\"pytest_collected\":3",
                                 "output truncated"
                         )
                         .doesNotContain("RESULT_UNAVAILABLE", "INFRASTRUCTURE_FAILED");

@@ -3,6 +3,7 @@ package cn.org.chris.wake.infra.agentscope;
 import cn.org.chris.wake.domain.workflow.WorkflowStage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultState;
@@ -27,6 +28,62 @@ class ProjectTestAgentToolTest {
 
     /** JSON 结果解析器。 */
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /** Test Runner 调用开始时必须解除同一恢复回合的测试前写入门禁。 */
+    @Test
+    void shouldRecordTestInvocationBeforeRunnerStarts() {
+        CompletionProtocolRegistry registry = new CompletionProtocolRegistry();
+        registry.expect(
+                "rd", "session-test-first", "demo-project",
+                "run_project_tests_now_then_fix_or_task_done", true
+        );
+        ProjectTestExecution success = execution(
+                ProjectTestExecution.Status.SUCCEEDED,
+                0,
+                2,
+                2,
+                90D,
+                ProjectTestExecution.FailureType.NONE,
+                false,
+                "2 passed",
+                ""
+        );
+        ProjectTestAgentTool tool = new ProjectTestAgentTool(
+                immediateRunner(new AtomicReference<>(), success),
+                objectMapper,
+                Duration.ofMillis(1),
+                Duration.ofSeconds(1),
+                "rd",
+                ProjectTestAgentTool.ToolFailureReporter.NO_OP,
+                (projectId, role) -> WorkflowStage.CODE_IMPLEMENTATION,
+                ProjectTestAgentTool.ProjectTestExecutionObserver.NO_OP,
+                registry
+        );
+        ToolUseBlock use = new ToolUseBlock(
+                "call-test-first", ProjectTestAgentTool.TOOL_NAME,
+                Map.of("project_id", "demo-project")
+        );
+        RuntimeContext context = RuntimeContext.builder()
+                .userId("rd")
+                .sessionId("session-test-first")
+                .put(AgentScopeAgentGateway.ROLE_ATTRIBUTE, "rd")
+                .put(AgentScopeAgentGateway.PROJECT_ID_ATTRIBUTE, "demo-project")
+                .build();
+
+        ToolResultBlock result = tool.callAsync(ToolCallParam.builder()
+                .toolUseBlock(use)
+                .input(use.getInput())
+                .runtimeContext(context)
+                .build()).block();
+
+        assertThat(result).isNotNull();
+        assertThat(registry.pending("rd", "session-test-first"))
+                .get().extracting(CompletionProtocolRegistry.Expectation::testInvoked)
+                .isEqualTo(true);
+        assertThat(registry.codeWriteBlockedUntilTest(
+                "rd", "session-test-first", "demo-project"
+        )).isFalse();
+    }
 
     /** 测试执行必须绑定调用开始时的阶段，异步完成期间发生迁移也不能改写证据归属。 */
     @Test

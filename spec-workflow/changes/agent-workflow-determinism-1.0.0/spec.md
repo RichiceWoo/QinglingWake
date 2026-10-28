@@ -453,3 +453,23 @@ Cron 的 tick 串行锁与生命周期锁现已分离，dispatch 等待从无界
 Driver 现在先保存失败现场，再在独立守护线程中执行最长 2 分钟 shutdown，最后无论关闭成功或失败都补存一次证据；完整场景另有 2 小时硬看门狗。代码/缺陷阶段的 RD 恢复动作携带 `required_action=run_project_tests_then_task_done`，Owner 正常退出的类型化失败同步暴露该动作。完成证据门禁只接受 Java 记录的真实 Test Runner execution，缺少 execution 时即使模型提供看似成功的字段也拒绝完成。
 
 定向 80 项、完整 `mvn verify` 415 项及零模型真实 Docker `RealSandboxToolContractIT` 1 IT 全部通过。Docker 契约使用 NoCallModel，未调用百炼；本轮未运行真实 E2E，四场景和父 Task 18 继续未完成。
+
+## 27. 2026-10-26 单次 E2E 因 Docker bind mount 失配中止
+
+按授权只启动一次干净 `qwen3.8-flash happy-path`。模型预检 attempt 1 为可恢复 TLS 失败，attempt 2 可用；宿主 workflow 完成需求 checkpoint、进入 `PRODUCT_DESIGN/PM` 并生成 15197 字节 `design/product_spec.md`。随后发现容器 `/workspace` 仍绑定到归档前目录的旧 inode：宿主 execution 为 `work-9aca…`，容器工具却读取前一轮 `work-1eb…/work-a522…`，同名 `workflow-v2.json` 哈希不同。
+
+继续执行会把新 Java 状态与旧 Docker 项目混写，因此主动中断，Maven exit 130；本轮不计业务失败，也没有重试或启动后三场景。证据归档于 `target/e2e-evidence/diagnostics/invalid-bind-mount-20261026-attempt1`。清理 1 个 shell session 后重启容器，挂载探针可见、Docker healthy、active session=0，且无 Maven/E2E/pytest/pip/tmux 残留。Task 18 继续未完成。
+
+## 28. 2026-10-27 修复后单次真实 E2E
+
+按用户授权只运行一次干净 `qwen3.8-flash happy-path`。模型预检 attempt 1、HTTP 200、4907ms 通过；需求 checkpoint、产品设计和技术设计均完成。PM 首次 `COMPLETION_PROTOCOL_REJECTED` 后由原 PM 恢复并成功终态化，证明完成协议恢复链有效；四路 MCP circuit 全程 `CLOSED/0 failures`，Docker 挂载一致。
+
+代码阶段 RD 首回合生成实现但未调用 `run_project_tests` 或 `task_done`，被类型化为 `OWNER_EXITED_WITH_RUNNING_EXECUTION`；原 RD 自动续跑到 attempt 2，并继续补齐后端、前端与唯一入口，但仍在测试尚未编写、Test Runner 尚未调用时以普通文本退出。恢复预算耗尽后 execution 明确转为 `BLOCKED`，Driver 直接失败，未进入 QA。Maven 21:57，E2E 1297 秒；`summary.json`/`failure-summary.json` 保存成功，shutdown 后 dispatch pending=0、AgentScope active=0、AIO session=0，且无 Maven/E2E/pytest/pip/tmux 残留。本轮未重试或启动后三场景，Task 18 继续未完成。
+
+## 29. 2026-10-27 代码阶段有限回合确定性推进修复
+
+代码实现首回合现在要求在最小可运行纵切面、依赖清单与环境准备完成后立即调用 Test Runner；RD Test Runner 固定同时执行项目测试和 Harness 只读 `acceptance/test_todo_contract.py`，即使 RD 尚未编写自有测试也能尽早得到业务差距。Owner 退出时按证据区分 `TEST_RUNNER_NOT_INVOKED` 与 `TEST_RUNNER_COMPLETION_PENDING`，不再把两者都折叠为普通未终态失败。
+
+首次未调用 Test Runner 的恢复任务使用 `required_action=run_project_tests_now_then_fix_or_task_done`。该任务被领取后，Java 会在同 role/session/project 上禁止 RD 继续写 `code/`，直到真实 `run_project_tests` 工具调用进入边界；测试后才允许按结构化失败修复。通常仍只允许一次恢复；只有 attempt 2 已产生真实测试进度时，才额外允许一次收尾 continuation，attempt 3 仍未完成则明确 BLOCKED，避免无限续跑。
+
+定向 72 项、默认 `mvn verify` 420 项通过。零模型 Docker 契约首次暴露失败夹具缺少固定 acceptance，补齐真实只读验收与应用后，420 项单元回归及 `RealSandboxToolContractIT` 1 IT 通过；NoCallModel 未调用百炼。本轮未运行真实 E2E，Task 18 仍未完成。

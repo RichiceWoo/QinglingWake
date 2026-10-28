@@ -406,7 +406,8 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
                         owner,
                         stage,
                         execution
-                )
+                ),
+                completionProtocolRegistry
         );
     }
 

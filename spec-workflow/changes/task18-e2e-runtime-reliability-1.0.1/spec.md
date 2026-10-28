@@ -372,3 +372,23 @@ Owner 成功领取并启动 `task_assign` 后，运行时按 role/session/projec
 Driver 的 finally 先保存运行中失败证据，再以 2 分钟独立看门狗执行 shutdown，最后始终保存关闭后的终态证据；场景本身受 2 小时全局看门狗约束。RD 在代码实现或缺陷修复阶段的恢复任务会明确携带 `required_action=run_project_tests_then_task_done`，Gateway 的 Owner 未终态诊断也透传该动作。代码阶段完成门禁继续以 execution registry 为唯一权威：没有真实 Test Runner execution 时，模型复制的成功指标不能通过门禁。
 
 定向 80 项通过；`mvn verify` 通过 415 项；`mvn -Ptool-contract -Dit.test=RealSandboxToolContractIT verify` 通过 415 项单元回归和 1 个真实 Docker IT。工具契约使用 NoCallModel，未调用百炼。本轮未运行 E2E，Task 8、Task 9 和父 Task 18 均保持未完成。
+
+## 2026-10-26 单次 E2E 环境前置失败
+
+只启动一次显式 `qwen3.8-flash happy-path`。模型预检 attempt 1 为 `tls_failure/retryable=true`，唯一恢复 attempt 2 为 available；宿主侧完成 checkpoint 并进入 `PRODUCT_DESIGN/PM`。但在 PM 工具日志中发现 Docker `/workspace` 读取的是移动前的旧项目数据，execution 与宿主新 runtime 不一致，文件哈希也直接证明 bind mount 仍持有旧 inode。
+
+该运行不满足“干净场景目录”的硬前提，继续执行只会污染证据，因此主动中止，exit 130；没有自动重试或启动后三场景，不能计为 E2E 业务失败或通过。无效现场已归档，1 个 shell session 已清理；容器重启后 mount probe 通过、healthy、active session=0，无孤儿进程。Task 8、Task 9 与父 Task 18 保持未完成。
+
+## 2026-10-27 单次有效真实 E2E
+
+只执行一次干净 `qwen3.8-flash happy-path`。模型预检 attempt 1、HTTP 200、4907ms 可用，Docker bind mount 实时一致；需求 checkpoint、产品设计、技术设计成功。PM 首次完成协议拒绝后由原 Owner 恢复并成功推进，MCP 四路全程 `CLOSED/0 failures`。
+
+RD 在代码阶段首回合生成代码但未执行 Test Runner 或完成协议，运行时正确产生 `OWNER_EXITED_WITH_RUNNING_EXECUTION` 并自动唤醒原 RD。第二回合继续补齐代码，却在测试尚未完成、`test_execution_id` 仍为空时再次退出；恢复预算耗尽后同一 execution 进入 `BLOCKED`，Driver 立即报告权威运行时故障并禁止进入 QA。finally 成功保存失败前与 shutdown 后证据；最终 dispatch pending=0、AgentScope active=0、AIO session=0，无孤儿进程。Task 8、Task 9 与父 Task 18 保持未完成。
+
+## 2026-10-27 代码阶段有限回合确定性推进修复
+
+RD 首回合改为先形成最小可运行纵切面，再立即进入真实 Test Runner；Runner 固定执行 `.` 与只读 `../acceptance/test_todo_contract.py`，因此不再依赖模型先完成庞大的自有测试集合才产生首份验证证据。父回合完成义务同步记录 Test Runner 调用边界，并把未调用与已调用但未完成分别持久化为 `TEST_RUNNER_NOT_INVOKED`、`TEST_RUNNER_COMPLETION_PENDING`。
+
+首次未调用测试会生成 `run_project_tests_now_then_fix_or_task_done` 恢复动作。恢复邮件被领取后，Java 在相同 role/session/project 下阻断任何新的 `code/` 写入，直到真实 Test Runner 已调用；模型不能再用“继续补代码”耗尽唯一恢复回合。一般故障仍最多自动恢复一次；仅 attempt 2 已证明进入测试时，允许一次 attempt 3 收尾，之后仍未完成则 BLOCKED。
+
+定向 72 项和默认 420 项通过；零模型 Docker 契约的首次运行真实发现失败夹具缺少 acceptance，补齐后 420 unit + 1 IT 通过。本轮未启动 E2E，Task 8、Task 9 与父 Task 18 保持未完成。

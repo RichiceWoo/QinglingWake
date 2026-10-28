@@ -172,6 +172,48 @@ class CommonTeamToolsCoordinatedTest {
         assertThat(registry.unresolved("pm", "session-retry")).isEmpty();
     }
 
+    /** 恢复 assignment 必须在真实 Test Runner 调用前拒绝 RD 继续写 code，测试后立即放行。 */
+    @Test
+    void shouldEnforceTestFirstWriteGuardForRecoveryAssignment() throws Exception {
+        CommonTeamTools rdTools = new CommonTeamTools(
+                "rd", mailboxService, new FileWorkspaceRepository(workspaceRoot),
+                (role, projectId) -> "unused-wake", objectMapper, null, coordinator,
+                completionProtocolRegistry
+        );
+        mailboxService.send(
+                PROJECT_ID, "rd", "manager", "task_assign", "恢复代码阶段",
+                Map.of(
+                        "execution_id", "work-code",
+                        "stage", "CODE_IMPLEMENTATION",
+                        "protocol", "agent_execution_failed",
+                        "required_action", "run_project_tests_now_then_fix_or_task_done"
+                )
+        );
+        RuntimeContext context = RuntimeContext.builder()
+                .userId("rd")
+                .sessionId("session-test-first")
+                .put("dispatchId", "dispatch-test-first")
+                .build();
+
+        rdTools.readInbox(PROJECT_ID, context);
+        JsonNode blocked = objectMapper.readTree(rdTools.writeShared(
+                PROJECT_ID, "code/main.py", "app = object()\n", context
+        ));
+        completionProtocolRegistry.recordTestInvocation(
+                "rd", "session-test-first", PROJECT_ID
+        );
+        JsonNode allowed = objectMapper.readTree(rdTools.writeShared(
+                PROJECT_ID, "code/main.py", "app = object()\n", context
+        ));
+
+        assertThat(blocked.path("errcode").asInt()).isEqualTo(1);
+        assertThat(blocked.path("errmsg").asText()).contains("必须先调用 run_project_tests");
+        assertThat(allowed.path("errcode").asInt()).isZero();
+        assertThat(completionProtocolRegistry.pending("rd", "session-test-first"))
+                .get().extracting(CompletionProtocolRegistry.Expectation::testInvoked)
+                .isEqualTo(true);
+    }
+
     /** 记录工具调用并返回稳定有限结果的 runtime v2 测试协调器。 */
     private static final class RecordingCoordinator implements WorkflowToolCoordinator {
 

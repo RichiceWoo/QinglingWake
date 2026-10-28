@@ -315,3 +315,21 @@ Cron shutdown 死锁已消除：tick 串行化与生命周期控制不再共享�
 E2E Driver 先保存失败证据、再执行 2 分钟有界 shutdown、最后补存终态证据，并以 2 小时全局看门狗防止 Maven 永久悬挂。RD 代码/缺陷恢复明确要求先运行 Test Runner 再 `task_done`；完成门禁只认可 Java execution registry 中的真实测试执行，没有 execution 时不接受模型声明的成功结果。
 
 定向 80 项、默认回归 415 项、零模型真实 Docker 1 IT 全部通过。未运行真实 E2E，因此这些结果只证明运行时和工具契约回归通过，父 Task 18 仍未完成。
+
+## 2026-10-26 Task 18 单次 E2E 环境失配
+
+本轮只启动一次 `qwen3.8-flash happy-path`，预检经一次可恢复 TLS 重试后成功，宿主 Java workflow 正常完成需求 checkpoint 并进入产品设计。随后确认 AIO-Sandbox 的 bind mount 仍持有归档前目录的旧 inode，容器工具读取的 execution 与宿主新 runtime 不同，同名文件哈希也不一致。
+
+因为不满足干净目录前提，运行被主动中止，exit 130；未重试、未启动后三场景，不能据此评价迁移业务或 Java 编排结果。现场已归档；清理 session、重启容器并验证新挂载后，Docker healthy、session=0、无孤儿进程。父 Task 18 继续未完成。
+
+## 2026-10-27 Task 18 单次有效 E2E
+
+在挂载一致、Docker healthy、无残留进程的前提下，只执行一次真实 `qwen3.8-flash happy-path`。预检、需求 checkpoint、PM 产品设计和 RD 技术设计均成功；PM 的完成协议错误被 Java 恢复链纠正，MCP 全程健康。
+
+最终失败集中在代码阶段的工作量与回合终态约束：RD 首回合和唯一恢复回合都持续生成有效代码，却均在编写完整测试和调用 `run_project_tests` 之前退出。Java 运行时没有掩盖该行为，先自动续跑，第二次同类失败后将 execution 置为 `BLOCKED`，并由 Test Runner 硬门禁阻止 QA。证据与 shutdown 均可靠，但 happy-path 未通过，后三场景未运行，父 Task 18 继续未完成。
+
+## 2026-10-27 Task 18 代码阶段 Test Runner 确定性推进修复
+
+Java 完成协议现在区分代码 Owner 未进入测试与已进入测试但尚未完成，分别形成 `TEST_RUNNER_NOT_INVOKED` 和 `TEST_RUNNER_COMPLETION_PENDING` incident。首次未测试恢复会投递 `run_project_tests_now_then_fix_or_task_done`；该 assignment 领取后，运行时阻止同 session 的 RD 在 Test Runner 调用前继续写 `code/`，避免模型再次把有限回合耗在无界补代码上。
+
+RD 首次 Test Runner 前移到最小可运行纵切面，并固定运行项目测试与 Harness acceptance。一般失败仍只恢复一次；只有 attempt 2 已产生真实测试证据时才允许 attempt 3 完成修复、重跑和 `task_done`，随后仍未终态则 BLOCKED。定向 72 项、默认 420 项及零模型真实 Docker 1 IT 通过；本轮未运行 E2E，父 Task 18 继续未完成。

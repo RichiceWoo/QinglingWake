@@ -90,7 +90,7 @@ class AgentScopeAgentGatewayTest {
         assertThat(completionRegistry.unresolved("pm", "session-completion-rejected")).isEmpty();
     }
 
-    /** 已领取 task_assign 的 Owner 未调用 task_done 就返回时必须形成可恢复的类型化失败。 */
+    /** 需要正式测试的 Owner 未调用 Test Runner 就返回时必须形成精确的类型化失败。 */
     @Test
     void shouldRejectParentSuccessWhileOwnedExecutionRemainsRunning() {
         CompletionProtocolRegistry completionRegistry = new CompletionProtocolRegistry();
@@ -111,13 +111,44 @@ class AgentScopeAgentGatewayTest {
 
         assertFailureType(
                 future,
-                AgentExecutionException.FailureType.OWNER_EXITED_WITH_RUNNING_EXECUTION
+                AgentExecutionException.FailureType.TEST_RUNNER_NOT_INVOKED
         );
         assertThatThrownBy(future::join)
                 .hasRootCauseMessage("Owner 已领取 coordinated task_assign，但未成功调用 task_done 就结束父回合"
-                        + "[role=rd,project_id=todo-mvp,required_action=run_project_tests_then_task_done]");
+                        + "[role=rd,project_id=todo-mvp,required_action=run_project_tests_then_task_done,"
+                        + "test_invoked=false]");
         assertThat(runtime.cancellations).hasValue(1);
         assertThat(completionRegistry.pending("rd", "session-completion-missing")).isEmpty();
+    }
+
+    /** 已调用真实 Test Runner 但尚未 task_done 的回合必须保留“测试后待收敛”分类。 */
+    @Test
+    void shouldClassifyExitAfterTestRunnerAsBoundedCompletionContinuation() {
+        CompletionProtocolRegistry completionRegistry = new CompletionProtocolRegistry();
+        ActivityRuntime runtime = new ActivityRuntime(context -> {
+            completionRegistry.expect(
+                    "rd", context.getSessionId(), "todo-mvp", "run_project_tests_then_task_done"
+            );
+            completionRegistry.recordTestInvocation("rd", context.getSessionId(), "todo-mvp");
+            return Mono.just(Msg.builder().textContent("已取得失败结果，下轮继续修复").build());
+        });
+        AgentScopeAgentGateway gateway = new AgentScopeAgentGateway(
+                Map.of("rd", runtime), AgentScopeAgentGateway.RuntimeMode.PRODUCTION,
+                (sessionId, routingKey, userMessage, assistantReply, turnTimestampMs) -> { },
+                McpSandboxConfiguration.disabled(), Duration.ofMillis(5), Duration.ofMillis(5),
+                Duration.ofSeconds(1), new ModelActivityRegistry(), completionRegistry
+        );
+
+        CompletableFuture<AgentReply> future = gateway.execute(request("rd", "session-test-pending"));
+
+        assertFailureType(
+                future,
+                AgentExecutionException.FailureType.TEST_RUNNER_COMPLETION_PENDING
+        );
+        assertThatThrownBy(future::join)
+                .hasRootCauseMessage("Owner 已领取 coordinated task_assign，但未成功调用 task_done 就结束父回合"
+                        + "[role=rd,project_id=todo-mvp,required_action=run_project_tests_then_task_done,"
+                        + "test_invoked=true]");
     }
 
     /**

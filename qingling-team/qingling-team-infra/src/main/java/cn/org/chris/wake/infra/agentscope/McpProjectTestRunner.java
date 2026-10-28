@@ -131,7 +131,7 @@ public final class McpProjectTestRunner implements ProjectTestRunner {
                 ? "test_targets='../acceptance/test_todo_contract.py'; "
                         + "if test -f '../qa/contract_tests/test_contract.py'; then "
                         + "test_targets=\\\"\\$test_targets ../qa/contract_tests/test_contract.py\\\"; fi; "
-                : "test_targets='.'; ";
+                : "test_targets='. ../acceptance/test_todo_contract.py'; ";
         String command = "set -eu; mkdir -p '" + EXECUTION_ROOT + "'; "
                 + "if mkdir '" + runDirectory + "' 2>/dev/null; then "
                 + "printf '%s' '" + projectId + "' > '" + runDirectory + "/project_id'; "

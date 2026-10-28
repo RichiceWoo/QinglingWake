@@ -48,11 +48,74 @@ public final class CompletionProtocolRegistry {
      * @param requiredAction 当前阶段必须完成的稳定动作名
      */
     public void expect(String role, String sessionId, String projectId, String requiredAction) {
+        expect(role, sessionId, projectId, requiredAction, false);
+    }
+
+    /**
+     * 登记带工具顺序门禁的完成义务，使恢复回合必须先取得真实测试结果再继续改代码。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     * @param projectId 当前项目标识
+     * @param requiredAction 当前阶段必须完成的稳定动作名
+     * @param testBeforeCodeWrite 是否禁止本回合在首次 Test Runner 调用前继续写 code 目录
+     */
+    public void expect(
+            String role,
+            String sessionId,
+            String projectId,
+            String requiredAction,
+            boolean testBeforeCodeWrite
+    ) {
         if (blank(role) || blank(sessionId) || blank(projectId)) {
             return;
         }
         String checkedAction = blank(requiredAction) ? "send_task_done" : requiredAction.trim();
-        expectations.put(key(role, sessionId), new Expectation(projectId, checkedAction));
+        expectations.put(
+                key(role, sessionId),
+                new Expectation(projectId, checkedAction, testBeforeCodeWrite, false)
+        );
+    }
+
+    /**
+     * 记录当前父回合已经真实进入 Test Runner，解除恢复回合的测试前写入门禁。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     * @param projectId Test Runner 调用的项目标识
+     */
+    public void recordTestInvocation(String role, String sessionId, String projectId) {
+        if (blank(role) || blank(sessionId) || blank(projectId)) {
+            return;
+        }
+        InvocationKey invocationKey = key(role, sessionId);
+        expectations.computeIfPresent(invocationKey, (ignored, expectation) -> {
+            if (!expectation.projectId().equals(projectId)) {
+                throw new IllegalArgumentException("Test Runner 项目与当前完成义务不一致");
+            }
+            return new Expectation(
+                    expectation.projectId(),
+                    expectation.requiredAction(),
+                    expectation.testBeforeCodeWrite(),
+                    true
+            );
+        });
+    }
+
+    /**
+     * 判断恢复回合是否仍处于“必须先测试”的代码写入禁区。
+     *
+     * @param role 当前团队角色
+     * @param sessionId AgentScope session 标识
+     * @param projectId 待写入项目标识
+     * @return 尚未调用 Test Runner 且恢复协议要求测试优先时为 true
+     */
+    public boolean codeWriteBlockedUntilTest(String role, String sessionId, String projectId) {
+        return pending(role, sessionId)
+                .filter(expectation -> expectation.projectId().equals(projectId))
+                .filter(Expectation::testBeforeCodeWrite)
+                .filter(expectation -> !expectation.testInvoked())
+                .isPresent();
     }
 
     /**
@@ -134,7 +197,9 @@ public final class CompletionProtocolRegistry {
     /** 表示父回合已领取但尚未通过 task_done 完成的 coordinated 项目。 */
     public record Expectation(
             /** 等待当前 Owner 完成的项目标识。 */ String projectId,
-            /** 父回合退出前必须完成的确定性动作。 */ String requiredAction
+            /** 父回合退出前必须完成的确定性动作。 */ String requiredAction,
+            /** 是否要求恢复回合先执行测试再继续写代码。 */ boolean testBeforeCodeWrite,
+            /** 当前父回合是否已经真实调用 Test Runner。 */ boolean testInvoked
     ) {
     }
 

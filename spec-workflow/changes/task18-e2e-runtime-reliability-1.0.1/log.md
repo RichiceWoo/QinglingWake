@@ -283,3 +283,27 @@
 - **证据/看门狗**：Driver 关闭前先取证，shutdown 受 2 分钟看门狗约束，关闭后总会补存证据；场景总预算为 2 小时。
 - **恢复/门禁**：RD 代码或缺陷恢复要求 `run_project_tests_then_task_done`；没有 Java 记录的真实 Test Runner execution 时拒绝完成。
 - **验证**：定向 80 项、默认 415 项、真实 Docker + NoCallModel 1 IT 通过；本轮未运行 E2E，Task 8、Task 9 和父 Task 18 保持未完成。
+
+## 2026-10-26 单次 E2E bind mount 失配
+
+- 预检一次 TLS 失败后按预算恢复成功；宿主 workflow 进入 PRODUCT_DESIGN/PM。
+- Docker 仍持有被移动目录的旧 inode，容器内读取旧 execution；宿主/容器同名 runtime 哈希不同。
+- 为避免新旧状态混写主动中止，exit 130；未重试，证据归档于 `invalid-bind-mount-20261026-attempt1`。
+- 清理 1 个 session 并重启容器后，mount probe 可见、Docker healthy、session=0、无孤儿；Task 8/9 未完成。
+
+## 2026-10-27 单次有效 E2E
+
+- `qwen3.8-flash` 预检一次通过，bind mount 与 Docker 前置状态有效；只运行一次 `happy-path`。
+- checkpoint、产品和技术设计完成；PM 的完成协议拒绝由原 Owner 恢复成功，MCP 未发生故障。
+- RD 两个代码回合均在调用 `run_project_tests` 前退出；首次进入 RECOVERING 并自动续跑，第二次进入 BLOCKED，QA 未启动。
+- Maven 21:57、E2E 1297 秒；证据位于 `qingling-team/target/e2e-evidence/happy-path`。
+- shutdown 后 dispatch pending=0、AgentScope active=0、AIO session=0、无孤儿；未重试，Task 8/9 未完成。
+
+## 2026-10-27 代码阶段有限回合确定性推进修复
+
+- RD 首次测试前移，Test Runner 固定执行项目测试和 Harness acceptance。
+- 新增 `TEST_RUNNER_NOT_INVOKED` / `TEST_RUNNER_COMPLETION_PENDING`，恢复任务不再只有泛化的 Owner 未终态原因。
+- `run_project_tests_now_then_fix_or_task_done` 恢复被领取后，Java 强制禁止测试前继续写 `code/`；真实工具调用后才解锁。
+- attempt 2 已有测试证据时允许一次 attempt 3 收尾；其余第二次失败及 attempt 3 继续 BLOCKED。
+- 定向 72 项、默认 420 项通过；Docker 契约首次发现夹具缺口，补齐 acceptance 后 420 unit + 1 IT 通过。
+- 按本轮范围未运行真实 E2E，Task 8/9 与父 Task 18 保持未完成。

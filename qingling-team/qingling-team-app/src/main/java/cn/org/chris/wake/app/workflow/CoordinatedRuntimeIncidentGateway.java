@@ -23,7 +23,8 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * 将 Runner 类型化故障原子写入 WorkExecution 和恢复 outbox，并为 legacy 项目保留旧实现。
+ * 将 Runner 类型化故障原子写入 WorkExecution 和恢复 outbox，为有测试证据的代码收敛保留有限续跑，
+ * 并让 legacy 项目继续使用旧故障链。
  */
 public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentGateway {
 
@@ -83,7 +84,7 @@ public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentG
     }
 
     /**
-     * 对 v2 项目保持 stage/owner 并限定一次恢复；legacy 项目委托旧 incident 链。
+     * 对 v2 项目保持 stage/owner；一般故障只恢复一次，真实测试进度可额外续跑一次。
      *
      * @param projectId 项目标识
      * @param role 当前 Owner
@@ -164,7 +165,7 @@ public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentG
     }
 
     /**
-     * 在 runtime 项目锁内定位唯一开放执行并形成 RECOVERING 或 BLOCKED 状态与 outbox。
+     * 在 runtime 项目锁内定位唯一开放执行，并按有限预算形成 RECOVERING 或 BLOCKED 状态与 outbox。
      *
      * @param current 锁内 aggregate
      * @param role 当前 Owner
@@ -185,13 +186,16 @@ public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentG
             throw new IllegalStateException("v2 incident 必须命中唯一开放 WorkExecution");
         }
         WorkExecution execution = open.get(0);
+        // 只有第二回合已真实进入 Test Runner，才允许第三回合完成修复和提交。
+        boolean verifiedTestProgress = "TEST_RUNNER_COMPLETION_PENDING".equals(failureType)
+                && execution.attempt() == 2;
         boolean retryable = execution.status() != WorkExecutionStatus.RECOVERING
-                && execution.attempt() == 1
+                && (execution.attempt() == 1 || verifiedTestProgress)
                 && execution.status() != WorkExecutionStatus.PENDING;
         WorkExecution changedExecution = retryable
                 ? execution.recover(failureType, now)
                 : execution.block(failureType, now);
-        String requiredAction = requiredAction(execution);
+        String requiredAction = requiredAction(execution, failureType);
         WorkflowRuntimeState changed = current.replaceExecution(changedExecution, now);
         changed = changed.enqueue(OutboxAction.pending(
                 actionId(commandId, "event"), OutboxActionType.WORKFLOW_EVENT,
@@ -252,9 +256,16 @@ public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentG
      * 根据权威 stage 与 Owner 生成恢复回合必须执行的有限动作。
      *
      * @param execution 当前开放执行
+     * @param failureType 当前类型化失败
      * @return 不包含业务正文、模型输出或凭据的稳定动作名
      */
-    private static String requiredAction(WorkExecution execution) {
+    private static String requiredAction(WorkExecution execution, String failureType) {
+        if ("TEST_RUNNER_NOT_INVOKED".equals(failureType)) {
+            return "run_project_tests_now_then_fix_or_task_done";
+        }
+        if ("TEST_RUNNER_COMPLETION_PENDING".equals(failureType)) {
+            return "fix_from_test_result_then_rerun_and_task_done";
+        }
         if ("rd".equals(execution.owner())
                 && (execution.stage() == cn.org.chris.wake.domain.workflow.WorkflowStage.CODE_IMPLEMENTATION
                 || execution.stage() == cn.org.chris.wake.domain.workflow.WorkflowStage.DEFECT_FIX)) {

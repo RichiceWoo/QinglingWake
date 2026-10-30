@@ -259,6 +259,17 @@ class CommonTeamToolsCoordinatedTest {
                     + dispatchId + "|" + agentSessionId);
         }
 
+        /** 测试协调器不执行真实 Test Runner，只验证接口可被安全调用。 */
+        @Override
+        public void beginTestExecution(
+                String projectId,
+                String role,
+                String stage,
+                String testExecutionId
+        ) {
+            // 该测试类只关注 mailbox 与完成协议，不需要持久化测试执行绑定。
+        }
+
         /** 记录完成正文并返回稳定有限结果。 */
         @Override
         public Map<String, Object> complete(

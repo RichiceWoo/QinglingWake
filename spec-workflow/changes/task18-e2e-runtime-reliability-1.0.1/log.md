@@ -307,3 +307,23 @@
 - attempt 2 已有测试证据时允许一次 attempt 3 收尾；其余第二次失败及 attempt 3 继续 BLOCKED。
 - 定向 72 项、默认 420 项通过；Docker 契约首次发现夹具缺口，补齐 acceptance 后 420 unit + 1 IT 通过。
 - 按本轮范围未运行真实 E2E，Task 8/9 与父 Task 18 保持未完成。
+
+## 2026-10-30 确定性推进修复后单次真实 E2E
+
+- 只启动一次干净的 `qwen3.8-flash happy-path`，没有启动后三个场景，也没有重试整轮。需求 checkpoint、产品设计和技术设计均成功；PM 首次 `COMPLETION_PROTOCOL_REJECTED` 后由原 Owner 恢复并成功推进。
+- RD 代码首回合触发 `TEST_RUNNER_NOT_INVOKED/RECOVERING`，恢复后真实调用 Test Runner；随后触发 `TEST_RUNNER_COMPLETION_PENDING/RECOVERING`。这证明测试优先门禁已生效，但有限恢复没有收敛到完成或 `BLOCKED`。
+- 代码阶段共创建 16 个真实 Test Runner execution，全部终态非零：12 个 `exit_code=1`、4 个 `exit_code=2`。最新一次已收敛到 11 collected、9 passed、2 failed、coverage 87%，失败为首页 HTML 契约；模型具备修复进展，但 workflow 从 2026-10-29T15:29:59Z 起一直保持 `CODE_IMPLEMENTATION/RD/RECOVERING`，未进入 QA。
+- 恢复期间 Manager 仍产生与 RD 恢复无关的重复 `task_done_received` 协调事件，RD 恢复邮件保持 pending；Driver 没有把“恢复状态下 Test Runner 反复执行但 stage/incident 不收敛”快速判为终态失败。
+- 用户确认失败可直接结束后，于 Maven 运行约 1 小时 5 分时发送中断，命令以 exit 130 结束；没有伪造 Failsafe summary。现场归档到 `qingling-team/target/e2e-evidence/diagnostics/happy-path-20261029-manual-stop`。
+- AIO shell 清理接口返回 HTTP 200；复核宿主无 E2E Maven/Surefire/Java，容器无 pytest/pip/tmux，Docker healthy。Task 8、Task 9 与父 Task 18 继续未完成。
+
+## 2026-10-31 恢复循环收敛与权威执行绑定
+
+- 新增原子 `claimAndStartWorkItem`：在一次 runtime repository 事务内完成 `RECOVERING` retry、assignment claim 和 dispatch start，命令 ID 提供重复调用幂等。
+- `WorkExecution` 持久化当前 attempt 的 `testInvocationCount` 与最新 `testExecutionId`；Test Runner 启动前绑定，最多 3 次，超限在进入 Docker 前返回结构化 `INVOCATION_REJECTED`。
+- 完成协议仅接受 `WorkExecution` 当前绑定的最新 Test Runner 终态；旧 execution 即使已完成也不能推进 workflow。
+- attempt 2 的受控 continuation 确定性进入 attempt 3；attempt 3 再失败由 runtime incident 转为 `BLOCKED`，incident 携带 attempt、retryable 与失败指纹。
+- Driver 增加 2 分钟 `RECOVERING` 快速诊断，直接输出 execution/stage/owner/attempt/test count/assignment/dispatch/agent 证据，避免等待全局超时。
+- File mailbox 在同一锁内将原 assignment 转为 `DONE` 后追加恢复 assignment；删除旧入口先释放为 `UNREAD` 的竞态，保证同 execution 只有一个活跃任务。
+- 验证：核心定向 101 项、旧入口兼容 23 项、协调器 5 项、完整 `mvn verify` 426 项、零模型真实 Docker 426 unit + 1 IT 全部通过。
+- 按用户要求未启动真实 E2E；Task 8、Task 9 与父 Task 18 继续未完成。

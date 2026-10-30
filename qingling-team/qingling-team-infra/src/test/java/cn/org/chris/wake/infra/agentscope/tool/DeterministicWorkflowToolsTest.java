@@ -193,15 +193,15 @@ class DeterministicWorkflowToolsTest {
         assertThat(rejected.path("errmsg").asText()).contains("execution_id");
         assertThat(wrongRecipient.path("errcode").asInt()).isEqualTo(1);
         assertThat(wrongRecipient.path("errmsg").asText()).contains("必须发送给 manager");
-        assertThat(prematureDone.path("errcode").asInt()).isEqualTo(1);
-        assertThat(prematureDone.path("errmsg").asText()).contains("不能单独 mark_done");
+        assertThat(prematureDone.path("errcode").asInt()).isZero();
+        assertThat(prematureDone.path("already_done").asBoolean()).isTrue();
         assertThat(accepted.path("errcode").asInt())
                 .withFailMessage(accepted.toPrettyString())
                 .isZero();
         assertThat(accepted.path("completed_assignment_id").asText()).isEqualTo(recoveryAssignment.id());
-        assertThat(recoveryAssignment.id()).isEqualTo(codeAssignment.id());
+        assertThat(recoveryAssignment.id()).isNotEqualTo(codeAssignment.id());
         assertThat(accepted.path("completed_assignment_ids")).extracting(JsonNode::asText)
-                .containsExactly(codeAssignment.id());
+                .containsExactly(recoveryAssignment.id());
         assertThat(repeatedDone.path("errcode").asInt()).isZero();
         assertThat(repeatedDone.path("already_done").asBoolean()).isTrue();
         assertThat(mailbox.findMessage("flow-project", "rd", codeAssignment.id()))
@@ -443,7 +443,7 @@ class DeterministicWorkflowToolsTest {
         assertThat(tools.isRuntimeBlocked("flow-project")).isTrue();
     }
 
-    /** Agent 父回合首次失败必须释放租约并恢复原 Owner，第二个 occurrence 必须明确阻断。 */
+    /** Agent 父回合首次失败必须终结原租约并恢复原 Owner，第二个 occurrence 必须明确阻断。 */
     @Test
     void shouldRecoverAndThenBlockAgentExecutionFailureByStableWorkflowExecution() {
         tools.advanceWorkflow("flow-project", "checkpoint_approved", "", Map.of(), "");
@@ -465,7 +465,7 @@ class DeterministicWorkflowToolsTest {
         assertThat(mailbox.findMessage("flow-project", "rd", codeAssignment.id()))
                 .get()
                 .extracting(MailMessage::status)
-                .isEqualTo(cn.org.chris.wake.domain.model.MailStatus.UNREAD);
+                .isEqualTo(cn.org.chris.wake.domain.model.MailStatus.DONE);
         assertThat(mailbox.readInbox("flow-project", "rd").stream()
                 .filter(message -> "恢复代码实现工具执行".equals(message.subject())))
                 .singleElement();

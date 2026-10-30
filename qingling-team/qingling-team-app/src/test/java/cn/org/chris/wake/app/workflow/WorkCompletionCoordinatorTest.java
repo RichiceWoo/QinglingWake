@@ -170,6 +170,7 @@ class WorkCompletionCoordinatorTest {
         WorkCompletionCoordinator coordinator = coordinator(
                 runtime, repositoryOf(evidence), readableWorkspace("rd")
         );
+        beginTestExecution(coordinator, evidence);
 
         CompleteWorkItemResult result = coordinator.completeWorkItem(completion(
                 "complete-code", WorkflowStage.CODE_IMPLEMENTATION, "rd", evidence.executionId(),
@@ -185,6 +186,43 @@ class WorkCompletionCoordinatorTest {
         });
     }
 
+    /** 代码阶段完成只能引用当前 attempt 最近一次启动的 Test Runner execution。 */
+    @Test
+    void shouldRejectStaleTestExecutionWhenNewerRunWasStarted() {
+        InMemoryWorkflowRuntimeRepository runtime = runtime(
+                WorkflowStage.CODE_IMPLEMENTATION, "rd",
+                WorkflowProfile.STANDARD, ReviewPolicy.REQUIRED_ONLY
+        );
+        ProjectTestEvidence older = new ProjectTestEvidence(
+                "test-old", PROJECT_ID, "rd", WorkflowStage.CODE_IMPLEMENTATION,
+                ProjectTestEvidenceStatus.SUCCEEDED, 0, 10, 10, 85D, "NONE", false
+        );
+        ProjectTestEvidence latest = new ProjectTestEvidence(
+                "test-latest", PROJECT_ID, "rd", WorkflowStage.CODE_IMPLEMENTATION,
+                ProjectTestEvidenceStatus.TEST_FAILED, 1, 11, 10, 87D,
+                "PYTEST_FAILURE", false
+        );
+        ProjectTestEvidenceRepository repository = (projectId, role, stage, executionId) -> {
+            if (older.executionId().equals(executionId)) {
+                return Optional.of(older);
+            }
+            return latest.executionId().equals(executionId) ? Optional.of(latest) : Optional.empty();
+        };
+        WorkCompletionCoordinator coordinator = coordinator(runtime, repository, readableWorkspace("rd"));
+        beginTestExecution(coordinator, older);
+        beginTestExecution(coordinator, latest);
+
+        assertThatThrownBy(() -> coordinator.completeWorkItem(completion(
+                "stale-test-result", WorkflowStage.CODE_IMPLEMENTATION, "rd", older.executionId(),
+                WorkCompletionDecision.ACCEPTED, WorkImpactLevel.LOW, 0.9D, 0.9D, false
+        ))).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("最新 Test Runner execution");
+        WorkExecution execution = runtime.state().findExecution(EXECUTION_ID).orElseThrow();
+        assertThat(execution.status()).isEqualTo(WorkExecutionStatus.RUNNING);
+        assertThat(execution.testExecutionId()).isEqualTo(latest.executionId());
+        assertThat(execution.testInvocationCount()).isEqualTo(2);
+    }
+
     /** SIMPLE 的 RD 真实测试通过后必须直接创建 QA 测试验收，不得补建独立测试设计回合。 */
     @Test
     void shouldAdvanceSimpleCodeDirectlyToQaExecution() {
@@ -197,9 +235,11 @@ class WorkCompletionCoordinatorTest {
                 0, 8, 8, 81D, "NONE", false
         );
 
-        CompleteWorkItemResult result = coordinator(
+        WorkCompletionCoordinator coordinator = coordinator(
                 runtime, repositoryOf(evidence), readableWorkspace("rd")
-        ).completeWorkItem(completion(
+        );
+        beginTestExecution(coordinator, evidence);
+        CompleteWorkItemResult result = coordinator.completeWorkItem(completion(
                 "complete-simple-code", WorkflowStage.CODE_IMPLEMENTATION, "rd",
                 evidence.executionId(), WorkCompletionDecision.ACCEPTED,
                 WorkImpactLevel.LOW, 0.9D, 0.9D, false
@@ -231,6 +271,7 @@ class WorkCompletionCoordinatorTest {
         WorkCompletionCoordinator coordinator = coordinator(
                 runtime, repositoryOf(evidence), readableWorkspace("rd")
         );
+        beginTestExecution(coordinator, evidence);
 
         CompleteWorkItemResult result = coordinator.completeWorkItem(completion(
                 "code-test-failed", WorkflowStage.CODE_IMPLEMENTATION, "rd", evidence.executionId(),
@@ -256,9 +297,11 @@ class WorkCompletionCoordinatorTest {
                 WorkflowStage.CODE_IMPLEMENTATION, "rd", ProjectTestEvidenceStatus.TIMED_OUT,
                 null, 0, 0, -1D, "RUNNER_TIMEOUT", true
         );
-        CompleteWorkItemResult recovering = coordinator(
+        WorkCompletionCoordinator recoveringCoordinator = coordinator(
                 recoveringRuntime, repositoryOf(retryable), readableWorkspace("rd")
-        ).completeWorkItem(completion(
+        );
+        beginTestExecution(recoveringCoordinator, retryable);
+        CompleteWorkItemResult recovering = recoveringCoordinator.completeWorkItem(completion(
                 "retryable-infra", WorkflowStage.CODE_IMPLEMENTATION, "rd", retryable.executionId(),
                 WorkCompletionDecision.ACCEPTED, WorkImpactLevel.LOW, 0.9D, 0.9D, false
         ));
@@ -270,9 +313,11 @@ class WorkCompletionCoordinatorTest {
                 WorkflowStage.CODE_IMPLEMENTATION, "rd", ProjectTestEvidenceStatus.INFRASTRUCTURE_FAILED,
                 null, 0, 0, -1D, "MCP_CONNECTION_FAILED", false
         );
-        CompleteWorkItemResult blocked = coordinator(
+        WorkCompletionCoordinator blockedCoordinator = coordinator(
                 blockedRuntime, repositoryOf(exhausted), readableWorkspace("rd")
-        ).completeWorkItem(completion(
+        );
+        beginTestExecution(blockedCoordinator, exhausted);
+        CompleteWorkItemResult blocked = blockedCoordinator.completeWorkItem(completion(
                 "exhausted-infra", WorkflowStage.CODE_IMPLEMENTATION, "rd", exhausted.executionId(),
                 WorkCompletionDecision.ACCEPTED, WorkImpactLevel.LOW, 0.9D, 0.9D, false
         ));
@@ -299,9 +344,11 @@ class WorkCompletionCoordinatorTest {
                 1, 20, 18, 91D, "PYTEST_ASSERTION_FAILED", false
         );
 
-        CompleteWorkItemResult result = coordinator(
+        WorkCompletionCoordinator coordinator = coordinator(
                 runtime, repositoryOf(evidence), readableWorkspace("qa")
-        ).completeWorkItem(completion(
+        );
+        beginTestExecution(coordinator, evidence);
+        CompleteWorkItemResult result = coordinator.completeWorkItem(completion(
                 "qa-defect", WorkflowStage.QA_TEST_EXECUTION, "qa", evidence.executionId(),
                 WorkCompletionDecision.DEFECT_FOUND, WorkImpactLevel.LOW, 0.9D, 0.9D, false
         ));
@@ -586,6 +633,78 @@ class WorkCompletionCoordinatorTest {
     }
 
     /**
+     * 恢复 assignment 的 retry、claim 与 start 必须在同一个 command 内提交且重复调用幂等。
+     */
+    @Test
+    void shouldClaimAndStartRecoveryAssignmentAtomically() {
+        WorkExecution recovering = WorkExecution.create(
+                        EXECUTION_ID, PROJECT_ID, WorkflowStage.CODE_IMPLEMENTATION,
+                        "rd", WorkflowProfile.STANDARD, CREATED_AT
+                )
+                .claim("assignment-first", CREATED_AT.plusSeconds(1))
+                .start("dispatch-first", "session-first", CREATED_AT.plusSeconds(2))
+                .recover("TEST_RUNNER_NOT_INVOKED", CREATED_AT.plusSeconds(3));
+        WorkflowRuntimeState initial = WorkflowRuntimeState.initialize(
+                PROJECT_ID, WorkflowProfile.STANDARD, ReviewPolicy.REQUIRED_ONLY, CREATED_AT
+        ).addExecution(recovering, CREATED_AT.plusSeconds(3));
+        InMemoryWorkflowRuntimeRepository runtime = new InMemoryWorkflowRuntimeRepository(initial);
+        WorkCompletionCoordinator coordinator = coordinator(runtime, noTestEvidence(), readableWorkspace("rd"));
+        ClaimAndStartWorkItemCommand command = new ClaimAndStartWorkItemCommand(
+                new WorkflowCommandId("claim-start-recovery"), PROJECT_ID, EXECUTION_ID,
+                "assignment-recovery", "dispatch-recovery", "session-recovery"
+        );
+
+        WorkExecution first = coordinator.claimAndStartWorkItem(command);
+        WorkExecution repeated = coordinator.claimAndStartWorkItem(command);
+
+        assertThat(repeated).isEqualTo(first);
+        assertThat(first.status()).isEqualTo(WorkExecutionStatus.RUNNING);
+        assertThat(first.attempt()).isEqualTo(2);
+        assertThat(first.assignmentId()).isEqualTo("assignment-recovery");
+        assertThat(first.dispatchId()).isEqualTo("dispatch-recovery");
+        assertThat(first.agentSessionId()).isEqualTo("session-recovery");
+        assertThat(runtime.state().processedCommands()).hasSize(1);
+    }
+
+    /**
+     * Test Runner 启动命令必须持续覆盖最新 execution，并在第四次调用前原子拒绝。
+     */
+    @Test
+    void shouldBindLatestTestExecutionAndEnforcePerAttemptLimit() {
+        InMemoryWorkflowRuntimeRepository runtime = runtime(
+                WorkflowStage.CODE_IMPLEMENTATION,
+                "rd",
+                WorkflowProfile.STANDARD,
+                ReviewPolicy.REQUIRED_ONLY
+        );
+        WorkCompletionCoordinator coordinator = coordinator(runtime, noTestEvidence(), readableWorkspace("rd"));
+
+        for (int index = 1; index <= WorkCompletionCoordinator.MAX_TEST_INVOCATIONS_PER_ATTEMPT; index++) {
+            coordinator.beginTestExecution(new BeginTestExecutionCommand(
+                    new WorkflowCommandId("test-start-" + index),
+                    PROJECT_ID,
+                    "rd",
+                    WorkflowStage.CODE_IMPLEMENTATION,
+                    "test-" + index
+            ));
+        }
+
+        WorkExecution linked = runtime.state().findExecution(EXECUTION_ID).orElseThrow();
+        assertThat(linked.testExecutionId()).isEqualTo("test-3");
+        assertThat(linked.testInvocationCount()).isEqualTo(3);
+        assertThatThrownBy(() -> coordinator.beginTestExecution(new BeginTestExecutionCommand(
+                new WorkflowCommandId("test-start-4"),
+                PROJECT_ID,
+                "rd",
+                WorkflowStage.CODE_IMPLEMENTATION,
+                "test-4"
+        ))).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("调用预算已耗尽");
+        assertThat(runtime.state().findExecution(EXECUTION_ID).orElseThrow().testExecutionId())
+                .isEqualTo("test-3");
+    }
+
+    /**
      * 创建已领取并运行的初始 aggregate 仓储。
      *
      * @param stage 当前阶段
@@ -627,6 +746,22 @@ class WorkCompletionCoordinatorTest {
                 "manager", profile, CREATED_AT
         ), CREATED_AT);
         return new InMemoryWorkflowRuntimeRepository(state);
+    }
+
+    /**
+     * 模拟生产 Test Runner 在启动前绑定最新 execution。
+     *
+     * @param coordinator 完成协调器
+     * @param evidence 即将由测试工具产生的证据
+     */
+    private static void beginTestExecution(
+            WorkCompletionCoordinator coordinator,
+            ProjectTestEvidence evidence
+    ) {
+        coordinator.beginTestExecution(new BeginTestExecutionCommand(
+                new WorkflowCommandId("test-start-" + evidence.executionId()),
+                evidence.projectId(), evidence.role(), evidence.stage(), evidence.executionId()
+        ));
     }
 
     /**

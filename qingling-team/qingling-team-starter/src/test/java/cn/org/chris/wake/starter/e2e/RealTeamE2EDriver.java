@@ -89,6 +89,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
     /** Cron dispatch 已失败且没有恢复动作时允许状态持久化收敛的短暂窗口。 */
     private static final Duration IDLE_CRON_FAILURE_GRACE = Duration.ofSeconds(20);
 
+    /** RECOVERING 必须在两分钟内被新 assignment 原子推进，否则判定恢复链已失去进展。 */
+    private static final Duration RECOVERY_STATE_GRACE = Duration.ofMinutes(2);
+
     /** 从 task_done 正文提取 pytest 重试次数。 */
     private static final Pattern PYTEST_ATTEMPTS = Pattern.compile(
             "pytest_attempts[\\\"']?\\s*[:=]\\s*(\\d+)", Pattern.CASE_INSENSITIVE
@@ -1146,6 +1149,14 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     now,
                     IDLE_CRON_FAILURE_GRACE
             );
+            String recoveryLoop = recoveryLoopReason(
+                    workflowRuntime,
+                    mailSnapshot,
+                    dispatchStates,
+                    agentDiagnostics,
+                    now,
+                    RECOVERY_STATE_GRACE
+            );
             String hangingDispatch = hangingDispatchReason(
                     dispatchStates,
                     agentDiagnostics,
@@ -1220,6 +1231,8 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     ? "" : sanitizeEvidenceText(authoritativeFailure));
             snapshot.put("orphan_execution", orphanExecution == null
                     ? "" : sanitizeEvidenceText(orphanExecution));
+            snapshot.put("recovery_loop", recoveryLoop == null
+                    ? "" : sanitizeEvidenceText(recoveryLoop));
             snapshot.put("terminal_incident", incident == null ? "" : sanitizeEvidenceText(incident));
             snapshot.put("recovering_incident_conflict", recoveringIncidentConflict == null
                     ? "" : sanitizeEvidenceText(recoveringIncidentConflict));
@@ -1238,6 +1251,9 @@ final class RealTeamE2EDriver implements AutoCloseable {
             }
             if (orphanExecution != null) {
                 throw new AssertionError("runtime v2 孤儿执行：" + orphanExecution);
+            }
+            if (recoveryLoop != null) {
+                throw new AssertionError("runtime v2 恢复循环：" + recoveryLoop);
             }
             if (incident != null) {
                 throw new AssertionError("不可恢复工具基础设施故障：" + incident);
@@ -1380,6 +1396,75 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     + ", status=RUNNING"
                     + ", last_progress_at=" + progressText
                     + ", dispatch_active=false, agentscope_active=false";
+        }
+        return null;
+    }
+
+    /**
+     * 识别长期停在 RECOVERING、未被唯一恢复 assignment 推进到下一 attempt 的执行。
+     *
+     * @param runtime workflow-v2 JSON，可为空
+     * @param mailSnapshot 当前项目四角色 mailbox 快照
+     * @param dispatchStates 当前 dispatch 快照
+     * @param agentDiagnostics 当前 AgentScope 回合
+     * @param now 当前时间
+     * @param grace 恢复 assignment 应完成领取和启动的最大宽限
+     * @return 恢复循环摘要；仍在宽限内或已推进时为空
+     */
+    static String recoveryLoopReason(
+            JsonNode runtime,
+            List<JsonNode> mailSnapshot,
+            Map<String, SerialDispatchRegistry.DispatchSnapshot> dispatchStates,
+            List<AgentScopeAgentGateway.ActiveExecutionDiagnostic> agentDiagnostics,
+            Instant now,
+            Duration grace
+    ) {
+        if (runtime == null || runtime.isMissingNode() || runtime.isNull()) {
+            return null;
+        }
+        for (JsonNode execution : runtime.path("executions")) {
+            if (!"RECOVERING".equals(execution.path("status").asText())) {
+                continue;
+            }
+            String updatedText = execution.path("updated_at").asText("");
+            if (updatedText.isBlank()
+                    || Duration.between(Instant.parse(updatedText), now).compareTo(grace) < 0) {
+                continue;
+            }
+            String executionId = execution.path("execution_id").asText("unknown");
+            String owner = execution.path("owner").asText("unknown");
+            String projectId = execution.path("project_id").asText(
+                    runtime.path("project_id").asText("unknown")
+            );
+            List<JsonNode> assignments = mailSnapshot.stream()
+                    .filter(message -> "task_assign".equals(message.path("type").asText()))
+                    .filter(message -> Set.of("unread", "in_progress")
+                            .contains(message.path("status").asText()))
+                    .filter(message -> executionId.equals(
+                            message.path("content").path("execution_id").asText()
+                    ))
+                    .toList();
+            SerialDispatchRegistry.DispatchSnapshot dispatch = dispatchStates.get("team:" + owner);
+            boolean activeDispatch = dispatch != null && dispatch.active();
+            boolean activeAgent = agentDiagnostics.stream().anyMatch(diagnostic ->
+                    owner.equals(diagnostic.role()) && projectId.equals(diagnostic.projectId())
+            );
+            String assignmentStates = assignments.stream()
+                    .map(message -> message.path("id").asText("unknown")
+                            + "=" + message.path("status").asText("unknown"))
+                    .sorted()
+                    .reduce((left, right) -> left + "," + right)
+                    .orElse("none");
+            return "execution_id=" + executionId
+                    + ", stage=" + execution.path("stage").asText("unknown")
+                    + ", owner=" + owner
+                    + ", attempt=" + execution.path("attempt").asInt(0)
+                    + ", test_invocation_count=" + execution.path("test_invocation_count").asInt(0)
+                    + ", test_execution_id=" + execution.path("test_execution_id").asText("")
+                    + ", updated_at=" + updatedText
+                    + ", recovery_assignments=" + assignmentStates
+                    + ", active_dispatch=" + activeDispatch
+                    + ", active_agent=" + activeAgent;
         }
         return null;
     }
@@ -1944,7 +2029,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     values.put("to", message.path("to").asText(""));
                     values.put("type", message.path("type").asText(""));
                     values.put("status", message.path("status").asText(""));
-                    values.put("workflow_stage", message.path("content").path("workflow_stage").asText(""));
+                    values.put("workflow_stage", mailWorkflowStage(message));
                     values.put("timestamp", message.path("timestamp").asText(""));
                     values.put("processing_since", message.path("processing_since").asText(""));
                     return Map.copyOf(values);
@@ -1962,7 +2047,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
         Map<String, List<JsonNode>> assignmentsByScope = new LinkedHashMap<>();
         for (JsonNode message : mailSnapshot) {
             String status = message.path("status").asText();
-            String stage = message.path("content").path("workflow_stage").asText();
+            String stage = mailWorkflowStage(message);
             if (!"task_assign".equals(message.path("type").asText())
                     || !Set.of("unread", "in_progress").contains(status)
                     || stage.isBlank()) {
@@ -1985,11 +2070,24 @@ final class RealTeamE2EDriver implements AutoCloseable {
                     .reduce((left, right) -> left + "," + right)
                     .orElse("unknown");
             return "project_id=" + first.path("project_id").asText("")
-                    + ", stage=" + first.path("content").path("workflow_stage").asText("unknown")
+                    + ", stage=" + mailWorkflowStage(first)
                     + ", owner=" + first.path("to").asText("unknown")
                     + ", assignments=" + states;
         }
         return null;
+    }
+
+    /**
+     * 兼容普通 assignment 的 workflow_stage 与 runtime v2 恢复 assignment 的 stage 字段。
+     *
+     * @param message mailbox 消息
+     * @return 归一化工作流阶段；缺失时为空字符串
+     */
+    private static String mailWorkflowStage(JsonNode message) {
+        String workflowStage = message.path("content").path("workflow_stage").asText("");
+        return workflowStage.isBlank()
+                ? message.path("content").path("stage").asText("")
+                : workflowStage;
     }
 
     /**
@@ -2243,6 +2341,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
                 "agentscope_active",
                 "cron_jobs",
                 "mcp_health",
+                "recovery_loop",
                 "terminal_incident",
                 "mcp_failure",
                 "cron_failure",
@@ -2270,6 +2369,7 @@ final class RealTeamE2EDriver implements AutoCloseable {
                 "mailbox_open",
                 "dispatch_states",
                 "agentscope_active",
+                "recovery_loop",
                 "terminal_incident",
                 "recovering_incident_conflict",
                 "mailbox_conflict",

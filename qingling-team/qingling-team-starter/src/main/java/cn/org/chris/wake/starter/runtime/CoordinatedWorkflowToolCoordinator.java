@@ -1,11 +1,11 @@
 package cn.org.chris.wake.starter.runtime;
 
-import cn.org.chris.wake.app.workflow.ClaimWorkItemCommand;
+import cn.org.chris.wake.app.workflow.BeginTestExecutionCommand;
+import cn.org.chris.wake.app.workflow.ClaimAndStartWorkItemCommand;
 import cn.org.chris.wake.app.workflow.CheckpointTransitionResult;
 import cn.org.chris.wake.app.workflow.CompleteWorkItemCommand;
 import cn.org.chris.wake.app.workflow.CompleteWorkItemResult;
 import cn.org.chris.wake.app.workflow.ReviewRoundResult;
-import cn.org.chris.wake.app.workflow.StartWorkItemCommand;
 import cn.org.chris.wake.app.workflow.SubmitReviewCommand;
 import cn.org.chris.wake.app.workflow.WorkCompletionCoordinator;
 import cn.org.chris.wake.app.workflow.WorkCompletionDecision;
@@ -210,12 +210,36 @@ public final class CoordinatedWorkflowToolCoordinator implements WorkflowToolCoo
         if (!execution.owner().equals(role)) {
             throw new IllegalArgumentException("task_assign Owner 与当前角色不一致");
         }
-        completionCoordinator.claimWorkItem(new ClaimWorkItemCommand(
-                commandId("claim", executionId, assignmentId), projectId, executionId, assignmentId
+        completionCoordinator.claimAndStartWorkItem(new ClaimAndStartWorkItemCommand(
+                commandId("claim-start", executionId, assignmentId, dispatchId),
+                projectId, executionId, assignmentId, dispatchId, agentSessionId
         ));
-        completionCoordinator.startWorkItem(new StartWorkItemCommand(
-                commandId("start", executionId, dispatchId), projectId, executionId,
-                dispatchId, agentSessionId
+    }
+
+    /**
+     * 在 Test Runner 启动前把最新 execution 绑定到当前开放工作并消耗一次调用预算。
+     *
+     * @param projectId 项目标识
+     * @param role 当前阶段 Owner
+     * @param stage 测试启动时冻结的业务阶段名称
+     * @param testExecutionId 即将启动的 Test Runner execution 标识
+     */
+    @Override
+    public void beginTestExecution(
+            String projectId,
+            String role,
+            String stage,
+            String testExecutionId
+    ) {
+        WorkflowStage workflowStage;
+        try {
+            workflowStage = WorkflowStage.valueOf(requireText(stage, "stage"));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("未知 Test Runner 工作流阶段: " + stage, exception);
+        }
+        completionCoordinator.beginTestExecution(new BeginTestExecutionCommand(
+                commandId("test-start", projectId, role, testExecutionId),
+                projectId, role, workflowStage, testExecutionId
         ));
     }
 

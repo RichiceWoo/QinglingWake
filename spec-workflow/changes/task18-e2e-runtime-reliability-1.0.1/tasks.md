@@ -335,6 +335,18 @@ project_id -> execution_id + status + exit_code + pytest_collected
 - [x] 修复 RD 在有限回合内未执行真实 Test Runner 的确定性推进问题，并为已有测试证据的收尾提供一次有限 continuation
 - [ ] Task 8/Task 9 与四场景真实 E2E（本轮失败且未重试）
 
+### 2026-10-31 恢复循环收敛修复
+
+- [x] 将 `RECOVERING -> retry -> claim -> start` 合并为单仓储事务，并验证重复命令幂等
+- [x] 让 attempt 3 与恢复耗尽后的 `BLOCKED` 转换由 `WorkExecution` 状态确定，不再按 Test Runner execution 漂移
+- [x] 在真实 Test Runner 调用前绑定最新 execution，并限制同一 attempt 最多 3 次调用
+- [x] 完成协议拒绝非最新 Test Runner 结果，调用上限拒绝发生在 Docker 执行前
+- [x] Driver 对超过 2 分钟的 `RECOVERING` 循环给出直接、结构化快速诊断
+- [x] 在邮箱文件锁内关闭原 assignment，确保原任务与恢复任务只有一个活跃实例
+- [x] 核心定向 101 项、兼容回归 23 项及协调器 5 项通过
+- [x] `mvn verify` 426 项通过；零模型真实 Docker 契约 426 unit + 1 IT 通过
+- [ ] Task 8/Task 9 与四场景真实 E2E（本轮按要求未运行）
+
 ### 2026-10-27 代码阶段 Test Runner 确定性推进
 
 - [x] RD 首回合在最小纵切面后立即调用 Test Runner，固定覆盖项目测试与 Harness acceptance
@@ -343,3 +355,13 @@ project_id -> execution_id + status + exit_code + pytest_collected
 - [x] 仅对 attempt 2 已测试未完成提供一次 attempt 3 收尾机会，之后 BLOCKED
 - [x] 定向 72 项、`mvn verify` 420 项、零模型真实 Docker 1 IT 通过
 - [ ] Task 8/Task 9 与四场景真实 E2E（本轮未运行）
+
+### 2026-10-30 单次 `happy-path` 结果
+
+- [x] 只启动一次干净 `qwen3.8-flash happy-path`，未重试整轮或启动后三场景
+- [x] 验证首次 `TEST_RUNNER_NOT_INVOKED` 后原 RD 能真实调用 Test Runner
+- [x] 记录 16 个 Test Runner 终态：12 个 exit 1、4 个 exit 2；最佳结果 9 passed、2 failed、coverage 87%
+- [x] 确认 `TEST_RUNNER_COMPLETION_PENDING` 后有限恢复未收敛，workflow 长时间停留 `RECOVERING` 且未进入 QA
+- [x] 人工结束失败运行并归档现场；清理后无 Maven/Surefire/pytest/pip/tmux 残留
+- [ ] 修复恢复回合内 Test Runner 重复执行不受限、attempt 3 未转为 `BLOCKED`、Driver 未快速诊断恢复循环的问题
+- [ ] Task 8/Task 9 与四场景真实 E2E（本轮失败且未重试）

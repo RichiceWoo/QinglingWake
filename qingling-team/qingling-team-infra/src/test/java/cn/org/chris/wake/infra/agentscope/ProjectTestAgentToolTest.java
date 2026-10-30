@@ -139,6 +139,74 @@ class ProjectTestAgentToolTest {
         assertThat(currentStage).hasValue(WorkflowStage.QA_TEST_EXECUTION);
     }
 
+    /** Java 工作流拒绝测试启动时不得触达 Docker，也不得误报为 MCP 传输故障。 */
+    @Test
+    void shouldRejectInvocationBeforeRunnerStartsWhenWorkflowBudgetIsExhausted() throws Exception {
+        AtomicInteger starts = new AtomicInteger();
+        ProjectTestRunner runner = new ProjectTestRunner() {
+            /** 记录任何不应发生的 Docker 启动。 */
+            @Override
+            public Mono<ProjectTestExecution> start(String executionId, String projectId) {
+                starts.incrementAndGet();
+                return Mono.just(running(executionId));
+            }
+
+            /** 拒绝发生在启动前，因此不应查询。 */
+            @Override
+            public Mono<ProjectTestExecution> query(String executionId) {
+                return Mono.error(new AssertionError("不应查询"));
+            }
+
+            /** 拒绝发生在启动前，因此不应取消。 */
+            @Override
+            public Mono<ProjectTestExecution> cancel(String executionId) {
+                return Mono.error(new AssertionError("不应取消"));
+            }
+        };
+        ProjectTestAgentTool.ProjectTestExecutionObserver observer =
+                new ProjectTestAgentTool.ProjectTestExecutionObserver() {
+                    /** 模拟当前 attempt 已耗尽三次调用预算。 */
+                    @Override
+                    public void begin(
+                            String projectId,
+                            String role,
+                            WorkflowStage stage,
+                            String executionId
+                    ) {
+                        throw new IllegalStateException("当前工作尝试的 Test Runner 调用预算已耗尽");
+                    }
+
+                    /** 未启动的执行不得登记为真实终态。 */
+                    @Override
+                    public void record(
+                            String projectId,
+                            String role,
+                            WorkflowStage stage,
+                            ProjectTestExecution execution
+                    ) {
+                        throw new AssertionError("不应登记");
+                    }
+                };
+        ProjectTestAgentTool tool = new ProjectTestAgentTool(
+                runner,
+                objectMapper,
+                Duration.ofMillis(1),
+                Duration.ofSeconds(1),
+                "rd",
+                ProjectTestAgentTool.ToolFailureReporter.NO_OP,
+                (projectId, role) -> WorkflowStage.CODE_IMPLEMENTATION,
+                observer
+        );
+
+        JsonNode evidence = invoke(tool, "demo-project");
+
+        assertThat(starts).hasValue(0);
+        assertThat(evidence.path("status").asText()).isEqualTo("CANCELLED");
+        assertThat(evidence.path("failure_type").asText()).isEqualTo("INVOCATION_REJECTED");
+        assertThat(evidence.path("retryable").asBoolean()).isFalse();
+        assertThat(evidence.path("stderr").asText()).doesNotContain("调用预算");
+    }
+
     /**
      * pytest 成功时应返回完整结构化证据，且只向 Runner 传递 project ID。
      *

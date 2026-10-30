@@ -51,6 +51,21 @@ public interface WorkflowToolCoordinator {
     );
 
     /**
+     * 在真实 Test Runner 启动前绑定最新 execution 并消耗当前工作尝试的调用预算。
+     *
+     * @param projectId 项目标识
+     * @param role 当前阶段 Owner
+     * @param stage 测试启动时冻结的业务阶段名称
+     * @param testExecutionId 即将启动的 Test Runner execution 标识
+     */
+    void beginTestExecution(
+            String projectId,
+            String role,
+            String stage,
+            String testExecutionId
+    );
+
+    /**
      * 将最小 task_done 正文转换为一次原子完成命令。
      *
      * @param projectId 项目标识
@@ -122,6 +137,17 @@ public interface WorkflowToolCoordinator {
                     String agentSessionId
             ) {
                 throw new IllegalStateException("legacy 项目不支持 runtime v2 领取");
+            }
+
+            /** legacy 路径不绑定 runtime v2 测试 execution。 */
+            @Override
+            public void beginTestExecution(
+                    String projectId,
+                    String role,
+                    String stage,
+                    String testExecutionId
+            ) {
+                throw new IllegalStateException("legacy 项目不支持 runtime v2 测试绑定");
             }
 
             /** legacy 路径不调用 runtime v2 完成。 */

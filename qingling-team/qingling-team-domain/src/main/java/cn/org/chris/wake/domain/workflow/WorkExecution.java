@@ -21,6 +21,7 @@ import java.util.Objects;
  * @param agentSessionId 当前角色会话标识
  * @param childTaskId 当前关联的 AgentScope 子任务标识
  * @param testExecutionId 当前关联的 Test Runner execution 标识
+ * @param testInvocationCount 当前 attempt 已启动的 Test Runner 次数
  * @param reviewRoundId 最近一次关联的评审轮次标识
  * @param failureType 有界且脱敏的最近失败类型
  */
@@ -40,6 +41,7 @@ public record WorkExecution(
         /** 当前角色会话标识。 */ String agentSessionId,
         /** 当前 AgentScope 子任务标识。 */ String childTaskId,
         /** 当前 Test Runner execution 标识。 */ String testExecutionId,
+        /** 当前 attempt 已启动的 Test Runner 次数。 */ int testInvocationCount,
         /** 最近一次评审轮次标识。 */ String reviewRoundId,
         /** 最近失败类型，不包含异常正文或凭据。 */ String failureType
 ) {
@@ -59,6 +61,9 @@ public record WorkExecution(
         Objects.requireNonNull(lastProgressAt, "lastProgressAt 不能为空");
         if (attempt < 1) {
             throw new IllegalArgumentException("attempt 必须从 1 开始");
+        }
+        if (testInvocationCount < 0) {
+            throw new IllegalArgumentException("testInvocationCount 不能为负数");
         }
         if (updatedAt.isBefore(createdAt) || lastProgressAt.isBefore(createdAt)
                 || lastProgressAt.isAfter(updatedAt)) {
@@ -117,7 +122,7 @@ public record WorkExecution(
     ) {
         return new WorkExecution(
                 executionId, projectId, stage, owner, profile, WorkExecutionStatus.PENDING, 1,
-                now, now, now, "", "", "", "", "", "", ""
+                now, now, now, "", "", "", "", "", 0, "", ""
         );
     }
 
@@ -135,7 +140,8 @@ public record WorkExecution(
         }
         requireTransition(WorkExecutionStatus.CLAIMED);
         return copy(WorkExecutionStatus.CLAIMED, attempt, requireTime(now), lastProgressAt,
-                requiredAssignment, "", "", "", testExecutionId, reviewRoundId, "");
+                requiredAssignment, "", "", "", testExecutionId, testInvocationCount,
+                reviewRoundId, "");
     }
 
     /**
@@ -157,7 +163,7 @@ public record WorkExecution(
         requireTransition(WorkExecutionStatus.RUNNING);
         return copy(WorkExecutionStatus.RUNNING, attempt, requireTime(now), lastProgressAt,
                 assignmentId, requiredDispatch, requiredSession, childTaskId,
-                testExecutionId, reviewRoundId, "");
+                testExecutionId, testInvocationCount, reviewRoundId, "");
     }
 
     /**
@@ -174,7 +180,37 @@ public record WorkExecution(
             return this;
         }
         return copy(status, attempt, requireTime(now), lastProgressAt, assignmentId, dispatchId,
-                agentSessionId, requiredChild, testExecutionId, reviewRoundId, failureType);
+                agentSessionId, requiredChild, testExecutionId, testInvocationCount,
+                reviewRoundId, failureType);
+    }
+
+    /**
+     * 在真实 Test Runner 启动前绑定最新 execution，并消耗当前 attempt 的一次调用预算。
+     *
+     * @param newTestExecutionId 即将启动的 Test Runner execution 标识
+     * @param maxInvocations 当前 attempt 允许的最大启动次数
+     * @param now 绑定时间
+     * @return 已绑定最新测试 execution 的运行中工作执行
+     */
+    public WorkExecution beginTestExecution(
+            String newTestExecutionId,
+            int maxInvocations,
+            Instant now
+    ) {
+        requireStatus(WorkExecutionStatus.RUNNING);
+        String requiredTest = requireText(newTestExecutionId, "testExecutionId");
+        if (testExecutionId.equals(requiredTest)) {
+            return this;
+        }
+        if (maxInvocations < 1) {
+            throw new IllegalArgumentException("maxInvocations 必须为正数");
+        }
+        if (testInvocationCount >= maxInvocations) {
+            throw new IllegalStateException("当前工作尝试的 Test Runner 调用预算已耗尽");
+        }
+        return copy(status, attempt, requireTime(now), lastProgressAt, assignmentId, dispatchId,
+                agentSessionId, childTaskId, requiredTest, testInvocationCount + 1,
+                reviewRoundId, failureType);
     }
 
     /**
@@ -191,7 +227,8 @@ public record WorkExecution(
             return this;
         }
         return copy(status, attempt, requireTime(now), lastProgressAt, assignmentId, dispatchId,
-                agentSessionId, childTaskId, requiredTest, reviewRoundId, failureType);
+                agentSessionId, childTaskId, requiredTest, testInvocationCount,
+                reviewRoundId, failureType);
     }
 
     /**
@@ -211,7 +248,8 @@ public record WorkExecution(
         }
         Instant nextUpdatedAt = requiredEvidence.isAfter(updatedAt) ? requiredEvidence : updatedAt;
         return copy(status, attempt, nextUpdatedAt, requiredEvidence, assignmentId, dispatchId,
-                agentSessionId, childTaskId, testExecutionId, reviewRoundId, failureType);
+                agentSessionId, childTaskId, testExecutionId, testInvocationCount,
+                reviewRoundId, failureType);
     }
 
     /**
@@ -229,7 +267,7 @@ public record WorkExecution(
         requireTransition(WorkExecutionStatus.WAITING_REVIEW);
         return copy(WorkExecutionStatus.WAITING_REVIEW, attempt, requireTime(now), lastProgressAt,
                 assignmentId, dispatchId, agentSessionId, childTaskId,
-                testExecutionId, requiredReview, "");
+                testExecutionId, testInvocationCount, requiredReview, "");
     }
 
     /**
@@ -244,7 +282,7 @@ public record WorkExecution(
         requireTransition(WorkExecutionStatus.SUCCEEDED);
         return copy(WorkExecutionStatus.SUCCEEDED, attempt, requireTime(now), lastProgressAt,
                 assignmentId, dispatchId, agentSessionId, childTaskId,
-                testExecutionId, reviewRoundId, "");
+                testExecutionId, testInvocationCount, reviewRoundId, "");
     }
 
     /**
@@ -258,7 +296,7 @@ public record WorkExecution(
         requireReviewRound(completedReviewRoundId);
         requireTransition(WorkExecutionStatus.PENDING);
         return copy(WorkExecutionStatus.PENDING, attempt + 1, requireTime(now), lastProgressAt,
-                "", "", "", "", "", reviewRoundId, "");
+                "", "", "", "", "", 0, reviewRoundId, "");
     }
 
     /**
@@ -276,7 +314,7 @@ public record WorkExecution(
         requireTransition(WorkExecutionStatus.RECOVERING);
         return copy(WorkExecutionStatus.RECOVERING, attempt, requireTime(now), lastProgressAt,
                 assignmentId, dispatchId, agentSessionId, childTaskId,
-                testExecutionId, reviewRoundId, requiredFailure);
+                testExecutionId, testInvocationCount, reviewRoundId, requiredFailure);
     }
 
     /**
@@ -288,7 +326,7 @@ public record WorkExecution(
     public WorkExecution retry(Instant now) {
         requireTransition(WorkExecutionStatus.PENDING);
         return copy(WorkExecutionStatus.PENDING, attempt + 1, requireTime(now), lastProgressAt,
-                "", "", "", "", "", reviewRoundId, failureType);
+                "", "", "", "", "", 0, reviewRoundId, failureType);
     }
 
     /**
@@ -304,7 +342,7 @@ public record WorkExecution(
         requireTransition(WorkExecutionStatus.SUCCEEDED);
         return copy(WorkExecutionStatus.SUCCEEDED, attempt, requireTime(now), lastProgressAt,
                 assignmentId, dispatchId, agentSessionId, childTaskId,
-                testExecutionId, reviewRoundId, "");
+                testExecutionId, testInvocationCount, reviewRoundId, "");
     }
 
     /**
@@ -344,7 +382,7 @@ public record WorkExecution(
         requireTransition(WorkExecutionStatus.CANCELLED);
         return copy(WorkExecutionStatus.CANCELLED, attempt, requireTime(now), lastProgressAt,
                 assignmentId, dispatchId, agentSessionId, childTaskId,
-                testExecutionId, reviewRoundId, normalizedReason);
+                testExecutionId, testInvocationCount, reviewRoundId, normalizedReason);
     }
 
     /**
@@ -366,7 +404,8 @@ public record WorkExecution(
         }
         requireTransition(target);
         return copy(target, attempt, requireTime(now), lastProgressAt, assignmentId, dispatchId,
-                agentSessionId, childTaskId, testExecutionId, reviewRoundId, requiredFailure);
+                agentSessionId, childTaskId, testExecutionId, testInvocationCount,
+                reviewRoundId, requiredFailure);
     }
 
     /**
@@ -416,6 +455,7 @@ public record WorkExecution(
      * @param nextAgentSessionId 下一会话标识
      * @param nextChildTaskId 下一子任务标识
      * @param nextTestExecutionId 下一测试执行标识
+     * @param nextTestInvocationCount 下一 attempt 内测试启动次数
      * @param nextReviewRoundId 下一评审轮次标识
      * @param nextFailureType 下一失败类型
      * @return 不可变的下一状态快照
@@ -430,6 +470,7 @@ public record WorkExecution(
             String nextAgentSessionId,
             String nextChildTaskId,
             String nextTestExecutionId,
+            int nextTestInvocationCount,
             String nextReviewRoundId,
             String nextFailureType
     ) {
@@ -439,7 +480,7 @@ public record WorkExecution(
         return new WorkExecution(
                 executionId, projectId, stage, owner, profile, nextStatus, nextAttempt,
                 createdAt, nextUpdatedAt, nextProgressAt, nextAssignmentId, nextDispatchId,
-                nextAgentSessionId, nextChildTaskId, nextTestExecutionId,
+                nextAgentSessionId, nextChildTaskId, nextTestExecutionId, nextTestInvocationCount,
                 nextReviewRoundId, nextFailureType
         );
     }

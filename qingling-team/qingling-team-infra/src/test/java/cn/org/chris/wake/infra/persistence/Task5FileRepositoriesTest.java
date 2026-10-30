@@ -232,12 +232,12 @@ class Task5FileRepositoriesTest {
     }
 
     /**
-     * 同一工作流阶段即使主题变化也只能保留一个开放任务，工具恢复还必须刷新受控指令。
+     * 恢复任务必须关闭同 execution 的旧 assignment，并以新消息 ID 保留唯一开放任务。
      *
      * @throws Exception 邮箱文件读取失败
      */
     @Test
-    void shouldReuseOpenTaskByWorkflowStageAndRefreshRecoveryInstruction() throws Exception {
+    void shouldSupersedeOpenAssignmentWithUniqueRecoveryTask() throws Exception {
         Path workspace = temporaryDirectory.resolve("workspace-stage-idempotent-task");
         ObjectMapper mapper = new ObjectMapper();
         new FileWorkspaceRepository(workspace).initializeProject("p1");
@@ -250,21 +250,37 @@ class Task5FileRepositoriesTest {
 
         String firstId = service.send(
                 "p1", "rd", "manager", "task_assign", "实现待办服务",
-                Map.of("workflow_stage", "CODE_IMPLEMENTATION", "protocol", "normal")
+                Map.of(
+                        "workflow_stage", "CODE_IMPLEMENTATION",
+                        "execution_id", "work-1",
+                        "protocol", "normal"
+                )
         );
-        String reusedId = service.send(
+        assertThat(service.readInbox("p1", "rd"))
+                .singleElement()
+                .satisfies(message -> assertThat(message.id()).isEqualTo(firstId));
+
+        String recoveryId = service.send(
                 "p1", "rd", "manager", "task_assign", "恢复失败的测试执行",
-                Map.of("workflow_stage", "CODE_IMPLEMENTATION", "protocol", "tool_execution_failed")
+                Map.of(
+                        "stage", "CODE_IMPLEMENTATION",
+                        "execution_id", "work-1",
+                        "protocol", "agent_execution_failed"
+                )
         );
 
         JsonNode inbox = mapper.readTree(
                 workspace.resolve("shared/projects/p1/mailboxes/rd.json").toFile()
         );
-        assertThat(reusedId).isEqualTo(firstId);
-        assertThat(inbox).hasSize(1);
-        assertThat(inbox.get(0).path("subject").asText()).isEqualTo("恢复失败的测试执行");
-        assertThat(inbox.get(0).path("content").path("protocol").asText())
-                .isEqualTo("tool_execution_failed");
+        assertThat(recoveryId).isNotEqualTo(firstId);
+        assertThat(inbox).hasSize(2);
+        assertThat(inbox.get(0).path("status").asText()).isEqualTo("done");
+        assertThat(inbox.get(0).path("processing_since").isNull()).isTrue();
+        assertThat(inbox.get(1).path("id").asText()).isEqualTo(recoveryId);
+        assertThat(inbox.get(1).path("status").asText()).isEqualTo("unread");
+        assertThat(service.readInbox("p1", "rd"))
+                .singleElement()
+                .satisfies(message -> assertThat(message.id()).isEqualTo(recoveryId));
     }
 
     /**

@@ -55,6 +55,8 @@ public record ProjectTestExecution(
         MCP_TRANSPORT,
         /** execution ID 对应的 Docker 状态或结果不可找回。 */
         RESULT_UNAVAILABLE,
+        /** Java 工作流拒绝启动，例如当前 attempt 已耗尽测试调用预算。 */
+        INVOCATION_REJECTED,
         /** 运行时主动取消执行。 */
         CANCELLED
     }

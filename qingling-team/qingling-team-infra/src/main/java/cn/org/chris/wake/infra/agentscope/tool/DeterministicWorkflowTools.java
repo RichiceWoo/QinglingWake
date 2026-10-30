@@ -483,7 +483,6 @@ public final class DeterministicWorkflowTools {
                     "阶段 " + current + " 的工具故障 Owner 必须为 " + transition.assignee()
             );
         }
-        mailboxService.releaseInProgressTaskAssignments(projectId, role);
         scheduleRecovery(projectId, executionId, failureType, attempt, current, transition);
     }
 

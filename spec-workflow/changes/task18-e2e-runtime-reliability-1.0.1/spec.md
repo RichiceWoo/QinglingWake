@@ -392,3 +392,19 @@ RD 首回合改为先形成最小可运行纵切面，再立即进入真实 Test
 首次未调用测试会生成 `run_project_tests_now_then_fix_or_task_done` 恢复动作。恢复邮件被领取后，Java 在相同 role/session/project 下阻断任何新的 `code/` 写入，直到真实 Test Runner 已调用；模型不能再用“继续补代码”耗尽唯一恢复回合。一般故障仍最多自动恢复一次；仅 attempt 2 已证明进入测试时，允许一次 attempt 3 收尾，之后仍未完成则 BLOCKED。
 
 定向 72 项和默认 420 项通过；零模型 Docker 契约的首次运行真实发现失败夹具缺少 acceptance，补齐后 420 unit + 1 IT 通过。本轮未启动 E2E，Task 8、Task 9 与父 Task 18 保持未完成。
+
+## 2026-10-30 单次真实 E2E 新发现
+
+确定性测试门禁已经解决“RD 代码回合从不进入 Test Runner”的原问题：首次 `TEST_RUNNER_NOT_INVOKED` 恢复后，RD 能真实执行项目测试和 Harness acceptance，并把失败逐步收敛到 9 passed、2 failed、coverage 87%。
+
+新的阻断位于恢复收敛边界。`TEST_RUNNER_COMPLETION_PENDING` 进入 `RECOVERING` 后，同一代码 execution 可以继续创建大量 Test Runner execution，却没有在有限 continuation 后完成或转为 `BLOCKED`；本轮累计 16 次非零终态，workflow 仍停留 `CODE_IMPLEMENTATION/RD/RECOVERING`。Driver 也没有把“恢复状态、重复测试、stage/incident 长时间不变化”识别为恢复循环并快速失败。
+
+下一轮真实 E2E 前必须把恢复预算绑定到代码 execution/恢复 attempt，而不是 Test Runner execution 数量；恢复回合达到上限后持久化明确 `BLOCKED`，并让 Driver 对恢复循环给出直接诊断。Task 8、Task 9 与父 Task 18 保持未完成。
+
+## 2026-10-31 恢复收敛与 Test Runner 权威绑定修复
+
+`RECOVERING` execution 的 retry、assignment claim 与 dispatch start 已收敛为同一仓储事务和幂等命令，重复领取不会重复增加 attempt。恢复链现在确定性产生 attempt 3；attempt 3 再次失败时进入 `BLOCKED`，不会继续唤醒 Owner。
+
+每次真实 Test Runner 启动前必须先将 execution ID 绑定到当前 `WorkExecution`，同一 attempt 最多允许 3 次调用；完成协议只接受当前最新 execution 的终态，旧结果不能覆盖新执行。Driver 对超过 2 分钟仍未收敛的 `RECOVERING` 直接报告 execution、stage、owner、attempt、Test Runner 次数、assignment、dispatch 与 AgentScope 证据。
+
+恢复邮件写入时在同一邮箱文件锁内关闭同 execution 的旧开放 assignment；兼容旧邮件缺少 execution ID 的情况时，仅在 workflow stage 相同且至少一方缺少 execution ID 时回退匹配。因此原任务和恢复任务不再同时活跃。默认回归 426 项和零模型真实 Docker 契约 1 IT 通过；本轮未运行真实 E2E，Task 8、Task 9 与父 Task 18 保持未完成。

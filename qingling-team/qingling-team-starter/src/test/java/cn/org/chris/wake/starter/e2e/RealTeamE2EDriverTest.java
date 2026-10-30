@@ -879,6 +879,40 @@ class RealTeamE2EDriverTest {
         )).contains("msg-review", "todo-mvp", "owner=pm", "active_dispatch=false", "recovery_wake=false");
     }
 
+    /** RECOVERING 未在宽限内推进到下一 attempt 时必须报告 assignment 与测试绑定证据。 */
+    @Test
+    void shouldDiagnoseRecoveryLoopBeforeGlobalStageTimeout() throws Exception {
+        Instant recoveringAt = Instant.parse("2026-10-25T08:00:00Z");
+        JsonNode runtime = new ObjectMapper().readTree("""
+                {"project_id":"todo-mvp","executions":[{
+                  "execution_id":"work-code","project_id":"todo-mvp",
+                  "stage":"CODE_IMPLEMENTATION","owner":"rd","status":"RECOVERING",
+                  "attempt":2,"updated_at":"2026-10-25T08:00:00Z",
+                  "test_execution_id":"test-latest","test_invocation_count":3
+                }]}
+                """);
+        JsonNode assignment = new ObjectMapper().readTree("""
+                {"id":"msg-recovery","project_id":"todo-mvp","to":"rd",
+                 "type":"task_assign","status":"in_progress",
+                 "content":{"execution_id":"work-code","stage":"CODE_IMPLEMENTATION"}}
+                """);
+
+        assertThat(RealTeamE2EDriver.recoveryLoopReason(
+                runtime, List.of(assignment), Map.of(), List.of(),
+                recoveringAt.plusSeconds(119), Duration.ofMinutes(2)
+        )).isNull();
+        assertThat(RealTeamE2EDriver.recoveryLoopReason(
+                runtime, List.of(assignment), Map.of(), List.of(),
+                recoveringAt.plusSeconds(121), Duration.ofMinutes(2)
+        )).contains(
+                "work-code",
+                "attempt=2",
+                "test_invocation_count=3",
+                "test_execution_id=test-latest",
+                "msg-recovery=in_progress"
+        );
+    }
+
     /** 失败证据必须脱敏 API Key、Authorization 与 Bearer，并限制异常长度。 */
     @Test
     void shouldRedactFailureEvidence() {

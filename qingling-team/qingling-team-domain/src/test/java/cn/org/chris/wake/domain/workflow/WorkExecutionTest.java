@@ -116,6 +116,30 @@ class WorkExecutionTest {
     }
 
     /**
+     * Test Runner 必须绑定最新 execution、限制单次 attempt 调用次数，并在恢复后重置预算。
+     */
+    @Test
+    void shouldBoundTestInvocationsPerAttemptAndResetBudgetOnRetry() {
+        WorkExecution running = runningExecution();
+        WorkExecution first = running.beginTestExecution("test-1", 3, START.plusSeconds(3));
+        WorkExecution second = first.beginTestExecution("test-2", 3, START.plusSeconds(4));
+        WorkExecution third = second.beginTestExecution("test-3", 3, START.plusSeconds(5));
+
+        assertThat(third.testExecutionId()).isEqualTo("test-3");
+        assertThat(third.testInvocationCount()).isEqualTo(3);
+        assertThat(third.beginTestExecution("test-3", 3, START.plusSeconds(6))).isSameAs(third);
+        assertThatThrownBy(() -> third.beginTestExecution("test-4", 3, START.plusSeconds(6)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("调用预算已耗尽");
+
+        WorkExecution retry = third.recover("TEST_RUNNER_COMPLETION_PENDING", START.plusSeconds(6))
+                .retry(START.plusSeconds(7));
+        assertThat(retry.attempt()).isEqualTo(2);
+        assertThat(retry.testExecutionId()).isEmpty();
+        assertThat(retry.testInvocationCount()).isZero();
+    }
+
+    /**
      * 每一种终态都不得重新领取、运行、恢复或完成为另一终态。
      */
     @Test

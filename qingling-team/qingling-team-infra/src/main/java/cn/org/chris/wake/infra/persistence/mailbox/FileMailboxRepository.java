@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -97,12 +98,16 @@ public final class FileMailboxRepository implements MailboxRepository {
                 return fromMap(new LinkedHashMap<>(sameId));
             }
             if ("task_assign".equals(message.type()) || "clarification_answer".equals(message.type())) {
+                if (isRecoveryTask(message)) {
+                    supersedeOpenAssignments(messages, message);
+                    messages.add(toMap(message));
+                    return message;
+                }
                 Map<String, Object> duplicate = messages.stream()
                         .filter(existing -> isOpenDuplicateMessage(existing, message))
                         .findFirst()
                         .orElse(null);
                 if (duplicate != null) {
-                    refreshRecoveryTask(duplicate, message);
                     return fromMap(new LinkedHashMap<>(duplicate));
                 }
             }
@@ -129,6 +134,11 @@ public final class FileMailboxRepository implements MailboxRepository {
             return false;
         }
         if ("task_assign".equals(candidate.type())) {
+            String existingExecutionId = executionId(existing.get("content"));
+            String candidateExecutionId = executionId(candidate.content());
+            if (!existingExecutionId.isBlank() && existingExecutionId.equals(candidateExecutionId)) {
+                return true;
+            }
             String existingStage = workflowStage(existing.get("content"));
             String candidateStage = workflowStage(candidate.content());
             if (!existingStage.isBlank() && existingStage.equals(candidateStage)) {
@@ -153,7 +163,23 @@ public final class FileMailboxRepository implements MailboxRepository {
         if (!(content instanceof Map<?, ?> values)) {
             return "";
         }
-        return Objects.toString(values.get("workflow_stage"), "").trim();
+        String workflowStage = Objects.toString(values.get("workflow_stage"), "").trim();
+        return workflowStage.isBlank()
+                ? Objects.toString(values.get("stage"), "").trim()
+                : workflowStage;
+    }
+
+    /**
+     * 从结构化 assignment 正文提取稳定 WorkExecution 标识。
+     *
+     * @param content 邮件正文
+     * @return execution_id；正文不合法或缺失时为空字符串
+     */
+    private static String executionId(Object content) {
+        if (!(content instanceof Map<?, ?> values)) {
+            return "";
+        }
+        return Objects.toString(values.get("execution_id"), "").trim();
     }
 
     /**
@@ -170,19 +196,48 @@ public final class FileMailboxRepository implements MailboxRepository {
     }
 
     /**
-     * 工具恢复复用原开放任务时刷新受控恢复指令，同时保留原消息 ID 与租约状态。
+     * 判断候选邮件是否是 Java incident 生成的受控恢复 assignment。
      *
-     * @param existing 已存在的开放邮件字段
-     * @param candidate 候选恢复任务
+     * @param candidate 候选邮件
+     * @return 仅恢复 task_assign 返回 true
      */
-    private static void refreshRecoveryTask(Map<String, Object> existing, MailMessage candidate) {
-        if (!"task_assign".equals(candidate.type())
-                || !(candidate.content() instanceof Map<?, ?> values)
-                || !"tool_execution_failed".equals(values.get("protocol"))) {
-            return;
+    private static boolean isRecoveryTask(MailMessage candidate) {
+        return "task_assign".equals(candidate.type())
+                && candidate.content() instanceof Map<?, ?> values
+                && Set.of("agent_execution_failed", "tool_execution_failed")
+                .contains(Objects.toString(values.get("protocol"), ""));
+    }
+
+    /**
+     * 将同一 WorkExecution 的旧开放 assignment 收敛为 done，使恢复邮件成为唯一活跃任务。
+     *
+     * @param messages 当前邮箱锁内的全部邮件
+     * @param candidate 即将追加的恢复 assignment
+     */
+    private static void supersedeOpenAssignments(
+            List<Map<String, Object>> messages,
+            MailMessage candidate
+    ) {
+        String candidateExecutionId = executionId(candidate.content());
+        String candidateStage = workflowStage(candidate.content());
+        for (Map<String, Object> existing : messages) {
+            String status = Objects.toString(existing.get("status"), "");
+            if (!"task_assign".equals(existing.get("type"))
+                    || !("unread".equals(status) || "in_progress".equals(status))) {
+                continue;
+            }
+            String existingExecutionId = executionId(existing.get("content"));
+            String existingStage = workflowStage(existing.get("content"));
+            boolean sameExecution = !candidateExecutionId.isBlank()
+                    && candidateExecutionId.equals(existingExecutionId);
+            boolean legacySameStage = !candidateStage.isBlank()
+                    && candidateStage.equals(existingStage)
+                    && (candidateExecutionId.isBlank() || existingExecutionId.isBlank());
+            if (sameExecution || legacySameStage) {
+                existing.put("status", "done");
+                existing.put("processing_since", null);
+            }
         }
-        existing.put("subject", candidate.subject());
-        existing.put("content", candidate.content());
     }
 
     /**

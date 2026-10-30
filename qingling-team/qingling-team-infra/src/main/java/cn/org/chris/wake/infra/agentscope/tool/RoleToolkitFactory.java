@@ -7,7 +7,9 @@ import cn.org.chris.wake.domain.gateway.SenderGateway;
 import cn.org.chris.wake.domain.gateway.WorkspaceRepository;
 import cn.org.chris.wake.domain.mailbox.MailboxService;
 import cn.org.chris.wake.domain.model.AgentExecutionException;
+import cn.org.chris.wake.domain.workflow.WorkflowStage;
 import cn.org.chris.wake.infra.agentscope.ProjectTestAgentTool;
+import cn.org.chris.wake.infra.agentscope.ProjectTestExecution;
 import cn.org.chris.wake.infra.agentscope.ProjectTestExecutionRegistry;
 import cn.org.chris.wake.infra.agentscope.RegistryProjectTestEvidenceRepository;
 import cn.org.chris.wake.infra.agentscope.CompletionProtocolRegistry;
@@ -401,12 +403,33 @@ public final class RoleToolkitFactory implements RuntimeIncidentGateway {
                 role,
                 this::reportToolExecutionFailure,
                 (projectId, owner) -> workflowTools.currentStage(projectId),
-                (projectId, owner, stage, execution) -> projectTestExecutionRegistry.record(
-                        projectId,
-                        owner,
-                        stage,
-                        execution
-                ),
+                new ProjectTestAgentTool.ProjectTestExecutionObserver() {
+                    /** 在 Docker 启动前把最新 execution 与当前 WorkExecution 原子绑定。 */
+                    @Override
+                    public void begin(
+                            String projectId,
+                            String owner,
+                            WorkflowStage stage,
+                            String executionId
+                    ) {
+                        if (workflowToolCoordinator.coordinated(projectId)) {
+                            workflowToolCoordinator.beginTestExecution(
+                                    projectId, owner, stage.name(), executionId
+                            );
+                        }
+                    }
+
+                    /** 把真实 Test Runner 终态登记到共享证据账本。 */
+                    @Override
+                    public void record(
+                            String projectId,
+                            String owner,
+                            WorkflowStage stage,
+                            ProjectTestExecution execution
+                    ) {
+                        projectTestExecutionRegistry.record(projectId, owner, stage, execution);
+                    }
+                },
                 completionProtocolRegistry
         );
     }

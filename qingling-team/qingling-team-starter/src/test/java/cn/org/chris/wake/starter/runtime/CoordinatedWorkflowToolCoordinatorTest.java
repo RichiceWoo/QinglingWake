@@ -227,6 +227,9 @@ class CoordinatedWorkflowToolCoordinatorTest {
                 Clock.fixed(CREATED_AT.plusSeconds(5), ZoneOffset.UTC)
         );
 
+        retryCoordinator.beginTestExecution(
+                projectId, "rd", WorkflowStage.CODE_IMPLEMENTATION.name(), "test-failed"
+        );
         Map<String, Object> failed = retryCoordinator.complete(
                 projectId, "rd", "首次测试失败", Map.of(
                         "execution_id", "test-failed",
@@ -239,6 +242,9 @@ class CoordinatedWorkflowToolCoordinatorTest {
                 "test-succeeded", ProjectTestExecution.Status.SUCCEEDED, 0,
                 ProjectTestExecution.FailureType.NONE
         ));
+        retryCoordinator.beginTestExecution(
+                projectId, "rd", WorkflowStage.CODE_IMPLEMENTATION.name(), "test-succeeded"
+        );
         Map<String, Object> succeeded = retryCoordinator.complete(
                 projectId, "rd", "修复后测试成功", Map.of(
                         "execution_id", "test-succeeded",
@@ -255,7 +261,9 @@ class CoordinatedWorkflowToolCoordinatorTest {
             assertThat(execution.status()).isEqualTo(WorkExecutionStatus.SUCCEEDED);
             assertThat(execution.testExecutionId()).isEqualTo("test-succeeded");
         });
-        assertThat(state.processedCommands()).hasSize(2);
+        assertThat(state.processedCommands()).hasSize(4);
+        assertThat(state.processedCommands()).filteredOn(command -> "TEST_STARTED".equals(command.outcomeCode()))
+                .hasSize(2);
     }
 
     /** 创建不含输出正文的 Test Runner 终态。 */

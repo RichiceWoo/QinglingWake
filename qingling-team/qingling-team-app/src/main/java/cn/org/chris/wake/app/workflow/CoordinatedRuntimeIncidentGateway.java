@@ -199,14 +199,18 @@ public final class CoordinatedRuntimeIncidentGateway implements RuntimeIncidentG
         WorkflowRuntimeState changed = current.replaceExecution(changedExecution, now);
         changed = changed.enqueue(OutboxAction.pending(
                 actionId(commandId, "event"), OutboxActionType.WORKFLOW_EVENT,
-                current.projectId(), Map.of(
-                        "action", "tool_execution_failed",
-                        "execution_id", execution.executionId(),
-                        "failure_type", failureType,
-                        "owner", role,
-                        "required_action", requiredAction,
-                        "runtime_status", changedExecution.status().name(),
-                        "stage", execution.stage().name()
+                current.projectId(), Map.ofEntries(
+                        Map.entry("action", "tool_execution_failed"),
+                        Map.entry("execution_id", execution.executionId()),
+                        Map.entry("failure_type", failureType),
+                        Map.entry("failure_fingerprint", failureType),
+                        Map.entry("tool", "agentscope_dispatch"),
+                        Map.entry("owner", role),
+                        Map.entry("required_action", requiredAction),
+                        Map.entry("runtime_status", changedExecution.status().name()),
+                        Map.entry("stage", execution.stage().name()),
+                        Map.entry("attempt", Integer.toString(execution.attempt())),
+                        Map.entry("retryable", Boolean.toString(retryable))
                 ), now
         ), now);
         if (retryable) {

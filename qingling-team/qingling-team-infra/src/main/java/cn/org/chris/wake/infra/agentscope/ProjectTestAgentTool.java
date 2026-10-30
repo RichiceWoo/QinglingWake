@@ -372,21 +372,48 @@ public final class ProjectTestAgentTool implements AgentTool {
         try {
             String projectId = WorkspacePolicy.validateProjectId(text(param.getInput().get("project_id")));
             validateInheritedContext(param, projectId);
-            recordTestInvocation(param, projectId);
             WorkflowStage executionStage = executionStageResolver.resolve(projectId, role);
             Semaphore permit = PROJECT_PERMITS.computeIfAbsent(projectId, ignored -> new Semaphore(1));
-            return acquire(permit).flatMap(acquired -> executeWithSingleRecovery(executionId, projectId)
+            return acquire(permit).flatMap(acquired -> Mono.defer(() -> {
+                try {
+                    executionObserver.begin(projectId, role, executionStage, executionId);
+                    recordTestInvocation(param, projectId);
+                } catch (RuntimeException rejection) {
+                    return Mono.just(structuredResult(invocationRejected(executionId)));
+                }
+                return executeWithSingleRecovery(executionId, projectId)
                     .doOnNext(execution -> observeExecution(projectId, executionStage, execution))
                     .map(this::structuredResult)
                     .onErrorResume(failure -> {
                         ProjectTestExecution terminal = terminalFailure(executionId, failure);
                         observeExecution(projectId, executionStage, terminal);
                         return Mono.just(structuredResult(terminal));
-                    })
-                    .doFinally(ignored -> acquired.release()));
+                    });
+            }).doFinally(ignored -> acquired.release()));
         } catch (RuntimeException exception) {
-            return Mono.just(structuredResult(infrastructureFailure(executionId, false)));
+            return Mono.just(structuredResult(invocationRejected(executionId)));
         }
+    }
+
+    /**
+     * 将 Java 工作流在 Docker 启动前的拒绝返回为非重试结果，避免误报 MCP 传输故障。
+     *
+     * @param executionId 本次未启动的测试 execution 标识
+     * @return 不包含异常正文的结构化拒绝结果
+     */
+    private static ProjectTestExecution invocationRejected(String executionId) {
+        return new ProjectTestExecution(
+                executionId,
+                ProjectTestExecution.Status.CANCELLED,
+                null,
+                0,
+                0,
+                -1D,
+                ProjectTestExecution.FailureType.INVOCATION_REJECTED,
+                false,
+                "",
+                "Java workflow rejected Test Runner invocation"
+        );
     }
 
     /**
@@ -804,6 +831,18 @@ public final class ProjectTestAgentTool implements AgentTool {
 
         /** 不执行任何登记的默认实现，用于独立工具单测。 */
         ProjectTestExecutionObserver NO_OP = (projectId, role, stage, execution) -> { };
+
+        /**
+         * 在 Docker 执行启动前绑定最新 execution；默认实现保持旧测试观察器兼容。
+         *
+         * @param projectId 项目标识
+         * @param role 执行角色
+         * @param stage 工具启动时的 Java 工作流阶段
+         * @param executionId 即将启动的 Test Runner execution 标识
+         */
+        default void begin(String projectId, String role, WorkflowStage stage, String executionId) {
+            // 独立工具测试不接入 runtime v2，因此默认不产生状态写入。
+        }
 
         /**
          * 登记一次已经结束的真实测试执行。

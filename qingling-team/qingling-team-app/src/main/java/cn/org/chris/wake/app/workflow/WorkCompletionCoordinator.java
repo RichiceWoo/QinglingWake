@@ -38,6 +38,9 @@ import java.util.function.Supplier;
  */
 public final class WorkCompletionCoordinator {
 
+    /** 单个 WorkExecution attempt 最多允许启动三次真实 Test Runner。 */
+    public static final int MAX_TEST_INVOCATIONS_PER_ATTEMPT = 3;
+
     /** runtime v2 唯一权威仓储。 */
     private final WorkflowRuntimeRepository runtimeRepository;
 
@@ -281,6 +284,77 @@ public final class WorkCompletionCoordinator {
                             .start(command.dispatchId(), command.agentSessionId(), now);
                     return new WorkflowRuntimeRepository.WorkflowCommandMutation(
                             current.replaceExecution(running, now), "RUNNING", running.executionId()
+                    );
+                }
+        );
+        return requireExecution(receipt.state(), receipt.command().resultReference());
+    }
+
+    /**
+     * 在同一 runtime command 中完成恢复重试、assignment 领取与 dispatch 启动。
+     *
+     * <p>该入口避免 claim command 命中历史幂等 receipt 后，独立 start command 仍在
+     * RECOVERING 状态上执行的部分成功窗口。</p>
+     *
+     * @param command 原子领取并启动命令
+     * @return 已进入 RUNNING 的工作执行
+     */
+    public WorkExecution claimAndStartWorkItem(ClaimAndStartWorkItemCommand command) {
+        Objects.requireNonNull(command, "command 不能为空");
+        requireText(command.projectId(), "projectId");
+        requireText(command.executionId(), "executionId");
+        requireText(command.assignmentId(), "assignmentId");
+        requireText(command.dispatchId(), "dispatchId");
+        requireText(command.agentSessionId(), "agentSessionId");
+        WorkflowRuntimeRepository.WorkflowCommandReceipt receipt = runtimeRepository.execute(
+                command.projectId(), Objects.requireNonNull(command.commandId(), "commandId 不能为空"),
+                current -> {
+                    Instant now = monotonicNow(current);
+                    WorkExecution execution = requireExecution(current, command.executionId());
+                    WorkExecution claimable = execution.status() == WorkExecutionStatus.RECOVERING
+                            ? execution.retry(now)
+                            : execution;
+                    WorkExecution claimed = claimable.claim(command.assignmentId(), now);
+                    WorkExecution running = claimed.start(
+                            command.dispatchId(), command.agentSessionId(), now
+                    );
+                    return new WorkflowRuntimeRepository.WorkflowCommandMutation(
+                            current.replaceExecution(running, now), "RUNNING", running.executionId()
+                    );
+                }
+        );
+        return requireExecution(receipt.state(), receipt.command().resultReference());
+    }
+
+    /**
+     * 在 Test Runner 启动前绑定最新 execution，并原子校验当前 attempt 的调用上限。
+     *
+     * @param command 测试启动命令
+     * @return 已绑定最新测试 execution 的工作执行
+     */
+    public WorkExecution beginTestExecution(BeginTestExecutionCommand command) {
+        Objects.requireNonNull(command, "command 不能为空");
+        requireText(command.projectId(), "projectId");
+        requireText(command.owner(), "owner");
+        Objects.requireNonNull(command.stage(), "stage 不能为空");
+        requireText(command.testExecutionId(), "testExecutionId");
+        WorkflowRuntimeRepository.WorkflowCommandReceipt receipt = runtimeRepository.execute(
+                command.projectId(), Objects.requireNonNull(command.commandId(), "commandId 不能为空"),
+                current -> {
+                    Instant now = monotonicNow(current);
+                    WorkExecution execution = current.executions().stream()
+                            .filter(candidate -> !candidate.status().terminal())
+                            .filter(candidate -> candidate.owner().equals(command.owner()))
+                            .filter(candidate -> candidate.stage() == command.stage())
+                            .findFirst()
+                            .orElseThrow(() -> new IllegalStateException(
+                                    "Test Runner 未命中当前 Owner 和阶段的开放 WorkExecution"
+                            ));
+                    WorkExecution linked = execution.beginTestExecution(
+                            command.testExecutionId(), MAX_TEST_INVOCATIONS_PER_ATTEMPT, now
+                    );
+                    return new WorkflowRuntimeRepository.WorkflowCommandMutation(
+                            current.replaceExecution(linked, now), "TEST_STARTED", linked.executionId()
                     );
                 }
         );
@@ -590,6 +664,9 @@ public final class WorkCompletionCoordinator {
         if (command.testExecutionId().isBlank()) {
             throw new IllegalStateException("当前阶段完成必须引用真实 testExecutionId");
         }
+        if (!command.testExecutionId().equals(execution.testExecutionId())) {
+            throw new IllegalStateException("当前阶段完成必须引用最新 Test Runner execution");
+        }
         ProjectTestEvidence evidence = testEvidenceRepository.find(
                         execution.projectId(), execution.owner(), execution.stage(), command.testExecutionId()
                 )
@@ -599,7 +676,7 @@ public final class WorkCompletionCoordinator {
         if (!evidence.status().terminal()) {
             throw new IllegalStateException("Test Runner 尚未终态");
         }
-        WorkExecution linked = execution.linkTestExecution(evidence.executionId(), now).recordProgress(now);
+        WorkExecution linked = execution.recordProgress(now);
         if (evidence.status() == ProjectTestEvidenceStatus.INFRASTRUCTURE_FAILED
                 || evidence.status() == ProjectTestEvidenceStatus.TIMED_OUT
                 || evidence.status() == ProjectTestEvidenceStatus.CANCELLED) {
